@@ -1,0 +1,179 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── Top bar ─────────────────────────────────── */
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.title {
+  font-family: var(--font-pixel);
+  font-size: 12px;
+  color: var(--deep);
+}
+
+.meta {
+  font-family: var(--font-body);
+  font-size: 16px;
+  color: var(--rose);
+}
+
+/* ── Controls ────────────────────────────────── */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filterGroup {
+  display: flex;
+  gap: 6px;
+}
+
+.filterBtn {
+  font-family: var(--font-pixel);
+  font-size: 8px;
+  padding: 8px 12px;
+  border: var(--border-pixel);
+  background: var(--mint);
+  color: var(--deep);
+  cursor: pointer;
+  border-radius: 0;
+  text-transform: uppercase;
+  transition: background 0.05s;
+}
+
+.filterBtn:hover {
+  background: var(--teal);
+}
+
+.filterBtnActive {
+  background: var(--teal);
+  box-shadow: var(--shadow-pixel);
+}
+
+.sortSelect {
+  font-family: var(--font-pixel);
+  font-size: 8px;
+  padding: 8px 10px;
+  border: var(--border-pixel);
+  background: var(--mint);
+  color: var(--deep);
+  cursor: pointer;
+  border-radius: 0;
+  outline: none;
+}
+
+/* ── Status badge ────────────────────────────── */
+.statusBadge {
+  font-family: var(--font-body);
+  font-size: 15px;
+  padding: 4px 10px;
+  border: 2px solid var(--deep);
+}
+
+.statusRunning { background: var(--teal); }
+.statusDone    { background: var(--mint); }
+.statusError   { background: var(--salmon); }
+.statusNever   { background: #eee; }
+
+/* ── Table ───────────────────────────────────── */
+.tableWrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-body);
+  font-size: 18px;
+}
+
+.table th {
+  font-family: var(--font-pixel);
+  font-size: 7px;
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: var(--border-pixel);
+  white-space: nowrap;
+  background: var(--teal);
+  color: var(--deep);
+  cursor: pointer;
+  user-select: none;
+}
+
+.table th:hover {
+  background: var(--salmon);
+}
+
+.table th.active {
+  background: var(--rose);
+  color: var(--mint);
+}
+
+.table td {
+  padding: 8px 8px;
+  border-bottom: 2px solid var(--teal);
+  vertical-align: middle;
+}
+
+.table tr:hover td {
+  background: rgba(147, 225, 216, 0.25);
+}
+
+.rank {
+  font-family: var(--font-pixel);
+  font-size: 8px;
+  color: var(--rose);
+}
+
+.address {
+  font-family: var(--font-body);
+  font-size: 16px;
+  color: var(--deep);
+}
+
+.username {
+  font-family: var(--font-pixel);
+  font-size: 7px;
+  color: var(--rose);
+  display: block;
+}
+
+.positive { color: #1a7a4a; }
+.negative { color: var(--rose); }
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 14px;
+  border: 2px solid var(--deep);
+}
+
+.pillPolitics { background: #d4e8ff; }
+.pillFinance  { background: #fff3d4; }
+
+/* ── Empty / loading states ──────────────────── */
+.empty {
+  text-align: center;
+  padding: 60px 0;
+  font-family: var(--font-pixel);
+  font-size: 9px;
+  color: var(--rose);
+}
+
+.errorMsg {
+  padding: 20px;
+  background: var(--salmon);
+  border: var(--border-pixel);
+  font-family: var(--font-pixel);
+  font-size: 9px;
+}

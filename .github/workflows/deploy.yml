@@ -2,7 +2,7 @@ name: Deploy to VPS
 
 on:
   push:
-    branches: [main]
+    branches: [deploy]
 
 jobs:
   deploy:
@@ -19,7 +19,24 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd ${{ secrets.VPS_APP_PATH }}
-            git pull origin main
-            docker compose pull
+            git pull origin deploy
+
+            cat > backend/.env << 'ENVEOF'
+            CORS_ORIGINS=${{ secrets.CORS_ORIGINS }}
+            GAMMA_API_URL=https://gamma-api.polymarket.com
+            CLOB_API_URL=https://clob.polymarket.com
+            DATA_API_URL=https://data-api.polymarket.com
+            DATABASE_URL=postgresql+asyncpg://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+            POSTGRES_SCHEMA=${{ secrets.POSTGRES_SCHEMA }}
+            REDIS_URL=redis://:${{ secrets.REDIS_PASSWORD }}@redis:6379/0
+            REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+            POLYMARKET_API_KEY=${{ secrets.POLYMARKET_API_KEY }}
+            SCHEDULER_INTERVAL_HOURS=6
+            LEADERBOARD_LIMIT=100
+            ENVEOF
+
             docker compose up -d --build
             docker system prune -f
