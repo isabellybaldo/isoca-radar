@@ -1,0 +1,31 @@
+.header {
+  background: var(--deep);
+  color: var(--mint);
+  padding: 18px 24px;
+  text-align: center;
+  border-bottom: 4px solid var(--rose);
+}
+
+.logo {
+  font-family: var(--font-pixel);
+  font-size: 14px;
+  color: var(--mint);
+  text-decoration: none;
+  letter-spacing: 2px;
+  display: inline-block;
+}
+.logo:hover { color: var(--salmon); }
+
+.star {
+  color: var(--salmon);
+  margin: 0 8px;
+  font-size: 12px;
+}
+
+.sub {
+  font-family: var(--font-body);
+  font-size: 18px;
+  color: var(--teal);
+  margin-top: 4px;
+  letter-spacing: 3px;
+}

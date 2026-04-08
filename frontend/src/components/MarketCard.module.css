@@ -1,0 +1,49 @@
+.card {
+  display: flex;
+  flex-direction: column;
+  background: white;
+  text-decoration: none;
+  color: var(--deep);
+  transition: transform 0.08s, box-shadow 0.08s;
+  overflow: hidden;
+}
+.card:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 var(--deep);
+  color: var(--deep);
+}
+
+.thumb {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  border-bottom: 3px solid var(--deep);
+  image-rendering: auto;
+}
+
+.body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+
+.question {
+  font-family: var(--font-body);
+  font-size: 19px;
+  line-height: 1.3;
+  color: var(--deep);
+  flex: 1;
+}
+
+.meta {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-pixel);
+  font-size: 7px;
+  color: var(--rose);
+}
+
+.vol  { color: var(--rose); }
+.end  { color: var(--teal); filter: brightness(0.7); }

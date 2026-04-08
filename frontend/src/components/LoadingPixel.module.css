@@ -1,0 +1,32 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 48px;
+}
+
+.blocks {
+  display: flex;
+  gap: 6px;
+}
+
+.block {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  background: var(--rose);
+  animation: blink 0.8s step-start infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+.text {
+  font-family: var(--font-pixel);
+  font-size: 9px;
+  color: var(--rose);
+  letter-spacing: 2px;
+}

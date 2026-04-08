@@ -1,0 +1,64 @@
+/* ─── Palette ─────────────────────────────────────────────── */
+:root {
+  --mint:   #ddfff7;
+  --teal:   #93e1d8;
+  --salmon: #ffa69e;
+  --rose:   #aa4465;
+  --deep:   #861657;
+
+  --font-pixel: 'Press Start 2P', monospace;
+  --font-body:  'VT323', monospace;
+
+  --shadow-pixel: 4px 4px 0 var(--deep);
+  --border-pixel: 3px solid var(--deep);
+}
+
+/* ─── Reset ───────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--mint);
+  color: var(--deep);
+  font-family: var(--font-body);
+  font-size: 20px;
+  min-height: 100vh;
+  image-rendering: pixelated;
+}
+
+#root { min-height: 100vh; display: flex; flex-direction: column; }
+
+/* ─── Pixel utilities ─────────────────────────────────────── */
+.pixel-box {
+  border: var(--border-pixel);
+  box-shadow: var(--shadow-pixel);
+  border-radius: 0;
+}
+
+.pixel-btn {
+  font-family: var(--font-pixel);
+  font-size: 9px;
+  background: var(--teal);
+  color: var(--deep);
+  border: var(--border-pixel);
+  box-shadow: var(--shadow-pixel);
+  padding: 10px 16px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: box-shadow 0.05s, transform 0.05s;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.pixel-btn:hover  { background: var(--salmon); }
+.pixel-btn:active { box-shadow: 1px 1px 0 var(--deep); transform: translate(3px, 3px); }
+.pixel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pixel-btn--rose {
+  background: var(--rose);
+  color: var(--mint);
+}
+.pixel-btn--rose:hover { background: var(--deep); }
+
+/* ─── Typography ──────────────────────────────────────────── */
+h1, h2 { font-family: var(--font-pixel); }
+a { color: var(--deep); text-decoration: none; }
+a:hover { color: var(--rose); }
