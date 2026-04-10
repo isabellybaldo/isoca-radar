@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache
 from app.db import get_db
+from app.limiter import limiter
 from app.models.trader import FetchLog, Trader
 
 router = APIRouter()
@@ -21,7 +22,9 @@ VALID_SORT_FIELDS = {
 
 
 @router.get("/traders")
+@limiter.limit("30/minute")
 async def list_traders(
+    request: Request,
     category: str | None = Query(None, description="Filter: politics | finance"),
     sort_by: str = Query("total_profit_usd", description="Field to sort by"),
     limit: int = Query(100, le=200),
@@ -76,7 +79,8 @@ async def list_traders(
 
 
 @router.get("/traders/status")
-async def fetch_status(db: AsyncSession = Depends(get_db)):
+@limiter.limit("30/minute")
+async def fetch_status(request: Request, db: AsyncSession = Depends(get_db)):
     """Return the most recent fetch log entry so the UI can show 'last updated'."""
     stmt = select(FetchLog).order_by(desc(FetchLog.id)).limit(1)
     result = await db.execute(stmt)

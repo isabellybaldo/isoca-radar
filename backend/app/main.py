@@ -4,10 +4,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
 
 from app import cache
 from app import db as database
 from app.config import settings
+from app.limiter import limiter
 from app.routers import markets, prices, traders
 from app.services import gamma_client, clob_client, data_api_client
 from app.services.trader_discovery import scheduler_loop
@@ -70,12 +73,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Cute Trading API", lifespan=lifespan)
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=["Content-Type", "Accept"],
 )
 
 app.include_router(markets.router, prefix="/api")

@@ -1,16 +1,23 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
+from app.limiter import limiter
 from app.services import gamma_client, clob_client
 
 router = APIRouter()
 
 
 @router.get("/markets")
-async def list_markets(limit: int = 20, offset: int = 0):
+@limiter.limit("60/minute")
+async def list_markets(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
     return await gamma_client.list_markets(limit=limit, offset=offset)
 
 
 @router.get("/markets/{slug}")
-async def get_market(slug: str):
+@limiter.limit("60/minute")
+async def get_market(request: Request, slug: str):
     market = await gamma_client.get_market(slug)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")

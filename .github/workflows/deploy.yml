@@ -11,6 +11,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate required secrets
+        run: |
+          MISSING=()
+          [[ -z "$POSTGRES_PASSWORD" ]] && MISSING+=("POSTGRES_PASSWORD")
+          [[ -z "$REDIS_PASSWORD" ]] && MISSING+=("REDIS_PASSWORD")
+          [[ -z "$POSTGRES_USER" ]] && MISSING+=("POSTGRES_USER")
+          [[ -z "$POSTGRES_DB" ]] && MISSING+=("POSTGRES_DB")
+          if [[ ${#MISSING[@]} -gt 0 ]]; then
+            echo "ERROR: Missing required secrets: ${MISSING[*]}"
+            exit 1
+          fi
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
