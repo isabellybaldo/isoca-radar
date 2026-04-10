@@ -16,9 +16,15 @@ async def startup():
     """Create schema (if needed) and all tables on startup."""
     # Import models so Base picks them up before create_all
     from app.models import trader  # noqa: F401
+    schema = settings.postgres_schema
     async with engine.begin() as conn:
-        await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{settings.postgres_schema}"'))
+        await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
         await conn.run_sync(Base.metadata.create_all)
+        # Make nullable columns that may have been created NOT NULL in older runs.
+        for col in ("win_rate", "consistency_score"):
+            await conn.execute(text(
+                f'ALTER TABLE "{schema}".traders ALTER COLUMN {col} DROP NOT NULL'
+            ))
 
 
 async def shutdown():

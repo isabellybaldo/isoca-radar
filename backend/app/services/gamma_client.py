@@ -61,21 +61,46 @@ def _parse_market(m: dict) -> dict:
         "image": m.get("image"),
         "icon": m.get("icon"),
         "conditionId": m.get("conditionId"),
+        "tags": [t.get("slug") for t in m.get("tags", [])],
     }
 
 
+TARGET_TAGS = ["politics", "finance"]
+
+
+async def _fetch_markets_for_tag(tag: str, limit: int) -> list[dict]:
+    resp = await _client.get(
+        "/events",
+        params={"limit": limit, "tag_slug": tag, "closed": "false", "active": "true"},
+    )
+    resp.raise_for_status()
+    markets = []
+    for event in resp.json():
+        event_tags = event.get("tags", [])
+        for m in event.get("markets", []):
+            if not m.get("closed") and m.get("active", True):
+                m_with_tags = {**m, "tags": event_tags}
+                markets.append(_parse_market(m_with_tags))
+    return markets
+
+
 async def list_markets(limit: int = 20, offset: int = 0) -> list[dict]:
-    cache_key = f"markets:{limit}:{offset}"
+    cache_key = f"markets:tagged:{limit}:{offset}"
     cached = _get_cache(cache_key)
     if cached:
         return cached
 
-    resp = await _client.get("/markets", params={"limit": limit, "offset": offset, "closed": "false", "active": "true"})
-    resp.raise_for_status()
-    data = resp.json()
-    markets = [_parse_market(m) for m in data]
-    _cached(cache_key, markets)
-    return markets
+    seen_ids: set = set()
+    all_markets: list[dict] = []
+    for tag in TARGET_TAGS:
+        for m in await _fetch_markets_for_tag(tag, limit):
+            if m["id"] not in seen_ids:
+                seen_ids.add(m["id"])
+                all_markets.append(m)
+
+    page = all_markets[offset: offset + limit]
+    _cached(cache_key, page)
+    return page
 
 
 async def get_market(slug: str) -> dict | None:

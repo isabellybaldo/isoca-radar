@@ -39,37 +39,52 @@ def _compute_metrics(
     politics_volume = 0.0
     finance_bets = 0
     finance_volume = 0.0
-    resolved_bets = 0
-    wins = 0
+    num_bets = 0
+    # Per-market tracking for win rate: {market_key: {has_buy, has_win}}
+    markets: dict = {}
 
     for t in trades:
         vol = t["volume_usd"]
-        total_volume += vol
         cat = t["category"]
+        key = t.get("market_key") or "__unknown__"
 
-        if cat == "politics":
-            politics_bets += 1
-            politics_volume += vol
-        elif cat == "finance":
-            finance_bets += 1
-            finance_volume += vol
+        if key not in markets:
+            markets[key] = {"has_buy": False, "has_win": False}
 
-        if t["won"] is not None:
-            resolved_bets += 1
-            if t["won"]:
-                wins += 1
+        if t["is_bet"]:
+            total_volume += vol
+            num_bets += 1
+            markets[key]["has_buy"] = True
+            if cat == "politics":
+                politics_bets += 1
+                politics_volume += vol
+            elif cat == "finance":
+                finance_bets += 1
+                finance_volume += vol
+        elif t["is_win"]:
+            markets[key]["has_win"] = True
 
-    num_bets = len(trades)
     profit = leaderboard_entry["profit_usd"]
-    # Use leaderboard volume if our computed volume is 0 (activity may be paginated)
-    effective_volume = total_volume or leaderboard_entry["volume_usd"] or 1
+    # Leaderboard volume is the authoritative all-time figure; fall back to the
+    # windowed activity total only when the leaderboard doesn't report it.
+    effective_volume = leaderboard_entry["volume_usd"] or total_volume or 1
     roi = profit / effective_volume if effective_volume else 0.0
-    win_rate = wins / resolved_bets if resolved_bets else 0.0
-    avg_position = effective_volume / num_bets if num_bets else 0.0
 
-    # Consistency: ratio of profitable categories to total relevant bets
-    # Simple proxy: win_rate weighted by bet count
-    consistency_score = win_rate  # can be refined later
+    # Win rate: per-market (markets won / markets where we observed a BUY).
+    # Only count markets where we saw the BUY side — we can't count pure-REDEEM
+    # entries because those may be from bets placed outside the activity window.
+    # Open/unresolved positions look like losses (no REDEEM yet), so this
+    # understates true win rate slightly — that's intentional and honest.
+    # Require at least 5 observable markets to avoid noise.
+    markets_with_buy = sum(1 for m in markets.values() if m["has_buy"])
+    markets_won = sum(1 for m in markets.values() if m["has_buy"] and m["has_win"])
+    _MIN_MARKETS = 5
+    win_rate = (markets_won / markets_with_buy) if markets_with_buy >= _MIN_MARKETS else None
+
+    # Avg position: use windowed volume / windowed bet count (same scope).
+    avg_position = total_volume / num_bets if num_bets else 0.0
+
+    consistency_score = win_rate  # mirrors win_rate for now; refine later
 
     return {
         "total_profit_usd": profit,

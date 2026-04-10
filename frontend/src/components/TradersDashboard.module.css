@@ -88,26 +88,53 @@
 /* ── Table ───────────────────────────────────── */
 .tableWrap {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .table {
+  min-width: 1600px;
   width: 100%;
   border-collapse: collapse;
   font-family: var(--font-body);
-  font-size: 18px;
+  font-size: 14px;
 }
 
 .table th {
   font-family: var(--font-pixel);
-  font-size: 7px;
+  font-size: 8px;
   text-align: left;
-  padding: 10px 8px;
+  padding: 14px 14px;
   border-bottom: var(--border-pixel);
   white-space: nowrap;
   background: var(--teal);
   color: var(--deep);
   cursor: pointer;
   user-select: none;
+  position: relative;
+}
+
+/* ── Column tooltips ─────────────────────────── */
+.tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--deep);
+  color: var(--mint);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.4;
+  padding: 8px 12px;
+  white-space: normal;
+  width: 220px;
+  border: 2px solid var(--rose);
+  z-index: 100;
+  pointer-events: none;
+}
+
+.table th:hover .tooltip {
+  display: block;
 }
 
 .table th:hover {
@@ -120,7 +147,7 @@
 }
 
 .table td {
-  padding: 8px 8px;
+  padding: 12px 14px;
   border-bottom: 2px solid var(--teal);
   vertical-align: middle;
 }
@@ -131,13 +158,13 @@
 
 .rank {
   font-family: var(--font-pixel);
-  font-size: 8px;
+  font-size: 9px;
   color: var(--rose);
 }
 
 .address {
   font-family: var(--font-body);
-  font-size: 16px;
+  font-size: 14px;
   color: var(--deep);
 }
 
@@ -154,7 +181,7 @@
 .pill {
   display: inline-block;
   padding: 2px 8px;
-  font-size: 14px;
+  font-size: 13px;
   border: 2px solid var(--deep);
 }
 

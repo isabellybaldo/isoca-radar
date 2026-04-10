@@ -12,31 +12,48 @@ from app.routers import markets, prices, traders
 from app.services import gamma_client, clob_client, data_api_client
 from app.services.trader_discovery import scheduler_loop
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(name)s — %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 _scheduler_task: asyncio.Task | None = None
 
 
+async def _optional_services_startup() -> None:
+    """Connect to PostgreSQL and Redis in the background.
+
+    Runs as a fire-and-forget task so a missing DB/Redis never blocks the
+    lifespan from completing and the markets page always works immediately.
+    """
+    global _scheduler_task
+    try:
+        await database.startup()
+    except Exception as e:
+        logger.warning(f"Database unavailable — traders features disabled: {e}")
+        return
+    try:
+        await cache.startup()
+    except Exception as e:
+        logger.warning(f"Redis unavailable — caching disabled: {e}")
+
+    _scheduler_task = asyncio.create_task(scheduler_loop())
+    logger.info("Background scheduler started")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scheduler_task
-
-    # Existing clients
+    # Fast HTTP clients — these never block
     await gamma_client.startup()
     await clob_client.startup()
-
-    # New services
     await data_api_client.startup()
-    await database.startup()
-    await cache.startup()
 
-    # Start background discovery loop
-    _scheduler_task = asyncio.create_task(scheduler_loop())
-    logger.info("Background scheduler task created")
+    # DB + Redis in background so a cold/missing Postgres never stalls startup
+    asyncio.create_task(_optional_services_startup())
 
     yield
 
-    # Shutdown
     if _scheduler_task:
         _scheduler_task.cancel()
         try:

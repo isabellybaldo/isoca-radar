@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     postgres_schema: str = "cute_trading"
 
     polymarket_api_key: str = ""
+    polymarket_private_key: str = ""
+    clob_api_key: str = ""
+    clob_secret: str = ""
+    clob_passphrase: str = ""
     scheduler_interval_hours: int = 6
     leaderboard_limit: int = 100
 

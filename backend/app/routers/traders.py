@@ -56,14 +56,14 @@ async def list_traders(
             "total_profit_usd": t.total_profit_usd,
             "total_volume_usd": t.total_volume_usd,
             "num_bets": t.num_bets,
-            "win_rate": round(t.win_rate * 100, 1),
+            "win_rate": round(t.win_rate * 100, 1) if t.win_rate is not None else None,
             "roi": round(t.roi * 100, 2),
             "avg_position_usd": round(t.avg_position_usd, 2),
             "politics_bets": t.politics_bets,
             "politics_volume_usd": round(t.politics_volume_usd, 2),
             "finance_bets": t.finance_bets,
             "finance_volume_usd": round(t.finance_volume_usd, 2),
-            "consistency_score": round(t.consistency_score * 100, 1),
+            "consistency_score": round(t.consistency_score * 100, 1) if t.consistency_score is not None else None,
             "last_updated": t.last_updated.isoformat() if t.last_updated else None,
         }
         for t in traders

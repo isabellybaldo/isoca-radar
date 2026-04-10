@@ -34,6 +34,10 @@ jobs:
             REDIS_URL=redis://:${{ secrets.REDIS_PASSWORD }}@redis:6379/0
             REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
             POLYMARKET_API_KEY=${{ secrets.POLYMARKET_API_KEY }}
+            POLYMARKET_PRIVATE_KEY=${{ secrets.POLYMARKET_PRIVATE_KEY }}
+            CLOB_API_KEY=${{ secrets.CLOB_API_KEY }}
+            CLOB_SECRET=${{ secrets.CLOB_SECRET }}
+            CLOB_PASSPHRASE=${{ secrets.CLOB_PASSPHRASE }}
             SCHEDULER_INTERVAL_HOURS=6
             LEADERBOARD_LIMIT=100
             ENVEOF

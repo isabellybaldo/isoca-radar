@@ -82,57 +82,95 @@ def _normalize_category(raw: str | None) -> str | None:
 
 def _parse_ranking(item: dict) -> dict | None:
     """Normalise a single leaderboard entry."""
-    # Polymarket may use proxyWallet or address field
     address = item.get("proxyWallet") or item.get("address") or item.get("wallet")
     if not address:
         return None
     return {
         "address": address.lower(),
-        "username": item.get("name") or item.get("username"),
-        "profit_usd": float(item.get("profit") or item.get("pnl") or 0),
-        "volume_usd": float(item.get("volume") or 0),
+        "username": item.get("userName") or item.get("name") or item.get("username"),
+        "profit_usd": float(item.get("pnl") or item.get("profit") or 0),
+        "volume_usd": float(item.get("vol") or item.get("volume") or 0),
     }
 
 
 def _parse_trade(item: dict) -> dict | None:
-    """Normalise a single activity/trade entry."""
-    market = item.get("market") or {}
-    # category may be top-level or nested in market
-    raw_category = (
-        item.get("category")
-        or market.get("category")
-        or market.get("groupItemTagged")
-        or ""
-    )
-    category = _normalize_category(raw_category)
+    """Normalise a single activity entry.
 
-    size = float(item.get("size") or item.get("amount") or 0)
-    price = float(item.get("price") or 0)
-    volume = size * price if price else size
+    The /activity endpoint has no resolved-outcome field.
+    We infer wins from REDEEM transactions: a REDEEM means the trader
+    held the winning side of a resolved market.
+    """
+    trade_type = item.get("type", "").upper()
+    side = item.get("side", "").upper()
 
-    outcome = item.get("outcome") or item.get("side") or ""
-    won = item.get("won")  # None means unresolved
+    # Only care about BUY trades and REDEEMs
+    is_bet = trade_type == "TRADE" and side == "BUY"
+    is_win = trade_type == "REDEEM"
+    if not is_bet and not is_win:
+        return None
+
+    # Volume: usdcSize is the USD notional; fallback to size * price
+    usd_size = float(item.get("usdcSize") or 0)
+    if not usd_size:
+        size = float(item.get("size") or 0)
+        price = float(item.get("price") or 0)
+        usd_size = size * price if price else size
+
+    # Category from market title heuristics (activity has no explicit category field)
+    title = (item.get("title") or item.get("name") or "").lower()
+    category = None
+    if any(tag in title for tag in POLITICS_TAGS):
+        category = "politics"
+    elif any(tag in title for tag in FINANCE_TAGS):
+        category = "finance"
+
+    # Market identifier for per-market win-rate tracking.
+    # conditionId is the stable Polymarket condition identifier; title is the fallback.
+    market_key = item.get("conditionId") or title or None
 
     return {
+        "market_key": market_key,
         "category": category,
-        "volume_usd": volume,
-        "won": won,  # True/False/None
+        "volume_usd": usd_size,
+        "is_bet": is_bet,
+        "is_win": is_win,
     }
 
 
 async def fetch_leaderboard(limit: int = 100) -> list[dict]:
-    """Return list of normalised trader dicts from the all-time leaderboard."""
-    data = await _get("/rankings", params={"window": "all", "limit": limit})
-    if not data:
-        return []
-    if isinstance(data, dict):
-        # Some APIs wrap results: {"data": [...]}
-        data = data.get("data") or data.get("rankings") or []
+    """Return list of normalised trader dicts from the all-time leaderboard.
+
+    The /v1/leaderboard endpoint caps at 50 per page, so we paginate.
+    """
     results = []
-    for item in data:
-        parsed = _parse_ranking(item)
-        if parsed:
-            results.append(parsed)
+    page_size = 50  # API max
+    offset = 0
+
+    while len(results) < limit:
+        batch_limit = min(page_size, limit - len(results))
+        data = await _get(
+            "/v1/leaderboard",
+            params={
+                "timePeriod": "ALL",
+                "orderBy": "PNL",
+                "limit": batch_limit,
+                "offset": offset,
+            },
+        )
+        if not data:
+            break
+        if isinstance(data, dict):
+            data = data.get("data") or data.get("rankings") or []
+        if not data:
+            break
+        for item in data:
+            parsed = _parse_ranking(item)
+            if parsed:
+                results.append(parsed)
+        if len(data) < batch_limit:
+            break  # last page
+        offset += batch_limit
+
     logger.info(f"Fetched {len(results)} traders from leaderboard")
     return results
 

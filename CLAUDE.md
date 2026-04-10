@@ -7,10 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Backend (run from `backend/`)
 ```bash
 # Start dev server (auto-reload)
-cd backend && ../venv/Scripts/uvicorn app.main:app --reload --port 8000
+cd backend && ../venv/Scripts/uvicorn app.main:app --reload --port 8001
 
 # On Linux/Mac
-cd backend && ../venv/bin/uvicorn app.main:app --reload --port 8000
+cd backend && ../venv/bin/uvicorn app.main:app --reload --port 8001
 ```
 
 ### Frontend (run from `frontend/`)
@@ -32,7 +32,7 @@ docker compose down
 
 **Request flow:**
 ```
-Browser → Vite dev proxy (/api/*) → FastAPI :8000
+Browser → Vite dev proxy (/api/*) → FastAPI :8001
                                          ├── gamma_client → gamma-api.polymarket.com
                                          └── clob_client  → clob.polymarket.com
 ```

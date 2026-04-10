@@ -22,7 +22,10 @@ export function useTraders({ category = null, sortBy = 'total_profit_usd' } = {}
       setTraders(tradersRes.traders ?? [])
       setStatus(statusRes)
     } catch (err) {
-      setError(err?.response?.data?.detail ?? 'Failed to load traders')
+      const detail = err?.response?.data?.detail
+      const msg = detail
+        ?? (err?.code === 'ECONNABORTED' || err?.message?.includes('timeout') ? 'Backend unavailable' : 'Failed to load traders')
+      setError(msg)
     } finally {
       setLoading(false)
     }

@@ -16,7 +16,7 @@ class Trader(Base):
     total_profit_usd = Column(Float, default=0.0)
     total_volume_usd = Column(Float, default=0.0)
     num_bets = Column(Integer, default=0)
-    win_rate = Column(Float, default=0.0)       # 0-1
+    win_rate = Column(Float, nullable=True, default=None)  # 0-1, None = insufficient data
     roi = Column(Float, default=0.0)             # profit/volume, can be negative
     avg_position_usd = Column(Float, default=0.0)
 
@@ -27,7 +27,7 @@ class Trader(Base):
     finance_volume_usd = Column(Float, default=0.0)
 
     # Consistency: fraction of weekly windows where trader was profitable
-    consistency_score = Column(Float, default=0.0)  # 0-1
+    consistency_score = Column(Float, nullable=True, default=None)  # 0-1, None = insufficient data
 
     first_seen = Column(DateTime(timezone=True), server_default=func.now())
     last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

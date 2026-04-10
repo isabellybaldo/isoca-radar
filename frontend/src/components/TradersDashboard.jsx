@@ -12,6 +12,20 @@ const SORT_OPTIONS = [
   { value: 'consistency_score', label: 'Consistency' },
 ]
 
+const COLUMNS = [
+  { key: null,               label: '#',           tip: null },
+  { key: null,               label: 'Trader',      tip: null },
+  { key: 'total_profit_usd', label: 'Profit',      tip: 'Total USD profit across all resolved markets (from Polymarket leaderboard)' },
+  { key: 'roi',              label: 'ROI',         tip: 'Return on investment: profit ÷ total volume traded' },
+  { key: 'win_rate',         label: 'Win Rate',    tip: 'Winning bets ÷ total bets placed (REDEEM txns ÷ BUY txns — excludes still-open positions)' },
+  { key: 'num_bets',         label: '# Bets',      tip: 'Number of buy-side trades placed' },
+  { key: 'total_volume_usd', label: 'Volume',      tip: 'Total USDC traded across all markets' },
+  { key: null,               label: 'Avg Pos',     tip: 'Average position size: total volume ÷ number of bets' },
+  { key: 'consistency_score',label: 'Consistency', tip: 'Proxy for sustained profitability — currently mirrors win rate; will refine to week-by-week windows' },
+  { key: null,               label: 'Politics',    tip: 'Number of bets placed in politics markets' },
+  { key: null,               label: 'Finance',     tip: 'Number of bets placed in finance/crypto markets' },
+]
+
 const FILTERS = [
   { value: null, label: 'All' },
   { value: 'politics', label: 'Politics' },
@@ -132,35 +146,19 @@ export default function TradersDashboard() {
           <table className={styles.table}>
             <thead>
               <tr>
-                <th>#</th>
-                <th>Trader</th>
-                <th
-                  className={sortBy === 'total_profit_usd' ? styles.active : ''}
-                  onClick={() => setSortBy('total_profit_usd')}
-                >Profit ▾</th>
-                <th
-                  className={sortBy === 'roi' ? styles.active : ''}
-                  onClick={() => setSortBy('roi')}
-                >ROI ▾</th>
-                <th
-                  className={sortBy === 'win_rate' ? styles.active : ''}
-                  onClick={() => setSortBy('win_rate')}
-                >Win Rate ▾</th>
-                <th
-                  className={sortBy === 'num_bets' ? styles.active : ''}
-                  onClick={() => setSortBy('num_bets')}
-                ># Bets ▾</th>
-                <th
-                  className={sortBy === 'total_volume_usd' ? styles.active : ''}
-                  onClick={() => setSortBy('total_volume_usd')}
-                >Volume ▾</th>
-                <th>Avg Pos</th>
-                <th
-                  className={sortBy === 'consistency_score' ? styles.active : ''}
-                  onClick={() => setSortBy('consistency_score')}
-                >Consistency ▾</th>
-                <th>Politics</th>
-                <th>Finance</th>
+                {COLUMNS.map(col => (
+                  <th
+                    key={col.label}
+                    className={col.key && sortBy === col.key ? styles.active : ''}
+                    onClick={col.key ? () => setSortBy(col.key) : undefined}
+                    style={!col.key ? { cursor: 'default' } : undefined}
+                  >
+                    {col.key && sortBy === col.key ? `${col.label} ▾` : col.label}
+                    {col.tip && (
+                      <span className={styles.tooltip}>{col.tip}</span>
+                    )}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
