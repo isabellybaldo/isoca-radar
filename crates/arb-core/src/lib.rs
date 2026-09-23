@@ -4,4 +4,5 @@
 
 pub mod book;
 pub mod fee;
+pub mod fill;
 pub mod money;
