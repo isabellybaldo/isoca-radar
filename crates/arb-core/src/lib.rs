@@ -4,6 +4,7 @@
 
 pub mod book;
 pub mod detect;
+pub mod episode;
 pub mod fee;
 pub mod fill;
 pub mod money;
