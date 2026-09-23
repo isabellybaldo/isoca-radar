@@ -168,6 +168,24 @@ fn l10_implication_edge() {
     assert_eq!(s.quote.pnl, dec!(5));
 }
 
+#[test]
+fn implication_requires_both_legs_live() {
+    let a = live("0.60", "0.62");
+    let mut b = live("0.53", "0.55");
+    assert!(detect_implication(&a, &b).is_some());
+    for status in [
+        LegStatus::ClosedYes,
+        LegStatus::ClosedNo,
+        LegStatus::Placeholder,
+        LegStatus::Other,
+        LegStatus::Halted,
+    ] {
+        b.status = status;
+        assert!(detect_implication(&a, &b).is_none(), "{status:?}");
+        assert!(detect_implication(&b, &a).is_none(), "{status:?} as A");
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 

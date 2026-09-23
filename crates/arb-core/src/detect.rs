@@ -160,8 +160,11 @@ pub fn detect_no_basket(g: &Group) -> Option<Signal> {
     })
 }
 
-/// D3 (L10): for a curated pair where A ⇒ B, buy NO_A + YES_B.
+/// D3 (L10): for a curated pair where A ⇒ B, buy NO_A + YES_B. Both legs must be live.
 pub fn detect_implication(a: &GroupLeg, b: &GroupLeg) -> Option<Signal> {
+    if a.status != LegStatus::Live || b.status != LegStatus::Live {
+        return None;
+    }
     let legs = vec![
         BuyLeg {
             levels: a.book.no_asks_best_first(),
