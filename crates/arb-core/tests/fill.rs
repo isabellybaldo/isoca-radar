@@ -125,9 +125,10 @@ fn unit_leg(asks: &[u32], fee: FeeSchedule) -> BuyLeg {
     }
 }
 
-/// L9 reference: unit-by-unit, stop at the first unit whose exact marginal is ≤ 0.
+/// L9 reference: exhaustive over the number of baskets K (max prefix sum), no early stop.
 fn brute_all(legs: &[BuyLeg]) -> Decimal {
     let depth = legs.iter().map(|l| l.levels.len()).min().unwrap_or(0);
+    let mut max_pnl = Decimal::ZERO;
     let mut total = Decimal::ZERO;
     for k in 0..depth {
         let m = Decimal::ONE
@@ -135,12 +136,12 @@ fn brute_all(legs: &[BuyLeg]) -> Decimal {
                 .iter()
                 .map(|l| l.fee.buy_cost(l.levels[k].0))
                 .sum::<Decimal>();
-        if m <= Decimal::ZERO {
-            break;
-        }
         total += m;
+        if total > max_pnl {
+            max_pnl = total;
+        }
     }
-    total
+    max_pnl
 }
 
 /// L11 reference: exhaustive search over every collection of NO baskets.
