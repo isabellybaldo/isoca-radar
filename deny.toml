@@ -1,0 +1,15 @@
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "allow"
+deny = [
+  { name = "alloy" },
+  { name = "ethers" },
+  { name = "k256" },
+  { name = "secp256k1" },
+  { name = "web3" },
+  { name = "polymarket-client-sdk" },
+  { name = "polymarket_client_sdk_v2" },
+  { name = "polymarkets-rs-clob-client" },
+]

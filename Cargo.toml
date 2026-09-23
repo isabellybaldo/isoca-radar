@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/arb-core"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+rust_decimal = "1.41"
+rust_decimal_macros = "1.40"
+thiserror = "2"
+proptest = "1"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+float_arithmetic = "deny"
