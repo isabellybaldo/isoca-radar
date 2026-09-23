@@ -427,23 +427,23 @@ Rust handles everything performance-sensitive. Laya stays in Python: it's the re
         │ gamma-api  GET /events/keyset   ·   clob  POST /books, GET /ok   ·   wss /ws/market   │
         └───────────▲──────────────────────────▲─────────────────────────────▲──────────────────┘
                     │ 5 min                    │ ≤ 40 req/s                  │ event-affine shards
- ┌── your machine · Docker Desktop (WSL2) · compose project "cute-trading" ──┼───────────────────┐
- │                                                                            │                   │
- │  profile: core (always on)                                                 │                   │
- │  ┌─────────────────┴──────────────────────────┴─────────────────────────────┴──────────────┐  │
- │  │ scanner  [rust]  universe · feed · engine(arb-core) · re-checks · paper trader(sim)     │  │
- │  │                  NOTIFY episode ─────────────────────────┐        raw frames ─► capture │  │
- │  └───────┬───────────────────────────────────────────────────┼──────────────────────────────┘  │
+ ┌── your machine · Docker Desktop (WSL2) · compose project "cute-trading" ──┼─────────────────────┐
+ │                                                                            │                    │
+ │  profile: core (always on)                                                 │                    │
+ │  ┌─────────────────┴──────────────────────────┴─────────────────────────────┴───────────────┐   │
+ │  │ scanner  [rust]  universe · feed · engine(arb-core) · re-checks · paper trader(sim)      │   │
+ │  │                  NOTIFY episode ─────────────────────────┐        raw frames ─► capture  │   │
+ │  └───────┬───────────────────────────────────────────────────┼──────────────────────────────┘   │
  │          │ sqlx (role scanner_rw)                            │                                  │
  │  ┌───────▼───────────────────────────────────────────────────▼───────────┐  ┌───────────────┐   │
- │  │ postgres [postgres:17, pinned digest]   volume: pgdata                 │  │ volume: data  │   │
- │  │ NUMERIC money · roles · LISTEN/NOTIFY · migrations (sqlx)              │  │ capture/*.zst │   │
- │  │ TCP on the internal network + Unix socket on volume: pgsock            │  │ reports/      │   │
+ │  │ postgres [postgres:17, pinned digest]   volume: pgdata                │  │ volume: data  │   │
+ │  │ NUMERIC money · roles · LISTEN/NOTIFY · migrations (sqlx)             │  │ capture/*.zst │   │
+ │  │ TCP on the internal network + Unix socket on volume: pgsock           │  │ reports/      │   │
  │  └──▲───────────────▲───────────────────▲─────────────────────▲──────────┘  │ models/laya   │   │
  │     │ api_rw        │ analyze_ro        │ lab_rw              │ oracle      │ exports/ (→   │   │
  │     │ (LISTEN)      │                   │                     │ (socket     │  Windows)     │   │
  │  ┌──┴────────────┐ ┌┴──────────────────┐│                     │  only)      └───────────────┘   │
- │  │ api [rust]    │ │ analyze [rust]    ││  profile: lab       │                                  │
+ │  │ api [rust]    │ │ analyze [rust]    ││  profile: lab       │                                 │
  │  │ axum · JSON · │ │ duckdb: postgres  │┌┴────────────────────┐┌┴───────────────────┐┌─────────┐│
  │  │ SSE (from     │ │ scanner + Parquet ││ lab [rust]          ││ oracle [python,    ││ fetch-  ││
  │  │ NOTIFY) ·     │ │ + capture → cards,││ candidates ·        ││ CUDA on RTX 3060]  ││ model   ││
@@ -451,9 +451,9 @@ Rust handles everything performance-sensitive. Laya stays in Python: it's the re
  │  └──▲────────────┘ └───────────────────┘│ (HF via duckdb      ││ queue: SKIP LOCKED ││ sha256  ││
  │     │                                   │ httpfs) · replay    ││ via Unix socket    ││         ││
  │  ┌──┴──────────────────────────────┐    └─────────────────────┘└────────────────────┘└─────────┘│
- │  │ web [nginx] SPA + WASM, /api →  │◄── browser  http://127.0.0.1:8080 (only published port)   │
- │  └─────────────────────────────────┘                                                           │
- └────────────────────────────────────────────────────────────────────────────────────────────────┘
+ │  │ web [nginx] SPA + WASM, /api →  │◄── browser  http://127.0.0.1:8080 (only published port)    │
+ │  └─────────────────────────────────┘                                                            │
+ └─────────────────────────────────────────────────────────────────────────────────────────────────┘
    everyday:  docker compose --profile core up -d
    screening: docker compose --profile lab run --rm lab candidates   →   run --rm oracle   →   run --rm lab ingest
 ```
