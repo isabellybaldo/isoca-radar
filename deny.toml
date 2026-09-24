@@ -12,4 +12,10 @@ deny = [
   { name = "polymarket-client-sdk" },
   { name = "polymarket_client_sdk_v2" },
   { name = "polymarkets-rs-clob-client" },
+  { name = "alloy-signer" },
+  { name = "alloy-signer-local" },
+  { name = "ethers-signers" },
+  { name = "ethers-core" },
+  { name = "libsecp256k1" },
+  { name = "ecdsa" },
 ]
