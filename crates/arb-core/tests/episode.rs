@@ -58,6 +58,18 @@ fn long_feed_gap_inside_an_episode_is_flagged() {
 }
 
 #[test]
+fn gap_before_the_closing_update_is_flagged() {
+    let mut t = EpisodeTracker::new(30_000);
+    t.on_state("ev1", 0, None);
+    t.on_state("ev1", 1_000, Some(dec!(0.5)));
+    // no update for 39 s, then the state turns non-positive
+    let e = t.on_state("ev1", 40_000, None);
+    assert!(
+        matches!(&e[0], EpisodeEvent::Close { censor, duration_ms: 39_000, .. } if censor.gap && !censor.left && !censor.right)
+    );
+}
+
+#[test]
 fn groups_are_independent() {
     let mut t = EpisodeTracker::new(30_000);
     t.on_state("a", 0, None);
