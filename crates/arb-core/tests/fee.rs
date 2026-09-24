@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use arb_core::fee::FeeSchedule;
+use arb_core::fee::{FeeError, FeeSchedule};
 use arb_core::money::Price;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -75,4 +75,17 @@ fn invalid_schedules_are_rejected() {
     assert!(FeeSchedule::new(dec!(-0.01), 1).is_err());
     assert!(FeeSchedule::new(dec!(0.05), 0).is_err());
     assert!(FeeSchedule::new(dec!(0.05), 5).is_err());
+}
+
+#[test]
+fn f5_rate_at_or_above_one_is_rejected() {
+    assert!(matches!(
+        FeeSchedule::new(dec!(1), 1),
+        Err(FeeError::RateTooHigh(_))
+    ));
+    assert!(matches!(
+        FeeSchedule::new(dec!(25), 1),
+        Err(FeeError::RateTooHigh(_))
+    ));
+    assert!(FeeSchedule::new(dec!(0.99), 1).is_ok());
 }

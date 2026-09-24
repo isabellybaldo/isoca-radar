@@ -7,11 +7,15 @@ use thiserror::Error;
 pub enum FeeError {
     #[error("fee rate must be >= 0, got {0}")]
     NegativeRate(Decimal),
+    #[error("fee rate must be < 1 (L8 monotonicity), got {0}")]
+    RateTooHigh(Decimal),
     #[error("fee exponent must be 1..=4, got {0}")]
     BadExponent(u8),
 }
 
 /// A market's taker fee schedule (Gamma `feeSchedule.rate` / `.exponent`). We are always the taker.
+/// Live rates are ≤ 0.25; a rate ≥ 1 is a parse/unit error, not a real schedule, and would also
+/// break L8 monotonicity, so `new` rejects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeeSchedule {
     rate: Decimal,
@@ -27,6 +31,9 @@ impl FeeSchedule {
     pub fn new(rate: Decimal, exponent: u8) -> Result<Self, FeeError> {
         if rate < Decimal::ZERO {
             return Err(FeeError::NegativeRate(rate));
+        }
+        if rate >= Decimal::ONE {
+            return Err(FeeError::RateTooHigh(rate));
         }
         if !(1..=4).contains(&exponent) {
             return Err(FeeError::BadExponent(exponent));
@@ -56,6 +63,7 @@ impl FeeSchedule {
 
     /// Unrounded fee for qty shares at p (for math checks).
     pub fn fee_exact(&self, p: Price, qty: Decimal) -> Decimal {
+        debug_assert!(qty >= Decimal::ZERO, "negative fee quantity");
         self.phi(p) * qty
     }
 
