@@ -82,6 +82,8 @@ fn decided(g: &Group) -> bool {
 }
 
 /// D2a (L3): buy one YES of every live leg. Arbitrage only if the set is complete.
+/// D1: a crossed book means our local state is wrong, never a signal — returns `None` if any
+/// live leg's book is crossed.
 pub fn detect_yes_basket(g: &Group) -> Option<Signal> {
     if decided(g) {
         return None;
@@ -90,6 +92,9 @@ pub fn detect_yes_basket(g: &Group) -> Option<Signal> {
         .filter(|&i| g.legs[i].status == LegStatus::Live)
         .collect();
     if live.is_empty() {
+        return None;
+    }
+    if live.iter().any(|&i| g.legs[i].book.is_crossed()) {
         return None;
     }
     let legs: Vec<BuyLeg> = live
@@ -130,6 +135,8 @@ pub fn detect_yes_basket(g: &Group) -> Option<Signal> {
 }
 
 /// D2b (L4, L5, L11): buy NO on every live leg that has a YES bid; legs exit as they exhaust.
+/// D1: a crossed book means our local state is wrong, never a signal — returns `None` if any
+/// used leg's book is crossed.
 pub fn detect_no_basket(g: &Group) -> Option<Signal> {
     if decided(g) {
         return None;
@@ -138,6 +145,9 @@ pub fn detect_no_basket(g: &Group) -> Option<Signal> {
         .filter(|&i| g.legs[i].status == LegStatus::Live && g.legs[i].book.top().best_bid.is_some())
         .collect();
     if used.len() < 2 {
+        return None;
+    }
+    if used.iter().any(|&i| g.legs[i].book.is_crossed()) {
         return None;
     }
     let legs: Vec<BuyLeg> = used
@@ -161,8 +171,13 @@ pub fn detect_no_basket(g: &Group) -> Option<Signal> {
 }
 
 /// D3 (L10): for a curated pair where A ⇒ B, buy NO_A + YES_B. Both legs must be live.
+/// D1: a crossed book means our local state is wrong, never a signal — returns `None` if either
+/// leg's book is crossed.
 pub fn detect_implication(a: &GroupLeg, b: &GroupLeg) -> Option<Signal> {
     if a.status != LegStatus::Live || b.status != LegStatus::Live {
+        return None;
+    }
+    if a.book.is_crossed() || b.book.is_crossed() {
         return None;
     }
     let legs = vec![

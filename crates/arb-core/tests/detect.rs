@@ -186,6 +186,65 @@ fn implication_requires_both_legs_live() {
     }
 }
 
+// ---------- F4: no signal from crossed books (D1) ----------
+
+#[test]
+fn f4_crossed_leg_blocks_yes_basket_signal() {
+    let g = Group {
+        legs: vec![
+            live("0.28", "0.30"),
+            live("0.28", "0.30"),
+            live("0.31", "0.30"), // crossed: bid > ask
+        ],
+        augmented: false,
+    };
+    assert!(detect_yes_basket(&g).is_none());
+}
+
+#[test]
+fn f4_crossed_leg_blocks_no_basket_signal() {
+    let g = Group {
+        legs: vec![live("0.55", "0.56"), live("0.57", "0.56")], // second leg crossed
+        augmented: false,
+    };
+    assert!(detect_no_basket(&g).is_none());
+}
+
+#[test]
+fn f4_crossed_leg_blocks_implication_signal() {
+    let a = live("0.60", "0.62");
+    let b = live("0.53", "0.55");
+    assert!(
+        detect_implication(&a, &b).is_some(),
+        "sanity: uncrossed signals"
+    );
+
+    let crossed_b = live("0.56", "0.55"); // crossed
+    assert!(detect_implication(&a, &crossed_b).is_none());
+
+    let crossed_a = live("0.63", "0.62"); // crossed
+    assert!(detect_implication(&crossed_a, &b).is_none());
+}
+
+// ---------- M3: net-exactly-zero boundary ----------
+
+#[test]
+fn m3_yes_basket_net_exactly_zero_has_gross_but_not_net() {
+    // asks 0.20 and 0.60, rate 0.5, exponent 1: m = 1 − 0.80 − 0.5×(0.16 + 0.24) = 0 exactly.
+    let f = FeeSchedule::new(dec!(0.5), 1).unwrap();
+    let mut a = live("0.10", "0.20");
+    let mut b = live("0.50", "0.60");
+    a.fee = f;
+    b.fee = f;
+    let g = Group {
+        legs: vec![a, b],
+        augmented: false,
+    };
+    let s = detect_yes_basket(&g).unwrap();
+    assert!(s.gross.pnl_gross > Decimal::ZERO);
+    assert!(!s.net_positive());
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
