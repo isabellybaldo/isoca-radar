@@ -58,13 +58,16 @@ impl EpisodeTracker {
         }
     }
 
-    /// Feed one evaluated state. `net_pnl` is Some only when the signal is net-positive.
+    /// Feed one evaluated state. `net_pnl` is Some only when the signal is net-positive:
+    /// `Some(p)` with a positive `p` counts as positive; anything else (`None`, or `Some(p)`
+    /// with `p <= 0`) is not.
     pub fn on_state(
         &mut self,
         key: &str,
         ts_ms: i64,
         net_pnl: Option<Decimal>,
     ) -> Vec<EpisodeEvent> {
+        let net_pnl = net_pnl.filter(|p| *p > Decimal::ZERO);
         let first_sight = self.seen.insert(key.to_string());
         let gap_ms = self.gap_ms;
         let mut out = Vec::new();
@@ -132,6 +135,37 @@ impl EpisodeTracker {
             }
             None => Vec::new(),
         }
+    }
+
+    /// The feed for this group is alive at `ts_ms` but the group's state didn't change:
+    /// advance the gap clock of an open episode without re-evaluating. Callers (the S2 scanner)
+    /// call this on shard heartbeats / frames so quiet books aren't mistaken for feed gaps.
+    pub fn on_alive(&mut self, key: &str, ts_ms: i64) {
+        let gap_ms = self.gap_ms;
+        if let Some(ep) = self.open.get_mut(key) {
+            if ts_ms - ep.last_ms > gap_ms {
+                ep.censor.gap = true;
+            }
+            ep.last_ms = ts_ms;
+        }
+    }
+
+    /// Scanner shutdown: right-censor and close every open episode at `ts_ms`.
+    pub fn close_all(&mut self, ts_ms: i64) -> Vec<EpisodeEvent> {
+        let gap_ms = self.gap_ms;
+        let mut opens: Vec<Open> = self.open.drain().map(|(_, ep)| ep).collect();
+        opens.sort_by_key(|ep| ep.id);
+        self.seen.clear();
+        opens
+            .into_iter()
+            .map(|mut ep| {
+                if ts_ms - ep.last_ms > gap_ms {
+                    ep.censor.gap = true;
+                }
+                ep.censor.right = true;
+                close(ep, ts_ms)
+            })
+            .collect()
     }
 }
 
