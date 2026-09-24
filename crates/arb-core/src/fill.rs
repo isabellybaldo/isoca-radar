@@ -57,6 +57,9 @@ pub fn walk(legs: &[BuyLeg], rule: BasketRule, budget: Option<Decimal>) -> Baske
         .iter()
         .map(|l| l.levels.first().map_or(Decimal::ZERO, |x| x.1.get()))
         .collect();
+    // Exact, unrounded fee accrued so far on each leg's CURRENT level. Rounded and flushed into
+    // `q.fees` once (spec §5.4: rounded per level fill, not per segment), see below.
+    let mut level_fee_acc: Vec<Decimal> = vec![Decimal::ZERO; n];
     let mut first = true;
 
     loop {
@@ -114,12 +117,6 @@ pub fn walk(legs: &[BuyLeg], rule: BasketRule, budget: Option<Decimal>) -> Baske
             }
         }
 
-        let fees_seg: Decimal = active
-            .iter()
-            .zip(&prices)
-            .map(|(&i, &p)| legs[i].fee.fee_conservative(p, take))
-            .sum();
-        q.fees += fees_seg;
         q.fees_exact += sum_phi * take;
         q.cost += sum_px * take;
         q.payout += payoff * take;
@@ -129,6 +126,7 @@ pub fn walk(legs: &[BuyLeg], rule: BasketRule, budget: Option<Decimal>) -> Baske
             let lf = &mut q.legs[i];
             lf.filled += take;
             lf.notional += p.get() * take;
+            level_fee_acc[i] += legs[i].fee.phi(p) * take;
             rem[i] -= take;
             if rem[i] == Decimal::ZERO {
                 idx[i] += 1;
@@ -137,12 +135,26 @@ pub fn walk(legs: &[BuyLeg], rule: BasketRule, budget: Option<Decimal>) -> Baske
                     .levels
                     .get(idx[i])
                     .map_or(Decimal::ZERO, |x| x.1.get());
+                // The level is exhausted: round its accrued exact fee once and book it.
+                if level_fee_acc[i] != Decimal::ZERO {
+                    q.fees +=
+                        level_fee_acc[i].round_dp_with_strategy(5, RoundingStrategy::AwayFromZero);
+                    level_fee_acc[i] = Decimal::ZERO;
+                }
             } else {
                 lf.levels_used = idx[i] + 1;
             }
         }
         if capped {
             break;
+        }
+    }
+
+    // The walk ended (stop, cap, or exhaustion): flush any leg still holding a partial,
+    // never-exhausted level's accrued fee.
+    for acc in &level_fee_acc {
+        if *acc != Decimal::ZERO {
+            q.fees += acc.round_dp_with_strategy(5, RoundingStrategy::AwayFromZero);
         }
     }
 

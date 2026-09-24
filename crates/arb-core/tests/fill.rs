@@ -110,6 +110,36 @@ fn fees_are_booked_conservatively() {
     assert_eq!(q.pnl_gross, dec!(0.30));
 }
 
+#[test]
+fn fees_round_once_per_level_fill_not_per_segment() {
+    // Leg A: one level 0.333 × 3 at rate 0.05; leg B: three levels of 1 share, zero fees.
+    // A's single level spans 3 segments. φ(0.333) = 0.05 × 0.333 × 0.667 = 0.01110555.
+    // Exact fee on A = 3 × 0.01110555 = 0.03331665 → rounded once, up: 0.03332
+    // (rounding per segment would give 3 × 0.01111 = 0.03333).
+    let a = leg(&[("0.333", "3")], FeeSchedule::new(dec!(0.05), 1).unwrap());
+    let b = leg(
+        &[("0.30", "1"), ("0.31", "1"), ("0.32", "1")],
+        FeeSchedule::ZERO,
+    );
+    let q = walk(&[a, b], ONE, None);
+    assert_eq!(q.q_max, dec!(3));
+    assert_eq!(q.fees_exact, dec!(0.03331665));
+    assert_eq!(q.fees, dec!(0.03332));
+    assert_eq!(q.pnl_gross, dec!(1.071)); // 0.367 + 0.357 + 0.347
+    assert_eq!(q.pnl, dec!(1.03768));
+}
+
+#[test]
+fn m3_net_exactly_zero_is_not_an_opportunity() {
+    // asks 0.20 and 0.60, rate 0.5, exponent 1: m = 1 − 0.80 − 0.5×(0.16 + 0.24) = 0 exactly.
+    let f = FeeSchedule::new(dec!(0.5), 1).unwrap();
+    let a = leg(&[("0.20", "10")], f);
+    let b = leg(&[("0.60", "10")], f);
+    let q = walk(&[a, b], ONE, None);
+    assert_eq!(q.q_max, Decimal::ZERO);
+    assert_eq!(q.top_edge, Decimal::ZERO);
+}
+
 // ---------- brute-force checks (exact fees, unit-size levels) ----------
 
 fn cents(c: u32) -> Price {
