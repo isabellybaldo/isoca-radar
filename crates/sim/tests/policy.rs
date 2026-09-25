@@ -318,4 +318,46 @@ fn multi_level_books_never_size_past_the_budget() {
         "case B: reserve {} should be <= free_cash 110",
         pl_b.reserve
     );
+
+    // Case C: limits refresh. per_trade=1000, free_cash=80.
+    // Bisection: 1.99q − 27 ≤ 80 → q ≤ 53.77 → q_target = 53.
+    // Reserve at q=53: 1.99*53 + 0.001 = 105.471 > 80, so reserve correction kicks in.
+    // C = 1.99, q = (80 − 0.001) / 1.99 = 79.999 / 1.99 ≈ 40.2 → q_target = 40.
+    // At q=40, leg0 only needs 40 shares, all available at cheap 0.10 level.
+    // Limits refresh: leg0 limit becomes 0.1, legs 1-2 stay at 0.65/0.70.
+    // C becomes 1.45, reserve = 1.45*40 + 0.001 = 58.001.
+    let Decision::Take(pl_c) = decide(&cfg(), &acct(PolicyKind::P0Converter, "1000"), d("80"), &c)
+    else {
+        panic!("expected take in case C (limits refresh)")
+    };
+    assert_eq!(pl_c.q_target, d("40"), "case C: q_target should be 40");
+
+    // leg0 limit should be refreshed to 0.1 (cheaper level after shrink).
+    assert_eq!(
+        pl_c.legs[0].limit,
+        p("0.1"),
+        "case C: leg0 limit should be 0.1 after refresh"
+    );
+    assert_eq!(
+        pl_c.legs[1].limit,
+        p("0.65"),
+        "case C: leg1 limit should be 0.65"
+    );
+    assert_eq!(
+        pl_c.legs[2].limit,
+        p("0.70"),
+        "case C: leg2 limit should be 0.70"
+    );
+
+    // Reserve should be 1.45 * 40 + 0.001 = 58.001.
+    assert_eq!(
+        pl_c.reserve,
+        d("58.001"),
+        "case C: reserve should be 58.001"
+    );
+    assert!(
+        pl_c.reserve <= d("80"),
+        "case C: reserve {} should be <= free_cash 80",
+        pl_c.reserve
+    );
 }

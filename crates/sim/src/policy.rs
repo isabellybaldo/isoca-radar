@@ -238,14 +238,14 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
     if cost_min > free_cash {
         return Decision::Skip(SkipReason::NoCash);
     }
-    let Some((_, limits)) = at(q_want) else {
+    let Some((_, mut limits)) = at(q_want) else {
         return Decision::Skip(SkipReason::BadInput);
     };
     let mut q = order_size(&limits, q_want, cfg.min_order_shares);
     if q <= Decimal::ZERO {
         return Decision::Skip(SkipReason::BelowMinSize);
     }
-    let legs: Vec<IntentLeg> = infos
+    let mut legs: Vec<IntentLeg> = infos
         .iter()
         .zip(&limits)
         .enumerate()
@@ -267,7 +267,7 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
         + Decimal::new(1, 3);
     // If reserve exceeds free cash, solve directly for q.
     // Compute C = Σ(limit + φ(limit)), the per-unit worst case.
-    let c: Decimal = legs
+    let mut c: Decimal = legs
         .iter()
         .map(|l| l.limit.get() + l.fee.phi(l.limit))
         .sum();
@@ -281,11 +281,55 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
         if q < cfg.min_order_shares {
             return Decision::Skip(SkipReason::NoCash);
         }
+        // Refresh limits: the shrink may cross below a book level, requiring updated limits.
+        // Loop at most 5 times until limits stabilize.
+        for _ in 0..5 {
+            let Some((_, new_limits)) = at(q) else {
+                return Decision::Skip(SkipReason::BadInput);
+            };
+            let q2 = order_size(&new_limits, q, cfg.min_order_shares);
+            if q2 < cfg.min_order_shares {
+                return Decision::Skip(SkipReason::NoCash);
+            }
+            if q2 == q {
+                limits = new_limits;
+                break;
+            }
+            q = q2;
+        }
+        // Rebuild per-leg limits and C from final limits.
+        c = limits
+            .iter()
+            .enumerate()
+            .map(|(i, &limit)| {
+                let fee = infos
+                    .get(i)
+                    .map(|info| info.fee)
+                    .unwrap_or(FeeSchedule::ZERO);
+                limit.get() + fee.phi(limit)
+            })
+            .sum();
         reserve = c * q + Decimal::new(1, 3);
         // Defensive check: if recomputed reserve is still > free_cash, bail out.
         if reserve > free_cash {
             return Decision::Skip(SkipReason::NoCash);
         }
+        // Rebuild legs with updated limits.
+        legs = infos
+            .iter()
+            .zip(&limits)
+            .enumerate()
+            .map(|(pos, (info, &limit))| IntentLeg {
+                key: LegKey {
+                    market_id: info.market_id.clone(),
+                    yes_token: info.yes_token.clone(),
+                    outcome: outcome_for(kind, pos),
+                },
+                limit,
+                fee: info.fee,
+                seconds_delay: info.seconds_delay,
+            })
+            .collect();
     }
     let hold = if kind == Kind::NoBasket {
         Hold::Convert {
