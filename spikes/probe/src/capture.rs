@@ -1,13 +1,29 @@
 //! `capture`: event-affine shards → websocket sessions → raw zstd capture + per-frame CSV.
 use crate::shards::pack_shards;
 use crate::universe::Universe;
-use pm_api::ws::{Frame, MarketEvent, parse_frame, run_connection};
+use pm_api::backoff::{Backoff, ConnectBudget};
+use pm_api::ws::{Frame, MarketEvent, now_us, parse_frame, run_connection};
 use serde_json::json;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Wall-clock milliseconds, for `Backoff`/`ConnectBudget` (both take `i64` ms).
+fn now_ms() -> i64 {
+    now_us() / 1_000
+}
+
+/// `ConnectBudget::try_take`, recovering from a poisoned mutex instead of panicking:
+/// a stuck lock must not take the whole capture down.
+fn take_budget(budget: &Mutex<ConnectBudget>, now: i64) -> bool {
+    match budget.lock() {
+        Ok(mut g) => g.try_take(now),
+        Err(poisoned) => poisoned.into_inner().try_take(now),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -123,15 +139,16 @@ pub async fn capture(
     out: &Path,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(out)?;
-    let shards: Vec<Vec<String>> = pack_shards(&u.token_groups(), shard_tokens)
-        .into_iter()
-        .take(max_conns)
-        .collect();
+    let all_shards: Vec<Vec<String>> = pack_shards(&u.token_groups(), shard_tokens);
+    let dropped_tokens: usize = all_shards.iter().skip(max_conns).map(Vec::len).sum();
+    println!("dropped_tokens={dropped_tokens}");
+    let shards: Vec<Vec<String>> = all_shards.into_iter().take(max_conns).collect();
     let sizes: Vec<usize> = shards.iter().map(Vec::len).collect();
     let mut shard_csv = String::from("conn,tokens\n");
     for (i, n) in sizes.iter().enumerate() {
         shard_csv.push_str(&format!("{i},{n}\n"));
     }
+    shard_csv.push_str(&format!("# dropped_tokens={dropped_tokens}\n"));
     std::fs::write(out.join("shards.csv"), shard_csv)?;
     println!(
         "shards={} tokens={}",
@@ -139,20 +156,28 @@ pub async fn capture(
         sizes.iter().sum::<usize>()
     );
 
+    // Global connect budget shared by every shard task, across all reconnects (≤ 2/s, ≤ 60/min).
+    let budget = Arc::new(Mutex::new(ConnectBudget::new(2, 60)));
     let (tx, mut rx) = mpsc::channel::<Frame>(20_000);
     for (i, tokens) in shards.into_iter().enumerate() {
         let tx = tx.clone();
+        let budget = Arc::clone(&budget);
         tokio::spawn(async move {
+            let mut backoff = Backoff::new(5_000, 60_000, 30_000);
             loop {
+                while !take_budget(&budget, now_ms()) {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                backoff.on_connected(now_ms());
                 let r = run_connection(i, tokens.clone(), tx.clone()).await;
                 if tx.is_closed() {
                     break;
                 }
-                eprintln!("conn {i} ended: {r:?}; reconnecting in 5 s");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let delay_ms = backoff.on_disconnected(now_ms());
+                eprintln!("conn {i} ended: {r:?}; reconnecting in {delay_ms} ms");
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
         });
-        tokio::time::sleep(Duration::from_millis(500)).await; // ≤ 2 connects per second
     }
     drop(tx);
 
