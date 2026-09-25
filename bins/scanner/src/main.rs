@@ -57,17 +57,14 @@ async fn main() -> ExitCode {
 async fn real_main() -> anyhow::Result<()> {
     scanner::guard::check_env()?;
     let cli = Cli::parse();
-    let (_cfg, hash) = Config::load(&cli.config)?;
-    let name = match cli.cmd {
-        Cmd::Run => "run",
-        Cmd::Census => "census",
-        Cmd::Migrate => "migrate",
-        Cmd::Replay { .. } => "replay",
-        Cmd::Breaker { .. } => "breaker",
-    };
-    eprintln!(
-        "scanner {} config {hash}: `{name}` is wired up in Task 10",
-        scanner::version()
-    );
-    Ok(())
+    let (cfg, hash) = Config::load(&cli.config)?;
+    match cli.cmd {
+        Cmd::Run => scanner::run::run(cfg, hash).await,
+        Cmd::Census => scanner::run::census(&cfg).await,
+        Cmd::Migrate => scanner::run::migrate().await,
+        Cmd::Replay { dir, dry_run } => scanner::run::replay_cmd(&cfg, &hash, &dir, dry_run).await,
+        Cmd::Breaker {
+            action: BreakerCmd::Reset,
+        } => scanner::run::breaker_reset().await,
+    }
 }

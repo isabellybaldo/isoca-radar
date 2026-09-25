@@ -9,6 +9,7 @@ pub mod feed;
 pub mod guard;
 pub mod metrics;
 pub mod replay;
+pub mod run;
 pub mod shards;
 pub mod universe;
 pub mod writer;
