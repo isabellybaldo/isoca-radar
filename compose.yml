@@ -1,0 +1,35 @@
+# cute-trading v2 — phase A (local). Spec §8.1. The scanner service is added in S2c.
+name: cute-trading
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ct_owner
+      POSTGRES_DB: cute_trading
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      SCANNER_DB_PASSWORD: ${SCANNER_DB_PASSWORD:?set SCANNER_DB_PASSWORD in .env}
+      ANALYZE_DB_PASSWORD: ${ANALYZE_DB_PASSWORD:?set ANALYZE_DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ct_owner -d cute_trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+    networks: [internal]
+
+volumes:
+  pgdata: {}
+
+networks:
+  internal: {}

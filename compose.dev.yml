@@ -1,0 +1,6 @@
+# Dev-only: publish Postgres on loopback for `cargo test` (store integration tests).
+# Usage: docker compose -f compose.yml -f compose.dev.yml up -d postgres
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:55432:5432"
