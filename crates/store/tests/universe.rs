@@ -79,3 +79,28 @@ async fn upsert_then_mark_gone_after_a_complete_scan() {
     assert_eq!((first, last, gone), (100, 300, None));
     db.drop(store).await;
 }
+
+#[tokio::test]
+async fn duplicate_keys_in_one_scan_keep_the_last() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let first_event = event("e1");
+    let mut last_event = event("e1");
+    last_event.slug = Some("slug-e1-last".into());
+    let first_leg = leg("m1", "e1");
+    let mut last_leg = leg("m1", "e1");
+    last_leg.min_size = Some(dec!(99));
+    // Two rows with the same key in one scan must not fail ON CONFLICT DO UPDATE.
+    store
+        .upsert_universe(&[first_event, last_event], &[first_leg, last_leg], 100)
+        .await
+        .unwrap();
+    // A later complete scan with the same keys is unaffected by the earlier duplicate.
+    store
+        .upsert_universe(&[event("e1")], &[leg("m1", "e1")], 200)
+        .await
+        .unwrap();
+    assert_eq!(store.mark_gone(200).await.unwrap(), 0, "e1 was seen at 200");
+    db.drop(store).await;
+}

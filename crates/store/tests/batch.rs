@@ -343,3 +343,139 @@ async fn bool_columns_round_trip_under_distinct_bit_patterns() {
     assert_eq!(store.count(Table::EpisodeLegs).await.unwrap(), 0);
     db.drop(store).await;
 }
+
+#[tokio::test]
+async fn a_poison_row_rolls_back_the_whole_batch_and_is_flagged_as_data_error() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let row = episode("01J0000000000000000000000F", run);
+    let batch = Batch {
+        episodes: vec![EpisodeWrite {
+            row: row.clone(),
+            legs: vec![],
+        }],
+        integrity: vec![IntegrityRow {
+            run_id: run,
+            ts_ms: 1,
+            kind: "not_a_kind".into(),
+            shard: None,
+            token: None,
+            event_id: None,
+            detail: None,
+        }],
+        ..Batch::default()
+    };
+    let err = store.write_batch(&batch).await.unwrap_err();
+    assert!(err.is_data_error());
+    assert!(store.episodes_for_run(run).await.unwrap().is_empty());
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn nul_bytes_are_replaced_not_rejected() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let mut row = episode("01J0000000000000000000000G", run);
+    row.event_title = Some("a\0b".into());
+    let batch = Batch {
+        episodes: vec![EpisodeWrite {
+            row: row.clone(),
+            legs: vec![],
+        }],
+        integrity: vec![IntegrityRow {
+            run_id: run,
+            ts_ms: 1,
+            kind: "drift".into(),
+            shard: None,
+            token: None,
+            event_id: None,
+            detail: Some("x\0".into()),
+        }],
+        ..Batch::default()
+    };
+    store.write_batch(&batch).await.unwrap();
+    let back = store.episodes_for_run(run).await.unwrap();
+    assert_eq!(back[0].event_title, Some("a\u{FFFD}b".into()));
+    assert_eq!(store.count(Table::IntegrityEvents).await.unwrap(), 1);
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn duplicate_health_minute_in_one_batch_keeps_the_last() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let first = HealthRow {
+        run_id: run,
+        minute_ms: 60_000,
+        tokens: 1,
+        shards: 1,
+        msgs: 1,
+        bytes: 1,
+        drops: 0,
+        reconnects: 0,
+        rest_p50_ms: None,
+        rest_p99_ms: None,
+        lag_p50_ms: None,
+        lag_p99_ms: None,
+        clock_offset_ms: None,
+        ok: Some(true),
+        capture_paused: false,
+        parked_shards: 0,
+        dropped_groups: 0,
+    };
+    let mut second = first.clone();
+    second.msgs = 2;
+    store
+        .write_batch(&Batch {
+            health: vec![first, second],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.count(Table::Health).await.unwrap(), 1);
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn observation_zero_reads_back_distinct_from_null() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let row = episode("01J0000000000000000000000H", run);
+    let obs = ObservationRow {
+        episode_id: row.episode_id.clone(),
+        offset_ms: 1_000,
+        source: "rest".into(),
+        observed_ms: Some(2_000),
+        skipped: false,
+        skip_reason: None,
+        edge: None,
+        q_max: None,
+        pnl: Some(dec!(0)),
+        still_profitable: Some(true),
+        fill_at_original_size: Some(true),
+    };
+    store
+        .write_batch(&Batch {
+            episodes: vec![EpisodeWrite {
+                row: row.clone(),
+                legs: vec![],
+            }],
+            observations: vec![obs.clone()],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let back = store.observations_for(&row.episode_id).await.unwrap();
+    assert_eq!(back, vec![obs]);
+    assert_eq!(back[0].pnl, Some(dec!(0)));
+    assert_eq!(back[0].edge, None);
+    db.drop(store).await;
+}
