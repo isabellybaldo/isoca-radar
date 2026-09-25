@@ -66,19 +66,19 @@ fn converted() -> (PaperTrader, HashMap<String, Book>) {
 
 #[test]
 fn resolution_settles_every_account() {
-    let (mut t, _) = converted();
-    let outs = t.on_resolution(9_000, "m3", d("1"), d("0"));
+    let (mut t, books) = converted();
+    let outs = t.on_resolution(9_000, "m3", d("1"), d("0"), &books);
     assert!(outs.iter().any(|o| matches!(o, SimOut::Ledger(e) if e.kind == sim::account::EntryKind::Settle && e.cash_delta == d("51.2"))));
     assert!(outs.iter().any(|o| matches!(o, SimOut::Account(_))));
     assert_eq!(t.accounts()[0].realized, d("53.76")); // 2.56 conversion + 51.2 windfall
     assert!(
-        t.on_resolution(9_001, "unknown", d("1"), d("0"))
+        t.on_resolution(9_001, "unknown", d("1"), d("0"), &books)
             .iter()
             .all(|o| !matches!(o, SimOut::Ledger(_)))
     );
     // Q19: a 50-50 vector on a fresh holding settles at 0.5
-    let (mut t, _) = converted();
-    t.on_resolution(9_000, "m3", d("0.5"), d("0.5"));
+    let (mut t, books) = converted();
+    t.on_resolution(9_000, "m3", d("0.5"), d("0.5"), &books);
     assert_eq!(t.accounts()[0].realized, d("28.16")); // 2.56 + 25.6
 }
 
@@ -215,7 +215,7 @@ fn same_inputs_same_outputs() {
         for ms in [1100, 2100, 3100, 60_000, 61_000] {
             all.extend(t.on_frame(ms, &books));
         }
-        all.extend(t.on_resolution(70_000, "m3", d("1"), d("0")));
+        all.extend(t.on_resolution(70_000, "m3", d("1"), d("0"), &books));
         all.extend(t.close(80_000, &books));
         all
     };

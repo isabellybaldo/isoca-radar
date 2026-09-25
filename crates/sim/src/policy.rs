@@ -72,6 +72,9 @@ pub enum SkipReason {
     NoCash,
     BelowMinSize,
     BadInput,
+    /// This account's own consumed liquidity, not the raw feed, kills the edge or the depth
+    /// (spec §5.6 controller ruling): a real bot can't refill an order it already took.
+    Consumed,
 }
 
 impl SkipReason {
@@ -85,6 +88,7 @@ impl SkipReason {
             SkipReason::NoCash => "no_cash",
             SkipReason::BelowMinSize => "below_min_size",
             SkipReason::BadInput => "bad_input",
+            SkipReason::Consumed => "consumed",
         }
     }
 }
@@ -173,14 +177,35 @@ fn settle(
         }
         q = q2;
     }
-    let (_, limits) = at(q).ok_or(Settle::BadInput)?;
-    Ok((q, limits))
+    // Rounding kept crossing a breakpoint for all 20 tries: no stable (q, limits) to trust.
+    Err(Settle::BadInput)
 }
 
-/// Builds the intent legs and their worst-case reserve (fees included, plus a conservative
-/// epsilon) for `q` shares at `limits`, one per used leg in `infos`' order.
+/// How many of `levels` (best price first) the settled `q` needs, counting a level touched for
+/// any positive amount (0 if `q` ≤ 0). `settle` already guarantees the book holds ≥ `q`.
+fn levels_touched(levels: &[(Price, Shares)], q: Decimal) -> u32 {
+    let mut left = q;
+    let mut n = 0u32;
+    for &(_, s) in levels {
+        if left <= Decimal::ZERO {
+            break;
+        }
+        n += 1;
+        left -= s.get().min(left);
+    }
+    n
+}
+
+/// Builds the intent legs and their worst-case reserve for `q` shares at `limits`, one per used
+/// leg in `infos`' order: notional + fee at the worst price actually needed, per leg (a genuine
+/// upper bound — between open and execution the book can only get worse up to that limit), plus a
+/// margin for fee-rounding noise. `fee_conservative` rounds each level's fee up to 5 dp when it
+/// executes; this reserve computes fees unrounded at a single (worst-case) price, so it can fall
+/// short by up to 0.00001 per level the settled `q` actually walks on `open_levels` — hence the
+/// margin scales with that level count, floored at the original flat 0.001 for other slippage.
 fn plan_legs(
     infos: &[&LegInfo],
+    open_levels: &[Vec<(Price, Shares)>],
     kind: Kind,
     limits: &[Price],
     q: Decimal,
@@ -200,11 +225,13 @@ fn plan_legs(
             seconds_delay: info.seconds_delay,
         })
         .collect();
+    let n_levels: u32 = open_levels.iter().map(|lv| levels_touched(lv, q)).sum();
+    let margin = Decimal::from(u64::from(n_levels)) * Decimal::new(1, 5) + Decimal::new(1, 3);
     let reserve = legs
         .iter()
         .map(|l| (l.limit.get() + l.fee.phi(l.limit)) * q)
         .sum::<Decimal>()
-        + Decimal::new(1, 3);
+        + margin;
     (legs, reserve)
 }
 
@@ -259,7 +286,9 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
         .map(|l| l.filled)
         .min()
         .unwrap_or(Decimal::ZERO);
-    if q_open <= Decimal::ZERO {
+    // A thin book is a size problem, not a cash problem: check it before the cash-affordability
+    // walk below, which would otherwise fail to quote `min_order_shares` and get misread as NoCash.
+    if q_open < cfg.min_order_shares {
         return Decision::Skip(SkipReason::BelowMinSize);
     }
     let at = |q: Decimal| -> Option<(Decimal, Vec<Price>)> {
@@ -272,34 +301,44 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
         }
         Some((total, limits))
     };
-    if at(q_open).is_none() {
+    let Some((cost_open, _)) = at(q_open) else {
         return Decision::Skip(SkipReason::BadInput);
-    }
+    };
     // Cash can't even cover the venue minimum: no point sizing further.
     match at(cfg.min_order_shares) {
         Some((cost_min, _)) if cost_min <= free_cash => {}
         _ => return Decision::Skip(SkipReason::NoCash),
     }
 
-    // Largest q <= q_open whose walked cost stays within the trade/cash budget (60 iterations:
-    // plenty of Decimal precision).
+    // Largest q <= q_open whose walked cost stays within the trade/cash budget. When q_open
+    // itself already fits (the depth, not the budget, is what binds — e.g. a filtered book with
+    // less available than the account could otherwise afford), that IS the answer: bisection
+    // alone can only approach q_open asymptotically, never land on it exactly, since every
+    // candidate strictly below it also fits and nothing ever raises `q_lo` all the way to `q_hi`.
     let budget = spec.per_trade.min(free_cash);
-    let mut q_lo = Decimal::ZERO;
-    let mut q_hi = q_open;
-    for _ in 0..60 {
-        let q_mid = (q_lo + q_hi) / Decimal::from(2);
-        match at(q_mid) {
-            Some((cost, _)) if cost <= budget => q_lo = q_mid,
-            _ => q_hi = q_mid,
+    let q_lo = if cost_open <= budget {
+        q_open
+    } else {
+        let mut q_lo = Decimal::ZERO;
+        let mut q_hi = q_open;
+        // 60 iterations: plenty of Decimal precision for the part of the range that DOES need
+        // a search (cost_open > budget, so q_hi itself never qualifies).
+        for _ in 0..60 {
+            let q_mid = (q_lo + q_hi) / Decimal::from(2);
+            match at(q_mid) {
+                Some((cost, _)) if cost <= budget => q_lo = q_mid,
+                _ => q_hi = q_mid,
+            }
         }
-    }
+        q_lo
+    };
 
     let (mut q, mut limits) = match settle(&at, q_lo, cfg.min_order_shares) {
         Ok(settled) => settled,
         Err(Settle::TooSmall) => return Decision::Skip(SkipReason::BelowMinSize),
         Err(Settle::BadInput) => return Decision::Skip(SkipReason::BadInput),
     };
-    let (mut legs, mut reserve) = plan_legs(&infos, kind, &limits, q);
+    let (mut legs, mut reserve) = plan_legs(&infos, &ctx.open_levels, kind, &limits, q);
 
     // The settled size can still cost more than we actually have (a `per_trade` cap wider than
     // free cash, or fees): shrink to the largest size the reserve allows and settle again.
@@ -308,7 +347,9 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
             .iter()
             .map(|l| l.limit.get() + l.fee.phi(l.limit))
             .sum();
-        let q_shrunk = (free_cash - Decimal::new(1, 3)) / per_unit;
+        let Some(q_shrunk) = (free_cash - Decimal::new(1, 3)).checked_div(per_unit) else {
+            return Decision::Skip(SkipReason::NoCash);
+        };
         if q_shrunk <= Decimal::ZERO {
             return Decision::Skip(SkipReason::NoCash);
         }
@@ -316,7 +357,7 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
             Ok(settled) => settled,
             Err(_) => return Decision::Skip(SkipReason::NoCash),
         };
-        (legs, reserve) = plan_legs(&infos, kind, &limits, q);
+        (legs, reserve) = plan_legs(&infos, &ctx.open_levels, kind, &limits, q);
         if reserve > free_cash {
             return Decision::Skip(SkipReason::NoCash);
         }

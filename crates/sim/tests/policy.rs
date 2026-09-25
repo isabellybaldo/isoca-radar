@@ -50,7 +50,9 @@ fn p0_takes_a_net_positive_no_basket_sized_to_the_budget() {
     // unit cost 1.95; 100 / 1.95 = 51.28 → sizes valid for limits 0.60/0.65/0.70 are multiples of 0.2
     assert_eq!(pl.q_target, d("51.2"));
     assert_eq!(pl.detected_q, d("100"));
-    assert_eq!(pl.reserve, d("99.841"));
+    // 1.95 × 51.2 = 99.84, plus the fee-rounding margin: 3 legs × 1 level walked each × 0.00001,
+    // plus the 0.001 floor = 99.84 + 0.00103 = 99.84103.
+    assert_eq!(pl.reserve, d("99.84103"));
     assert_eq!(
         pl.legs.iter().map(|l| l.limit).collect::<Vec<_>>(),
         vec![p("0.6"), p("0.65"), p("0.7")]
@@ -121,6 +123,33 @@ fn cash_and_minimum_size_limit_the_order() {
     ));
     assert!(matches!(
         decide(&cfg(), &acct(PolicyKind::P0Converter, "5"), d("1000"), &c),
+        Decision::Skip(SkipReason::BelowMinSize)
+    ));
+}
+
+/// A thin leg (depth 3, below `min_order_shares` 5) used to be misread as `NoCash`: `q_open` (3)
+/// passed the old `<= 0` check, so `decide` fell through to `at(cfg.min_order_shares)`, which
+/// failed to quote 5 shares on the thin leg (only 3 available) and landed on the generic `NoCash`
+/// fallback — even with abundant free cash. The size problem must be reported as `BelowMinSize`.
+#[test]
+fn a_thin_leg_is_below_min_size_not_a_cash_problem() {
+    let g = Group {
+        legs: vec![
+            live(Some("0.40"), Some("0.45"), FeeSchedule::ZERO),
+            live(Some("0.35"), Some("0.40"), FeeSchedule::ZERO),
+            GroupLeg {
+                status: LegStatus::Live,
+                book: common::book(&[("0.30", "3")], &[("0.35", "100")]),
+                fee: FeeSchedule::ZERO,
+            },
+            live(None, Some("0.05"), FeeSchedule::ZERO),
+        ],
+        augmented: false,
+    };
+    let sig = detect_no_basket(&g).unwrap();
+    let c = ctx("e1", 1000, &g, sig, &NO3);
+    assert!(matches!(
+        decide(&cfg(), &acct(PolicyKind::P0Converter, "100"), d("1000"), &c),
         Decision::Skip(SkipReason::BelowMinSize)
     ));
 }
@@ -285,11 +314,12 @@ fn multi_level_books_never_size_past_the_budget() {
         walked_cost_a
     );
 
-    // Reserve should be 1.99 * 63 + 0.001 = 125.371.
+    // Reserve base: 1.99 × 63 = 125.37. Margin: leg0 walks 2 levels at q=63 (50 + 13), legs 1–2
+    // walk 1 each → 4 levels total × 0.00001 + the 0.001 floor = 125.37 + 0.00104 = 125.37104.
     assert_eq!(
         pl_a.reserve,
-        d("125.371"),
-        "case A: reserve should be 125.371"
+        d("125.37104"),
+        "case A: reserve should be 125.37104"
     );
     assert!(
         pl_a.reserve <= d("1000"),
@@ -307,11 +337,12 @@ fn multi_level_books_never_size_past_the_budget() {
     };
     assert_eq!(pl_b.q_target, d("55"), "case B: q_target should be 55");
 
-    // Reserve should be 1.99 * 55 + 0.001 = 109.451 ≤ 110.
+    // Reserve base: 1.99 * 55 = 109.45. Margin: leg0 walks 2 levels at q=55 (50 + 5), legs 1–2
+    // walk 1 each → 4 levels total * 0.00001 + the 0.001 floor = 109.45 + 0.00104 = 109.45104.
     assert_eq!(
         pl_b.reserve,
-        d("109.451"),
-        "case B: reserve should be 109.451"
+        d("109.45104"),
+        "case B: reserve should be 109.45104"
     );
     assert!(
         pl_b.reserve <= d("110"),
@@ -352,11 +383,13 @@ fn multi_level_books_never_size_past_the_budget() {
         "case C: leg2 limit should be 0.70"
     );
 
-    // Reserve should be 1.45 * 40.2 + 0.001 = 58.291.
+    // Reserve base: 1.45 * 40.2 = 58.29. Margin: at q=40.2 (< 50) leg0 walks only its first
+    // level, so all 3 legs walk 1 level each → 3 * 0.00001 + the 0.001 floor = 58.29 + 0.00103
+    // = 58.29103.
     assert_eq!(
         pl_c.reserve,
-        d("58.291"),
-        "case C: reserve should be 58.291"
+        d("58.29103"),
+        "case C: reserve should be 58.29103"
     );
     assert!(
         pl_c.reserve <= d("80"),
@@ -395,9 +428,12 @@ fn multi_level_books_never_size_past_the_budget() {
         p("0.70"),
         "case D: leg2 limit should be 0.70"
     );
+    // Reserve base: 1.45 * 50 = 72.5. Margin: at q=50 leg0 exactly exhausts its first level
+    // (50 shares) without touching the second, so all 3 legs walk 1 level each → 3 * 0.00001
+    // + the 0.001 floor = 72.5 + 0.00103 = 72.50103.
     assert_eq!(
         pl_d.reserve,
-        d("72.501"),
-        "case D: reserve should be 72.501"
+        d("72.50103"),
+        "case D: reserve should be 72.50103"
     );
 }

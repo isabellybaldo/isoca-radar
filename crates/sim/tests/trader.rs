@@ -144,9 +144,57 @@ fn a_second_episode_cannot_refill_consumed_liquidity() {
         arb_core::money::Shares::parse("100").unwrap(),
         1401,
     );
-    t.on_open(&ctx("e3", 1500, &g, detect_no_basket(&g).unwrap(), &NO3));
+    // Legs 1 and 2 are still fully consumed (100/100): a real bot would see those orders gone, so
+    // this episode is skipped as "consumed" — not sized against the raw, unfiltered feed — and
+    // produces no fills at all, not even a lopsided partial fill on leg 0.
+    let outs = t.on_open(&ctx("e3", 1500, &g, detect_no_basket(&g).unwrap(), &NO3));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.as_deref() == Some("consumed"))
+    );
     let outs = t.on_frame(1600, &books);
-    assert_eq!(fills(&outs)[0], ("m0".into(), d("51.2")));
+    assert!(
+        fills(&outs).is_empty(),
+        "a real bot would see those orders gone"
+    );
+}
+
+/// The consumed-liquidity check is per account (like `ConsumedLiquidity` itself, spec §5.6): one
+/// account fully exhausting a book's liquidity must not stop a SEPARATE account — its own ledger,
+/// never touched by that depletion — from taking the same episode on the same tokens/prices.
+/// (Both a `P0-converter` and a `P3-naive` account take `NoBasket`, so a single multi-account
+/// trader can't keep one of them "fresh" through e1/e2 while both remain eligible for e3 — hence
+/// two separate traders here, each standing in for one account's own ledger.)
+#[test]
+fn consumed_liquidity_is_not_shared_across_accounts() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+
+    // Account A: the same depleting sequence as `a_second_episode_cannot_refill_consumed_liquidity`
+    // (51.2 + 48.8 = 100 on every leg), then e3 on the SAME tokens is skipped as "consumed".
+    let mut a = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    a.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
+    a.on_frame(1100, &books);
+    a.on_open(&ctx("e2", 1200, &g, detect_no_basket(&g).unwrap(), &NO3));
+    a.on_frame(1300, &books);
+    let outs = a.on_open(&ctx("e3", 1500, &g, detect_no_basket(&g).unwrap(), &NO3));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.as_deref() == Some("consumed"))
+    );
+
+    // Account B: its own, never-touched ledger on the exact same tokens/prices — e3 is its FIRST
+    // episode, so it sees full depth and takes it in full.
+    let mut b = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    let outs = b.on_open(&ctx("e3", 1500, &g, detect_no_basket(&g).unwrap(), &NO3));
+    assert!(matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.is_none()));
+    let outs = b.on_frame(1600, &books);
+    assert_eq!(
+        fills(&outs),
+        vec![
+            ("m0".into(), d("51.2")),
+            ("m1".into(), d("51.2")),
+            ("m2".into(), d("51.2"))
+        ]
+    );
 }
 
 #[test]
@@ -200,6 +248,70 @@ fn a_leg_that_thins_before_t_x_creates_leg_risk_which_is_unwound() {
     // unwinds: 31.2·(0.55 − 0.60) + 31.2·(0.60 − 0.65) = −3.12; conversion: 20·(2 − 1.95) = +1
     assert_eq!(a.realized, d("-2.12"));
     assert!(a.positions.is_empty());
+}
+
+/// An unwind whose (venue-rounded) quantity falls below `min_order_shares` no longer sells
+/// silently: it still emits a zero-fill row (filled 0, vwap None, fees 0) so the held, unsold
+/// leg-risk inventory stays visible — and, being unfilled, produces no ledger entry.
+#[test]
+fn unwind_below_the_venue_minimum_is_held_not_sold_but_stays_visible() {
+    let g = no_group(FeeSchedule::ZERO);
+    let mut books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
+    // leg 2's YES bid (its NO ask 0.70) thins to 48, just 3.2 short of the 51.2 planned fill:
+    // legs 0 and 1's leg-risk (51.2 − 48 = 3.2 each) is below the 5-share venue minimum.
+    books.get_mut("y2").unwrap().apply_delta(
+        Side::Bid,
+        p("0.30"),
+        arb_core::money::Shares::parse("48").unwrap(),
+        1050,
+    );
+    t.on_level("y2", BookSide::Bid, d("0.30"), d("48"));
+    let outs = t.on_frame(1100, &books);
+    let exec = outs
+        .iter()
+        .find_map(|o| {
+            if let SimOut::Exec(e) = o {
+                Some(e.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!((exec.q_eff, exec.leg_risk_qty), (d("48"), d("6.4"))); // 3.2 on each of legs 0, 1
+
+    let outs = t.on_frame(1200, &books); // unwinds due at t_x + 100
+    let sells: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            SimOut::Fill(f) if f.side == "sell" => {
+                Some((f.leg.market_id.clone(), f.requested, f.filled, f.vwap))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sells,
+        vec![
+            ("m0".into(), d("3.2"), d("0"), None),
+            ("m1".into(), d("3.2"), d("0"), None),
+        ]
+    );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, SimOut::Ledger(e) if e.kind == sim::account::EntryKind::Sell)),
+        "no ledger entry for a held, unsold leg"
+    );
+    // still held: the position never left the account.
+    let a = &t.accounts()[0];
+    let leg0 = sim::types::LegKey {
+        market_id: "m0".into(),
+        yes_token: "y0".into(),
+        outcome: Outcome::No,
+    };
+    assert_eq!(a.positions.get(&leg0).unwrap().qty, d("51.2"));
 }
 
 #[test]
@@ -258,7 +370,7 @@ fn pending_reservation_limits_the_next_intent() {
     let mut t = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "150")])).unwrap();
     t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
     let outs = t.on_open(&ctx("e2", 1001, &g, detect_no_basket(&g).unwrap(), &NO3));
-    // free cash 150 − 99.841 = 50.159 → 25.72 sets → multiple of 0.2 → 25.6
+    // free cash 150 − 99.84103 = 50.15897 → 25.722549 sets → multiple of 0.2 → 25.6
     assert!(matches!(&outs[..], [SimOut::Intent(i)] if i.q_target == Some(d("25.6"))));
     t.on_frame(1101, &books);
     assert_eq!(t.accounts()[0].reserved, d("0"));
@@ -342,9 +454,9 @@ fn no_group_for_ordering() -> Group {
 /// order whenever both were due by the same (delayed) frame. This reproduces it directly:
 ///
 /// - Episode 1 (YES-basket, `y0`+`y1`) buys YES on both legs; `y1`'s ask thins from 100 to 40
-///   before t_x, so leg 0 over-fills (to 99.80, per venue rounding) leaving ~60 shares of leg-risk.
-///   The unwind that flattens it SELLS YES on leg 0, hitting its YES-BID level (0.40, 30 shares) —
-///   due at t_x + 100 = 1200.
+///   before t_x, so leg 0 fully fills at 100 while leg 1 only gets 40, leaving 60 shares of
+///   leg-risk. The unwind that flattens it SELLS YES on leg 0, hitting its YES-BID level (0.40,
+///   30 shares) — due at t_x + 100 = 1200.
 /// - Episode 2 (NO-basket, same account) later buys NO on leg 0 too: buying NO also hits the SAME
 ///   YES-BID level (0.40, 30) via the L1 mirror. Its t_x is 1250.
 /// - A single `on_frame(1300, ..)` call must run both. Due-time order says the unwind (1200) goes
@@ -387,11 +499,12 @@ fn an_earlier_due_unwind_wins_the_book_level_over_a_later_due_buy() {
             }
         })
         .unwrap();
-    // Leg 0 doesn't fill the full 100: venue rounding (order_size) shrinks q_target off 100 to the
-    // largest size whose cost has ≤ 2 dp at both limits (0.45 and 0.50), landing at 99.80. Leg 1
-    // fills 40 (thinned), so leg-risk on leg 0 is 99.80 − 40 = 59.80 — still far past the unwind
+    // At open, both legs' books are still full (100 each): unit cost 0.95, so q_open(100)'s own
+    // walked cost (95) already fits the $100 budget — q_target settles at exactly 100 (100 is
+    // itself grid-valid: 0.45 × 100 and 0.50 × 100 both have ≤ 2 dp). Leg 1 then only fills 40
+    // (thinned before t_x), so leg-risk on leg 0 is 100 − 40 = 60 — still far past the unwind
     // level's 30-share cap, which is all this test needs.
-    assert_eq!((exec.q_eff, exec.leg_risk_qty), (d("40"), d("59.80")));
+    assert_eq!((exec.q_eff, exec.leg_risk_qty), (d("40"), d("60")));
 
     // Episode 2 opens after episode 1's execution but before its unwind is due; its own t_x (1250)
     // is later than the unwind's due time (1200), so both are due by on_frame(1300, ..).

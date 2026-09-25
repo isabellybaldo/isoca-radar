@@ -2,10 +2,12 @@
 //! consumed-liquidity ledger. Pure: time arrives on the inputs (see the call contract in the plan).
 use crate::SimError;
 use crate::account::{Account, Valuation};
-use crate::config::SimConfig;
+use crate::config::{PolicyKind, SimConfig};
 use crate::consumed::ConsumedLiquidity;
 use crate::latency::{FrameRate, exec_delay_ms};
-use crate::policy::{Decision, Hold, OpenCtx, Planned, decide};
+use crate::policy::{
+    Decision, Hold, OpenCtx, Planned, SkipReason, decide, outcome_for, takes_kind,
+};
 use crate::rows::{AccountRow, ExecRow, FillRow, IntentRow, MarkoutRow, SimOut};
 use crate::types::{BookSide, LegKey, Outcome};
 use crate::venue::{OrderFill, fak_buy, fak_sell, outcome_levels, yes_level};
@@ -13,7 +15,7 @@ use arb_core::book::Book;
 use arb_core::detect::Kind;
 use arb_core::fee::FeeSchedule;
 use arb_core::fill::{BasketRule, BuyLeg, walk};
-use arb_core::money::Shares;
+use arb_core::money::{Price, Shares};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -140,6 +142,25 @@ pub fn mid_of(books: &impl Books, leg: &LegKey) -> Option<Decimal> {
     })
 }
 
+/// `levels` minus what `consumed` already used against them (the same mapping `pnl_now` and
+/// `filtered_ctx` both need): drops any level with nothing left.
+fn available_levels(
+    consumed: &ConsumedLiquidity,
+    key: &LegKey,
+    levels: &[(Price, Shares)],
+) -> Vec<(Price, Shares)> {
+    levels
+        .iter()
+        .filter_map(|&(px, s)| {
+            let avail = consumed.available(&yes_level(key, true, px), s.get());
+            Shares::new(avail)
+                .ok()
+                .filter(|a| a.get() > Decimal::ZERO)
+                .map(|a| (px, a))
+        })
+        .collect()
+}
+
 impl PaperTrader {
     pub fn new(cfg: SimConfig) -> Result<Self, SimError> {
         let accounts = cfg.accounts.iter().cloned().map(Account::new).collect();
@@ -200,7 +221,7 @@ impl PaperTrader {
         for a in 0..self.accounts.len() {
             let t_exec = ctx.r_open_ms + self.delay(a, max_delay);
             let acct = &self.accounts[a];
-            match decide(&self.cfg, &acct.spec, acct.free_cash(), ctx) {
+            match self.decide_for(a, ctx) {
                 Decision::NotMine => {}
                 Decision::Skip(r) => out.push(SimOut::Intent(IntentRow {
                     account: acct.id.clone(),
@@ -360,12 +381,16 @@ impl PaperTrader {
     }
 
     /// A market resolved with this payout vector: settle it in every account (spec §5.6, Q19).
+    /// The row's equity values whatever OTHER positions the account still holds (in markets that
+    /// haven't resolved yet) at the normal bid, same as any other `AccountRow` — resolving one
+    /// market must not zero out unrelated open positions in the row.
     pub fn on_resolution(
         &mut self,
         t_ms: i64,
         market_id: &str,
         payout_yes: Decimal,
         payout_no: Decimal,
+        books: &impl Books,
     ) -> Vec<SimOut> {
         let mut out = Vec::new();
         for a in 0..self.accounts.len() {
@@ -374,17 +399,16 @@ impl PaperTrader {
                 continue;
             }
             out.extend(entries.into_iter().map(SimOut::Ledger));
-            // No books here: remaining positions are valued at 0 in this row (conservative);
-            // the next minute mark revalues them at the bid.
-            let acct = &self.accounts[a];
-            let v = acct.valuation(|_| None);
-            out.push(SimOut::Account(Self::row_from(acct, t_ms, v)));
+            out.push(SimOut::Account(self.account_row(a, t_ms, books)));
         }
         out
     }
 
     /// Shutdown at `t_ms`: complete pending conversions (the on-chain step would have happened),
     /// drop pending intents (releasing their reservations), unwinds and markouts, then mark.
+    /// Callers must call `on_frame(t_ms, books)` first, as usual, so anything due at or before
+    /// `t_ms` has already executed at its own due time; `close` only disposes of what's still
+    /// outstanding after that — it does not itself run work that `on_frame` would have.
     pub fn close(&mut self, t_ms: i64, books: &impl Books) -> Vec<SimOut> {
         let mut out = Vec::new();
         let mut due: Vec<Conversion> = std::mem::take(&mut self.conversions);
@@ -462,16 +486,8 @@ impl PaperTrader {
         let mut legs = Vec::with_capacity(p.planned.legs.len());
         for l in &p.planned.legs {
             let book = books.yes_book(&l.key.yes_token)?;
-            let levels = outcome_levels(book, l.key.outcome, true)
-                .into_iter()
-                .filter_map(|(px, s)| {
-                    let avail = consumed.available(&yes_level(&l.key, true, px), s.get());
-                    Shares::new(avail)
-                        .ok()
-                        .filter(|a| a.get() > Decimal::ZERO)
-                        .map(|a| (px, a))
-                })
-                .collect();
+            let levels =
+                available_levels(consumed, &l.key, &outcome_levels(book, l.key.outcome, true));
             legs.push(BuyLeg { levels, fee: l.fee });
         }
         let rule = match p.kind {
@@ -481,6 +497,86 @@ impl PaperTrader {
             },
         };
         Some(walk(&legs, rule, None).pnl)
+    }
+
+    /// `decide`, but first narrowed to what account `a`'s own consumed liquidity leaves available
+    /// (spec §5.6, controller ruling): a real bot can't refill an order it already took unless the
+    /// feed shows genuine turnover. `decide` stays unaware of consumption — it only ever sees a
+    /// book already reduced by it; this short-circuits to a dedicated skip reason when consumption
+    /// alone kills the edge or the full-set depth, before `decide` would size against it at all.
+    fn decide_for(&self, a: usize, ctx: &OpenCtx) -> Decision {
+        let acct = &self.accounts[a];
+        if !takes_kind(acct.spec.policy, ctx.signal.kind) {
+            return Decision::NotMine;
+        }
+        let Some(fctx) = self.filtered_ctx(a, ctx) else {
+            // A malformed ctx (mismatched lengths, a used leg missing from `ctx.legs`): let
+            // `decide` report `BadInput` on the original, unfiltered ctx as it always has.
+            return decide(&self.cfg, &acct.spec, acct.free_cash(), ctx);
+        };
+        let naive = acct.spec.policy == PolicyKind::P3Naive;
+        let quote = if naive {
+            &fctx.signal.gross
+        } else {
+            &fctx.signal.quote
+        };
+        let edge = if naive { quote.pnl_gross } else { quote.pnl };
+        let depth = quote
+            .legs
+            .iter()
+            .map(|l| l.filled)
+            .min()
+            .unwrap_or(Decimal::ZERO);
+        if edge <= Decimal::ZERO || depth <= Decimal::ZERO {
+            return Decision::Skip(SkipReason::Consumed);
+        }
+        decide(&self.cfg, &acct.spec, acct.free_cash(), &fctx)
+    }
+
+    /// `ctx.open_levels` and `signal.{quote,gross}` narrowed to what account `a`'s own consumed
+    /// liquidity leaves available (the mapping `pnl_now` uses). `None` for a malformed `ctx`
+    /// (mismatched lengths, or a used leg missing from `ctx.legs`).
+    fn filtered_ctx(&self, a: usize, ctx: &OpenCtx) -> Option<OpenCtx> {
+        let consumed = &self.consumed[a];
+        let kind = ctx.signal.kind;
+        let used = &ctx.signal.legs_used;
+        if ctx.open_levels.len() != used.len() {
+            return None;
+        }
+        let rule = match kind {
+            Kind::NoBasket => BasketRule::NestedNo,
+            _ => BasketRule::AllLegs {
+                payoff: Decimal::ONE,
+            },
+        };
+        let mut open_levels = Vec::with_capacity(used.len());
+        let mut net_legs = Vec::with_capacity(used.len());
+        let mut gross_legs = Vec::with_capacity(used.len());
+        for (pos, (&gi, levels)) in used.iter().zip(&ctx.open_levels).enumerate() {
+            let info = ctx.legs.get(gi)?;
+            let key = LegKey {
+                market_id: info.market_id.clone(),
+                yes_token: info.yes_token.clone(),
+                outcome: outcome_for(kind, pos),
+            };
+            let filtered = available_levels(consumed, &key, levels);
+            net_legs.push(BuyLeg {
+                levels: filtered.clone(),
+                fee: info.fee,
+            });
+            gross_legs.push(BuyLeg {
+                levels: filtered.clone(),
+                fee: FeeSchedule::ZERO,
+            });
+            open_levels.push(filtered);
+        }
+        let mut signal = ctx.signal.clone();
+        signal.quote = walk(&net_legs, rule, None);
+        signal.gross = walk(&gross_legs, rule, None);
+        let mut out = ctx.clone();
+        out.signal = signal;
+        out.open_levels = open_levels;
+        Some(out)
     }
 
     fn execute(&mut self, p: Pending, books: &impl Books, out: &mut Vec<SimOut>) {
@@ -587,18 +683,36 @@ impl PaperTrader {
             pnl_at_tx,
             hit: pnl_at_tx.is_some_and(|x| x > Decimal::ZERO),
         }));
+        debug_assert!(
+            self.accounts[a].cash >= self.accounts[a].reserved,
+            "account {}: cash {} < reserved {} after execution",
+            self.accounts[a].id,
+            self.accounts[a].cash,
+            self.accounts[a].reserved
+        );
     }
 
     fn unwind(&mut self, u: Unwind, books: &impl Books, out: &mut Vec<SimOut>) {
-        let qty = u.qty.round_dp_with_strategy(2, RoundingStrategy::ToZero);
-        // Below the venue minimum there is no order: the inventory is held, marked at the bid.
-        if qty < self.cfg.min_order_shares {
-            return;
-        }
-        let Some(book) = books.yes_book(&u.leg.yes_token) else {
-            return;
+        let held = self.accounts[u.acct]
+            .positions
+            .get(&u.leg)
+            .map_or(Decimal::ZERO, |p| p.qty)
+            .round_dp_with_strategy(2, RoundingStrategy::ToZero);
+        // Cap at what we actually hold: a stale unwind (e.g. a position already reduced by
+        // another event) can't sell shares we don't have.
+        let qty = u
+            .qty
+            .round_dp_with_strategy(2, RoundingStrategy::ToZero)
+            .min(held);
+        // Below the venue minimum, or the book gone: no order goes out, but the held inventory
+        // still gets a zero-fill row (side "sell", filled 0) so it stays visible — a real bot
+        // would see the same held-not-sold leg risk, not silence.
+        let f = match books.yes_book(&u.leg.yes_token) {
+            Some(book) if qty >= self.cfg.min_order_shares => {
+                fak_sell(book, &u.leg, u.fee, qty, &mut self.consumed[u.acct])
+            }
+            _ => OrderFill::default(),
         };
-        let f = fak_sell(book, &u.leg, u.fee, qty, &mut self.consumed[u.acct]);
         out.push(SimOut::Fill(FillRow {
             account: self.accounts[u.acct].id.clone(),
             episode_id: u.episode_id.clone(),
