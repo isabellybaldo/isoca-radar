@@ -12,6 +12,12 @@ pub enum ApiError {
     Ws(Box<tokio_tungstenite::tungstenite::Error>),
     #[error("pagination made no progress after {0} pages (cursor ignored?)")]
     Stuck(usize),
+    #[error("no frame for {silent_ms} ms on conn {conn}")]
+    Stale { conn: usize, silent_ms: u64 },
+    #[error("timed out: {0}")]
+    Timeout(&'static str),
+    #[error("receiver full; frame dropped on conn {conn}")]
+    Dropped { conn: usize },
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for ApiError {

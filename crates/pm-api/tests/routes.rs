@@ -28,12 +28,25 @@ fn table_agrees_with_the_constants() {
     assert_eq!(ALLOWED[5].1, WS_SPORTS);
 }
 
+/// Recursively collect every file under `dir`.
+fn files_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
 fn no_url_literals_outside_routes_rs() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    files_under(&src, &mut files);
     let mut hits = Vec::new();
-    for entry in fs::read_dir(&src).unwrap() {
-        let path = entry.unwrap().path();
+    for path in files {
         if path.file_name().is_some_and(|n| n == "routes.rs") {
             continue;
         }

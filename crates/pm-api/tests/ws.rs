@@ -25,6 +25,7 @@ fn initial_dump_array_of_books() {
             server_ts_ms: 1_790_121_492_396,
             bids: vec![(p("0.48"), sh("30"))],
             asks: vec![(p("0.52"), sh("25"))],
+            hash: Some("h".into()),
         }
     );
 }
@@ -89,6 +90,48 @@ fn malformed_frames_are_errors_not_panics() {
     assert!(parse_frame(r#"{"event_type":"book","asset_id":"1","timestamp":"1","bids":[{"price":"2","size":"1"}],"asks":[]}"#).is_err());
     assert!(parse_frame(r#"{"event_type":"price_change","timestamp":"1","price_changes":[{"asset_id":"1","price":"0.5","size":"1","side":"HOLD"}]}"#).is_err());
     assert!(parse_frame(r#"{"event_type":"book","asset_id":"1","bids":[],"asks":[]}"#).is_err()); // no timestamp
+}
+
+#[test]
+fn resolved_and_new_market_timestamps_never_default_to_zero() {
+    // No timestamp at all.
+    let ev = parse_frame(r#"{"event_type":"market_resolved","market":"0xabc"}"#).unwrap();
+    assert_eq!(
+        ev,
+        vec![MarketEvent::Resolved {
+            market: Some("0xabc".into()),
+            server_ts_ms: None,
+        }]
+    );
+    // Invalid (non-numeric) timestamp.
+    let ev = parse_frame(r#"{"event_type":"market_resolved","timestamp":"not-a-number"}"#).unwrap();
+    assert_eq!(
+        ev,
+        vec![MarketEvent::Resolved {
+            market: None,
+            server_ts_ms: None,
+        }]
+    );
+    let ev = parse_frame(r#"{"event_type":"new_market"}"#).unwrap();
+    assert_eq!(ev, vec![MarketEvent::NewMarket { server_ts_ms: None }]);
+    let ev = parse_frame(r#"{"event_type":"new_market","timestamp":"1790121493001"}"#).unwrap();
+    assert_eq!(
+        ev,
+        vec![MarketEvent::NewMarket {
+            server_ts_ms: Some(1_790_121_493_001)
+        }]
+    );
+}
+
+#[test]
+fn bad_item_in_array_names_its_asset_id() {
+    let f = r#"[{"event_type":"book","asset_id":"111","timestamp":"1","bids":[],"asks":[]},
+                {"event_type":"book","asset_id":"bad-one","timestamp":"1",
+                 "bids":[{"price":"2","size":"1"}],"asks":[]}]"#;
+    let err = parse_frame(f).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("asset_id="), "{msg}");
+    assert!(msg.contains("bad-one"), "{msg}");
 }
 
 #[test]

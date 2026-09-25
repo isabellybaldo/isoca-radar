@@ -83,11 +83,11 @@ pub struct ClobClient {
 }
 
 impl ClobClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self {
-            http,
+    pub fn new() -> Result<Self, ApiError> {
+        Ok(Self {
+            http: crate::http::http_client()?,
             base: CLOB_BASE.to_string(),
-        }
+        })
     }
 
     pub async fn books(&self, tokens: &[String]) -> Result<Vec<BookWire>, ApiError> {

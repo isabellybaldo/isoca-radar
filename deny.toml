@@ -18,4 +18,6 @@ deny = [
   { name = "ethers-core" },
   { name = "libsecp256k1" },
   { name = "ecdsa" },
+  { name = "reqwest", wrappers = ["pm-api"] },
+  { name = "tokio-tungstenite", wrappers = ["pm-api"] },
 ]

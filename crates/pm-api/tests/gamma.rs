@@ -151,6 +151,7 @@ fn pager_follows_after_cursor_until_exhausted() {
             async move { parse_page(&text) }
         },
         100,
+        100,
     ))
     .unwrap();
     let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
@@ -171,6 +172,7 @@ fn pager_errors_when_the_cursor_is_ignored() {
             async move { parse_page(&t) }
         },
         100,
+        100,
     ));
     assert!(matches!(r, Err(pm_api::ApiError::Stuck(2))));
 }
@@ -185,9 +187,49 @@ fn pager_errors_at_max_pages() {
             async move { parse_page(&t) }
         },
         3,
+        100,
     ));
     assert!(
         matches!(r, Err(pm_api::ApiError::Stuck(3))),
         "max_pages reached is an error, not a silent stop"
     );
+}
+
+#[test]
+fn short_final_page_with_empty_cursor_is_ok() {
+    // "" (not null) is how a real final page signals done; still fine when the page is short.
+    let text = page_json(&["1"], Some(""));
+    let out = block_on(fetch_all(
+        |_| {
+            let t = text.clone();
+            async move { parse_page(&t) }
+        },
+        100,
+        100,
+    ))
+    .unwrap();
+    let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["1"]);
+}
+
+#[test]
+fn full_page_with_no_cursor_is_an_error_not_a_silent_truncation() {
+    // page_size 2, and the page brought exactly 2 events with no cursor: that shape is more
+    // likely a renamed/dropped cursor field than a real final page (spec F7).
+    let text = page_json(&["1", "2"], None);
+    let r = block_on(fetch_all(
+        |_| {
+            let t = text.clone();
+            async move { parse_page(&t) }
+        },
+        100,
+        2,
+    ));
+    assert!(matches!(
+        r,
+        Err(pm_api::ApiError::Field {
+            field: "next_cursor",
+            ..
+        })
+    ));
 }

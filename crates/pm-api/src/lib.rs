@@ -5,14 +5,20 @@ pub mod backoff;
 pub mod clob;
 pub mod error;
 pub mod gamma;
+mod http;
 pub mod routes;
 pub mod wire;
 pub mod ws;
 
 pub use error::ApiError;
 
-/// Install the ring crypto provider for rustls once per process. Call before any client is built:
-/// with more than one provider in the dependency graph rustls cannot choose on its own.
+static TLS_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Install the ring crypto provider for rustls once per process (idempotent).
+/// Consumers no longer need to call this themselves: `http_client()` and `run_connection`
+/// both call it internally. Kept public for compatibility with existing callers.
 pub fn init_tls() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    TLS_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }

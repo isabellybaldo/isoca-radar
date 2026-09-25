@@ -165,7 +165,14 @@ pub fn leg_status(m: &GammaMarket, augmented: bool) -> LegStatus {
 /// Page through Gamma's keyset endpoint. Stops when no cursor is returned.
 /// A page that brings no new ids while a cursor is still offered, or hitting `max_pages`,
 /// is an error: a silently truncated universe is worse than a failed refresh (spec §7).
-pub async fn fetch_all<F, Fut>(mut fetch: F, max_pages: usize) -> Result<Vec<GammaEvent>, ApiError>
+/// A page with no cursor that is nonetheless full (`events.len() >= page_size`) is also an
+/// error: that shape means the "no more pages" signal is more likely a renamed/dropped field
+/// than an actually-final short page (spec F7).
+pub async fn fetch_all<F, Fut>(
+    mut fetch: F,
+    max_pages: usize,
+    page_size: usize,
+) -> Result<Vec<GammaEvent>, ApiError>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = Result<KeysetPage, ApiError>>,
@@ -175,6 +182,7 @@ where
     let mut cursor: Option<String> = None;
     for pages in 1..=max_pages {
         let page = fetch(cursor.clone()).await?;
+        let page_len = page.events.len();
         let mut new_ids = 0usize;
         for e in page.events {
             if seen.insert(e.id.clone()) {
@@ -189,7 +197,15 @@ where
                 }
                 cursor = Some(c);
             }
-            _ => return Ok(out),
+            _ => {
+                if page_len >= page_size {
+                    return Err(ApiError::field(
+                        "next_cursor",
+                        "missing on a full page (field renamed?)",
+                    ));
+                }
+                return Ok(out);
+            }
         }
     }
     Err(ApiError::Stuck(max_pages))
@@ -201,11 +217,11 @@ pub struct GammaClient {
 }
 
 impl GammaClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self {
-            http,
+    pub fn new() -> Result<Self, ApiError> {
+        Ok(Self {
+            http: crate::http::http_client()?,
             base: GAMMA_BASE.to_string(),
-        }
+        })
     }
 
     /// One page of active, open events (≤ 100). The cursor parameter is exactly `after_cursor`.
@@ -231,6 +247,6 @@ impl GammaClient {
     }
 
     pub async fn all_active_events(&self) -> Result<Vec<GammaEvent>, ApiError> {
-        fetch_all(|c| self.page(c), 1_000).await
+        fetch_all(|c| self.page(c), 1_000, 100).await
     }
 }
