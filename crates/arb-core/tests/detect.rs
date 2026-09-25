@@ -267,3 +267,178 @@ proptest! {
         prop_assert!(!(yes && no));
     }
 }
+
+/// A live, zero-fee leg with at most one level per side, size 10.
+fn leg6(bid: Option<&str>, ask: Option<&str>) -> GroupLeg {
+    let s = Shares::parse("10").unwrap();
+    let bids: Vec<(Price, Shares)> = bid
+        .map(|p| (Price::parse(p).unwrap(), s))
+        .into_iter()
+        .collect();
+    let asks: Vec<(Price, Shares)> = ask
+        .map(|p| (Price::parse(p).unwrap(), s))
+        .into_iter()
+        .collect();
+    let mut b = Book::default();
+    b.apply_snapshot(&bids, &asks, 0);
+    GroupLeg {
+        status: LegStatus::Live,
+        book: b,
+        fee: FeeSchedule::ZERO,
+    }
+}
+
+fn grp(legs: Vec<GroupLeg>) -> Group {
+    Group {
+        legs,
+        augmented: false,
+    }
+}
+
+#[test]
+fn gate_boundaries_match_the_detectors_at_six_decimals() {
+    // Spec §15: ΣA = 1.000000 → none; 0.999999 → yes.
+    let at = grp(vec![
+        leg6(None, Some("0.400000")),
+        leg6(None, Some("0.600000")),
+    ]);
+    assert!(!yes_basket_may_signal(&at));
+    assert!(detect_yes_basket(&at).is_none());
+    let under = grp(vec![
+        leg6(None, Some("0.399999")),
+        leg6(None, Some("0.600000")),
+    ]);
+    assert!(yes_basket_may_signal(&under));
+    assert!(detect_yes_basket(&under).is_some());
+    // ΣB = 1.000000 → none; 1.000001 → yes.
+    let at = grp(vec![
+        leg6(Some("0.400000"), None),
+        leg6(Some("0.600000"), None),
+    ]);
+    assert!(!no_basket_may_signal(&at));
+    assert!(detect_no_basket(&at).is_none());
+    let over = grp(vec![
+        leg6(Some("0.400001"), None),
+        leg6(Some("0.600000"), None),
+    ]);
+    assert!(no_basket_may_signal(&over));
+    assert!(detect_no_basket(&over).is_some());
+}
+
+#[test]
+fn gate_is_false_when_a_leg_is_missing_its_side_or_nothing_is_live() {
+    // YES: a live leg with no ask can't be in a complete basket, however cheap the others are.
+    let g = grp(vec![leg6(None, Some("0.10")), leg6(Some("0.05"), None)]);
+    assert!(!yes_basket_may_signal(&g));
+    assert!(detect_yes_basket(&g).is_none());
+    // YES: no live leg at all.
+    let mut dark = grp(vec![leg6(None, Some("0.10"))]);
+    dark.legs[0].status = LegStatus::Placeholder;
+    assert!(!yes_basket_may_signal(&dark));
+    assert!(detect_yes_basket(&dark).is_none());
+    // NO: only one live leg has a bid (D2b needs ≥ 2), even at 0.99.
+    let g = grp(vec![leg6(Some("0.99"), None), leg6(None, Some("0.50"))]);
+    assert!(!no_basket_may_signal(&g));
+    assert!(detect_no_basket(&g).is_none());
+    // Non-live legs never count: live asks 0.30 + 0.30 < 1 with a ClosedNo leg at 0.50.
+    let mut g = grp(vec![
+        leg6(None, Some("0.30")),
+        leg6(None, Some("0.30")),
+        leg6(None, Some("0.50")),
+    ]);
+    g.legs[2].status = LegStatus::ClosedNo;
+    assert!(yes_basket_may_signal(&g));
+    assert!(detect_yes_basket(&g).is_some());
+}
+
+#[test]
+fn gate_uses_the_gross_threshold_so_fee_eaten_baskets_still_reach_the_detector() {
+    // m3's books: gross edge 0.20 > 0, net exactly 0. The detector reports the gross signal
+    // (Signal.gross feeds paper comparisons), so the gate must not hide it.
+    let f = FeeSchedule::new(dec!(0.5), 1).unwrap();
+    let mut a = live("0.10", "0.20");
+    let mut b = live("0.50", "0.60");
+    a.fee = f;
+    b.fee = f;
+    let g = grp(vec![a, b]);
+    assert!(yes_basket_may_signal(&g));
+    let s = detect_yes_basket(&g).unwrap();
+    assert!(!s.net_positive());
+}
+
+#[test]
+fn a_crossed_book_opens_the_gate_but_the_detector_still_refuses() {
+    // Σ asks = 0.50 < 1, but leg 0 is crossed (bid 0.40 > ask 0.30): D1 wins.
+    let g = grp(vec![
+        leg6(Some("0.40"), Some("0.30")),
+        leg6(None, Some("0.20")),
+    ]);
+    assert!(yes_basket_may_signal(&g));
+    assert!(detect_yes_basket(&g).is_none());
+}
+
+fn arb_leg() -> impl Strategy<Value = GroupLeg> {
+    let status = prop_oneof![
+        6 => Just(LegStatus::Live),
+        1 => Just(LegStatus::Placeholder),
+        1 => Just(LegStatus::ClosedNo),
+        1 => Just(LegStatus::ClosedYes),
+        1 => Just(LegStatus::Halted),
+    ];
+    let side = || prop::collection::vec((1u32..=99, 1u32..=50), 0..=3); // (cents, shares)
+    (status, side(), side(), 0u32..=25, 1u8..=4).prop_map(|(status, bids, asks, rate, exp)| {
+        let lv = |v: &[(u32, u32)]| -> Vec<(Price, Shares)> {
+            v.iter()
+                .map(|&(c, s)| {
+                    (
+                        Price::new(Decimal::new(c.into(), 2)).unwrap(),
+                        Shares::new(Decimal::from(s)).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let mut book = Book::default();
+        book.apply_snapshot(&lv(&bids), &lv(&asks), 0);
+        GroupLeg {
+            status,
+            book,
+            fee: FeeSchedule::new(Decimal::new(rate.into(), 2), exp).unwrap(),
+        }
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// S3a-2: a false gate ⇒ the detector returns None (the engine may skip it); a true gate on
+    /// an undecided group with uncrossed relevant legs ⇒ Some (the gate is exact, not loose).
+    #[test]
+    fn gate_false_means_no_signal_and_gate_true_is_exact(
+        legs in prop::collection::vec(arb_leg(), 1..=6),
+        augmented in any::<bool>(),
+    ) {
+        let g = Group { legs, augmented };
+        let decided = g.legs.iter().any(|l| l.status == LegStatus::ClosedYes);
+
+        let yes = detect_yes_basket(&g);
+        let live_crossed = g
+            .legs
+            .iter()
+            .any(|l| l.status == LegStatus::Live && l.book.is_crossed());
+        if !yes_basket_may_signal(&g) {
+            prop_assert!(yes.is_none(), "YES gate false but the detector signalled");
+        } else if !decided && !live_crossed {
+            prop_assert!(yes.is_some(), "YES gate true, undecided, uncrossed, yet no signal");
+        }
+
+        let no = detect_no_basket(&g);
+        let used_crossed = g.legs.iter().any(|l| {
+            l.status == LegStatus::Live && l.book.top().best_bid.is_some() && l.book.is_crossed()
+        });
+        if !no_basket_may_signal(&g) {
+            prop_assert!(no.is_none(), "NO gate false but the detector signalled");
+        } else if !decided && !used_crossed {
+            prop_assert!(no.is_some(), "NO gate true, undecided, uncrossed, yet no signal");
+        }
+    }
+}

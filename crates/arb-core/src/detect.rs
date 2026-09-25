@@ -170,6 +170,53 @@ pub fn detect_no_basket(g: &Group) -> Option<Signal> {
     })
 }
 
+/// Spec §5.4/§8.2 threshold for D2a: can `detect_yes_basket(g)` return `Some`? O(live legs),
+/// reads only each live leg's top of book, allocates nothing.
+///
+/// Contract: `false` ⇒ `detect_yes_basket(g)` is `None`, so a caller may skip the depth walk.
+/// `true` on an undecided group with no crossed live leg ⇒ it is `Some`.
+///
+/// Proof: the detector walks only when every live leg (≥ 1) has an ask. Its zero-fee walk
+/// (`run(…).1`, the one `pnl_gross` comes from) then starts with every live leg at its best ask
+/// (`asks_best_first()[0] == top().best_ask`), so its first-segment edge is m = 1 − ΣA, exact in
+/// `Decimal` (≤ 6 dp prices, ≤ 100 legs). `walk` breaks before taking anything when m ≤ 0, which
+/// leaves `pnl_gross = 0`, so the detector returns `None`. Conversely m > 0 takes a first segment
+/// of positive size (books hold only sizes > 0), and every segment walked has m > 0, so
+/// `pnl_gross > 0`. Decided and crossed groups are left to the detector, which rejects them itself.
+/// The threshold is the detector's own GROSS one on purpose: D2a reports gross-positive signals
+/// (`Signal.gross`) even when fees make them net-negative.
+pub fn yes_basket_may_signal(g: &Group) -> bool {
+    let mut sum_ask = Decimal::ZERO;
+    let mut any_live = false;
+    for leg in g.legs.iter().filter(|l| l.status == LegStatus::Live) {
+        let Some((ask, _)) = leg.book.top().best_ask else {
+            return false; // an incomplete basket: the detector returns None too
+        };
+        sum_ask += ask.get();
+        any_live = true;
+    }
+    any_live && sum_ask < Decimal::ONE
+}
+
+/// Spec §5.4/§8.2 threshold for D2b: can `detect_no_basket(g)` return `Some`? O(live legs).
+///
+/// Contract: as `yes_basket_may_signal`. Proof: the detector's zero-fee `NestedNo` walk starts
+/// with the k ≥ 2 live legs that have a YES bid, each at its best NO ask 1 − b_i
+/// (`no_asks_best_first()[0] == top().best_bid.complement()`), paying k − 1, so its first edge is
+/// m = (k − 1) − Σ(1 − b_i) = ΣB − 1, exact in `Decimal`. m ≤ 0 ⇒ `pnl_gross = 0` ⇒ `None`;
+/// m > 0 ⇒ `pnl_gross > 0` ⇒ `Some` on an undecided group with no crossed used leg.
+pub fn no_basket_may_signal(g: &Group) -> bool {
+    let mut sum_bid = Decimal::ZERO;
+    let mut used = 0usize;
+    for leg in g.legs.iter().filter(|l| l.status == LegStatus::Live) {
+        if let Some((bid, _)) = leg.book.top().best_bid {
+            sum_bid += bid.get();
+            used += 1;
+        }
+    }
+    used >= 2 && sum_bid > Decimal::ONE
+}
+
 /// D3 (L10): for a curated pair where A ⇒ B, buy NO_A + YES_B. Both legs must be live.
 /// D1: a crossed book means our local state is wrong, never a signal — returns `None` if either
 /// leg's book is crossed.
