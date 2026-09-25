@@ -3,6 +3,7 @@
 mod capture;
 mod conncap;
 mod mirror;
+mod report;
 mod shards;
 mod universe;
 
@@ -57,6 +58,11 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Summarize a capture directory (frames.csv → report.md).
+    Report {
+        #[arg(long)]
+        dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -107,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
             let u = universe::Universe::load(&universe)?;
             mirror::mirror(&u, &out).await?;
         }
+        Cmd::Report { dir } => report::report(&dir)?,
     }
     Ok(())
 }
