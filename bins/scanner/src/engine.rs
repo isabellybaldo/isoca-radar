@@ -719,10 +719,13 @@ impl Engine {
         let event_id = group.map(|g| self.universe.groups[g].event_id.clone());
         if let Some(mut detail) = mismatch {
             // Rule 1 (S3a Task 8): the stream's top is authoritative. Drop every level of ours
-            // the server's top disproves, then see if that alone repairs the disagreement.
+            // the server's top disproves, then see if that alone repairs the disagreement. The
+            // trim is unconditional: a phantom level must never be priced, whether or not it's
+            // the ONLY thing wrong with the book.
             let (sb, sa) = server.unwrap_or((None, None));
+            let mut changed = false;
             let repaired = self.book_mut(token).is_some_and(|b| {
-                b.trim_to_top(sb, sa);
+                changed = b.trim_to_top(sb, sa);
                 let t = b.top();
                 (sb.is_none() || sb == t.best_bid.map(|(x, _)| x))
                     && (sa.is_none() || sa == t.best_ask.map(|(x, _)| x))
@@ -753,7 +756,11 @@ impl Engine {
             if let Some(g) = group {
                 self.suspect(g, ts + self.ctx.suspect_window_ms, ts, out);
             }
-            if repaired && let Some(g) = group {
+            // Re-evaluate whenever the trim changed the book, repaired or not (review round 1,
+            // 2026-09-25): a phantom that only partly disproves our top still puts a wrong book
+            // in front of `evaluate`, and the close time must depend on the mismatch's own `ts`,
+            // never on whether some OTHER traffic happens to share this frame.
+            if changed && let Some(g) = group {
                 let eval_ts = ts.max(self.group_last_ts.get(g).copied().unwrap_or(i64::MIN));
                 self.evaluate(g, eval_ts, eval_ts, out);
             }
@@ -1104,6 +1111,33 @@ impl Engine {
         let mut out = Vec::new();
         for e in self.tracker.close_all(ts_ms) {
             self.close_episode(e, &mut out);
+        }
+        // A suppressed throttle count is a measurement, never silently dropped (review round 1,
+        // 2026-09-25): flush every (kind, token) still holding one as its own integrity row, in
+        // a deterministic order, then reset it.
+        let mut suppressed: Vec<(&'static str, String, u32)> = Vec::new();
+        for ((kind, token), t) in self.issue_throttle.iter_mut() {
+            if t.suppressed > 0 {
+                suppressed.push((*kind, token.clone(), t.suppressed));
+                t.suppressed = 0;
+            }
+        }
+        suppressed.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(&b.1)));
+        for (kind, token, n) in suppressed {
+            let event_id = self
+                .token_ix
+                .get(&token)
+                .map(|&(g, _)| self.universe.groups[g].event_id.clone());
+            out.push(self.integrity(
+                ts_ms,
+                Issue {
+                    kind,
+                    shard: None,
+                    token: Some(token),
+                    event_id,
+                    detail: Some(format!("+{n} suppressed (at close)")),
+                },
+            ));
         }
         out
     }

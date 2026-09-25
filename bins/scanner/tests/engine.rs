@@ -559,16 +559,17 @@ fn a_leg_removed_from_an_open_episodes_event_closes_it_right_censored_without_pa
     assert_eq!(e.open_episodes(), 0);
 }
 
-/// y0 ask 0.40 → 0.30 opens a basket (ΣA = 0.95) at 2_000, but the server says the final top
-/// ask is 0.31: our book is wrong, and the deferred check only finds out a frame later.
+/// y0 ask 0.40 → 0.30 opens a REAL basket (ΣA = 0.96 < 1) at 2_000; the server's reported top ask
+/// is 0.29, a level we LACK (0.30 > 0.29 is not proof of a phantom): nothing gets trimmed, so the
+/// deferred check can only be resolved by a resnapshot, and the basket stays open until then.
 fn open_on_a_wrong_book(e: &mut scanner::engine::Engine) -> Vec<Out> {
     seed(e);
     e.on_frame(
         0,
         2_100,
         &[
-            delta("e1-y0", 2_000, Side::Ask, "0.30", "10", None, Some("0.31")),
-            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.31")),
+            delta("e1-y0", 2_000, Side::Ask, "0.30", "10", None, Some("0.29")),
+            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.29")),
         ],
     )
 }
@@ -579,10 +580,9 @@ fn a_late_top_mismatch_flags_the_episode_already_open_in_its_group() {
     let open = episodes(&open_on_a_wrong_book(&mut e));
     assert_eq!(open.len(), 1);
     assert!(!open[0].engine_suspect, "nothing is known to be wrong yet");
-    // a later frame on the same conn (> 1 s past 2_000) resolves the check as a real mismatch.
-    // Our only ask (0.30) is strictly below the server's reported top (0.31): S3a Task 8 trims it
-    // as a phantom, which also exposes that the basket it opened was fake, so the same frame
-    // closes the episode, still flagged suspect.
+    // a later frame on the same conn (> 1 s past 2_000) resolves the check as a real mismatch: a
+    // missing level (ours 0.30 is above the server's 0.29), so nothing is trimmed and the real,
+    // still-open basket is only flagged suspect, not closed.
     let outs = e.on_frame(0, 3_200, &[ask("e1-y2", 3_001, "0.30", "10")]);
     assert!(
         outs.iter()
@@ -595,7 +595,51 @@ fn a_late_top_mismatch_flags_the_episode_already_open_in_its_group() {
         .find(|r| r.episode_id == "live-7-00000001")
         .expect("the open episode is re-emitted");
     assert!(last.engine_suspect);
-    assert_eq!(last.closed_server_ms, Some(3_001));
+    assert_eq!(last.closed_server_ms, None, "still open");
+    let outs = e.close_all(4_000);
+    assert!(episodes(&outs)[0].engine_suspect, "and it stays flagged");
+}
+
+#[test]
+fn a_phantom_trim_that_empties_the_ask_side_closes_the_real_episode_early() {
+    let mut e = engine();
+    seed(&mut e); // e1 legs known at ts 1_000: ΣA = 1.05, no basket
+    // y0 ask 0.40 → 0.30 opens a basket (ΣA = 0.95) at 2_000, but the server's own final top ask
+    // is 0.31: our 0.30 is a phantom the stream itself disproves (Rule 1), not a missing level.
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[
+            delta("e1-y0", 2_000, Side::Ask, "0.30", "10", None, Some("0.31")),
+            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.31")),
+        ],
+    );
+    let open = episodes(&outs);
+    assert_eq!(open.len(), 1);
+    assert!(!open[0].engine_suspect);
+    // a later frame on the same conn resolves the deferred check: trimming the phantom leaves
+    // y0's ask side empty (the true 0.31 level isn't ours to show until a resnapshot lands), so
+    // the basket it created is exposed as fake and closes in the SAME pass as the suspect flag —
+    // first the still-open, now-suspect row, then its close, both stamped with the mismatch's
+    // own ts (2_000), never the resolving frame's.
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y1", 3_001, "0.20", "10")]);
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+    let mine: Vec<_> = episodes(&outs)
+        .into_iter()
+        .filter(|r| r.episode_id == "live-7-00000001")
+        .collect();
+    assert_eq!(mine.len(), 2, "{mine:?}");
+    assert!(
+        mine[0].engine_suspect && mine[0].closed_server_ms.is_none(),
+        "{mine:?}"
+    );
+    assert!(
+        mine[1].engine_suspect && mine[1].closed_server_ms == Some(2_000),
+        "{mine:?}"
+    );
 }
 
 #[test]
@@ -729,4 +773,100 @@ fn a_persistent_mismatch_is_reported_at_most_once_per_throttle_window() {
     assert_eq!(resnaps, 2);
     assert!(details[1].ends_with("(+4 suppressed)"), "{details:?}");
     assert!(!details[0].contains("repaired"));
+}
+
+#[test]
+fn a_non_repairing_trim_still_forces_the_groups_close_even_from_another_groups_frame() {
+    let mut e = engine();
+    seed(&mut e); // e1 legs known at ts 1_000: ΣA = 1.05, no basket
+    // add a second, independent group on the SAME connection: its own traffic must be able to
+    // resolve e1's deferred check without ever putting e1's group in that frame's `touched` set
+    let u = Arc::new(Universe {
+        taken_ms: 1,
+        groups: vec![meta("e1", 3), meta("e2", 1)],
+        canary: vec![],
+    });
+    let conn: HashMap<String, usize> = [("e1".to_string(), 0), ("e2".to_string(), 0)]
+        .into_iter()
+        .collect();
+    assert!(e.apply_universe(u, &conn, 0).is_empty());
+    // y0 ask 0.40 → 0.30 opens a basket (ΣA = 0.95) at 2_000, but the server's final top ask is
+    // 0.31: our 0.30 is a phantom (Rule 1), and trimming it leaves the ask side empty (a missing
+    // level, not a repair).
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[
+            delta("e1-y0", 2_000, Side::Ask, "0.30", "10", None, Some("0.31")),
+            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.31")),
+        ],
+    );
+    assert_eq!(episodes(&outs).len(), 1);
+    // resolved by a frame that touches ONLY e2, on the same conn/shard: without the review-round-1
+    // fix, e1's group would never be re-evaluated here (it isn't in this frame's `touched` set)
+    // and the fake basket would linger until e1's own next frame.
+    let outs = e.on_frame(0, 3_200, &[ask("e2-y0", 3_001, "0.99", "5")]);
+    let closed = episodes(&outs)
+        .into_iter()
+        .rev()
+        .find(|r| r.episode_id == "live-7-00000001")
+        .expect("e1's episode closes even though this frame never touches group e1");
+    // stamped with the mismatch's own ts (2_000, == group_last_ts at the time), not the resolving
+    // frame's ts (3_001): the close time never depends on unrelated traffic sharing the frame.
+    assert_eq!(closed.closed_server_ms, Some(2_000));
+    assert!(closed.engine_suspect);
+}
+
+#[test]
+fn close_all_flushes_suppressed_throttle_counts_in_sorted_order_then_resets_them() {
+    let mut e = engine();
+    seed(&mut e); // e1-y1 ask 0.35, e1-y2 ask 0.30
+    // for each token: 3 resolutions inside the 5_000 ms throttle window — the first emits (n=0),
+    // the second is suppressed and never gets its own row. 0.01 is far below anything we hold, so
+    // it's always a missing level: no trim, no interference with the count itself.
+    for token in ["e1-y2", "e1-y1"] {
+        for k in 0..3_i64 {
+            let t = 2_000 + k * 1_100;
+            e.on_frame(
+                0,
+                t + 100,
+                &[MarketEvent::Delta {
+                    token: token.into(),
+                    server_ts_ms: t,
+                    side: Side::Ask,
+                    price: p("0.50"),
+                    size: sh("5"),
+                    best_bid: None,
+                    best_ask: Some(p("0.01")),
+                }],
+            );
+        }
+    }
+    let outs = e.close_all(9_999);
+    let rows: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            Out::Integrity(i) if i.kind == "top_mismatch" => Some(i.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "a suppressed count is a measurement, never dropped: {rows:?}"
+    );
+    // sorted by (kind, token): deterministic regardless of the throttle map's iteration order
+    assert_eq!(rows[0].token.as_deref(), Some("e1-y1"), "{rows:?}");
+    assert_eq!(rows[1].token.as_deref(), Some("e1-y2"), "{rows:?}");
+    for r in &rows {
+        assert_eq!(r.detail.as_deref(), Some("+1 suppressed (at close)"));
+        assert_eq!(r.ts_ms, 9_999);
+        assert_eq!(r.shard, None);
+    }
+    // flushed exactly once: reset, so a second close_all has nothing left to report
+    assert!(
+        !e.close_all(20_000)
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
 }
