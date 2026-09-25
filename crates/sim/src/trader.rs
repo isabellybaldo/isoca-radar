@@ -15,6 +15,7 @@ use arb_core::fee::FeeSchedule;
 use arb_core::fill::{BasketRule, BuyLeg, walk};
 use arb_core::money::Shares;
 use rust_decimal::{Decimal, RoundingStrategy};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Read access to the engine's YES books.
@@ -92,6 +93,13 @@ enum Which {
     Conversion(usize),
     Markout(usize),
     Mark,
+}
+
+/// What survives a restart: the accounts. Pending intents, unwinds and markouts are dropped at
+/// shutdown (`close`); pending conversions are completed by `close`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraderState {
+    pub accounts: Vec<Account>,
 }
 
 pub struct PaperTrader {
@@ -349,6 +357,90 @@ impl PaperTrader {
             self.next_mark_ms = Some(mark_boundary_after(self.cfg.mark_every_ms, recv_ms));
         }
         out
+    }
+
+    /// A market resolved with this payout vector: settle it in every account (spec §5.6, Q19).
+    pub fn on_resolution(
+        &mut self,
+        t_ms: i64,
+        market_id: &str,
+        payout_yes: Decimal,
+        payout_no: Decimal,
+    ) -> Vec<SimOut> {
+        let mut out = Vec::new();
+        for a in 0..self.accounts.len() {
+            let entries = self.accounts[a].settle(t_ms, market_id, payout_yes, payout_no);
+            if entries.is_empty() {
+                continue;
+            }
+            out.extend(entries.into_iter().map(SimOut::Ledger));
+            // No books here: remaining positions are valued at 0 in this row (conservative);
+            // the next minute mark revalues them at the bid.
+            let acct = &self.accounts[a];
+            let v = acct.valuation(|_| None);
+            out.push(SimOut::Account(AccountRow {
+                account: acct.id.clone(),
+                t_ms,
+                cash: acct.cash,
+                equity: acct.cash + v.marks,
+                realized: acct.realized,
+                unrealized: v.unrealized(),
+                fees_paid: acct.fees_paid,
+                locked: v.basis_open,
+                max_drawdown: acct.max_drawdown,
+                n_positions: i64::try_from(acct.positions.len() + acct.returned.len())
+                    .unwrap_or(i64::MAX),
+            }));
+        }
+        out
+    }
+
+    /// Shutdown at `t_ms`: complete pending conversions (the on-chain step would have happened),
+    /// drop pending intents (releasing their reservations), unwinds and markouts, then mark.
+    pub fn close(&mut self, t_ms: i64, books: &impl Books) -> Vec<SimOut> {
+        let mut out = Vec::new();
+        let mut due: Vec<Conversion> = std::mem::take(&mut self.conversions);
+        due.sort_by_key(|c| (c.due_ms, c.seq));
+        for mut c in due {
+            c.due_ms = t_ms;
+            self.convert(c, &mut out);
+        }
+        for p in std::mem::take(&mut self.pending) {
+            let a = &mut self.accounts[p.acct];
+            a.reserved = (a.reserved - p.planned.reserve).max(Decimal::ZERO);
+        }
+        self.unwinds.clear();
+        self.markouts.clear();
+        self.mark_all(t_ms, books, &mut out);
+        out
+    }
+
+    pub fn state(&self) -> TraderState {
+        TraderState {
+            accounts: self.accounts.clone(),
+        }
+    }
+
+    pub fn restore(cfg: SimConfig, state: TraderState) -> Result<Self, SimError> {
+        let mut saved: HashMap<String, Account> = state
+            .accounts
+            .into_iter()
+            .map(|a| (a.id.clone(), a))
+            .collect();
+        let accounts = cfg
+            .accounts
+            .iter()
+            .map(|spec| {
+                saved.remove(&spec.id()).map_or_else(
+                    || Account::new(spec.clone()),
+                    |mut a| {
+                        a.reserved = Decimal::ZERO;
+                        a
+                    },
+                )
+            })
+            .collect();
+        Self::with_accounts(cfg, accounts)
     }
 
     pub fn on_level(&mut self, yes_token: &str, side: BookSide, price: Decimal, new_size: Decimal) {
