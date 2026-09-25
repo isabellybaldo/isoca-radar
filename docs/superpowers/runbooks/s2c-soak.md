@@ -8,6 +8,11 @@ Spec §19 exit: **24 h without drops; replay reproduces episodes.** Keep the PC 
 - **Disk:** Docker Desktop's VM cannot see the Windows drive. Inside the container the disk looks nearly empty even when C: is full (smoke test 2026-09-25: VM 936 GB free vs host 4.2 GB). Make sure C: has **at least 25 GB free** (`Get-PSDrive C`).
   - The scanner caps capture at `capture.max_capture_gb` (10 GB ≈ 4–5 h at full rate) by deleting the oldest hours.
   - Postgres and Docker's virtual disk also grow.
+- **Project budget: 30 GB** for everything this project puts on disk. Check it before starting, after step 2, and at the end:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\disk-budget.ps1   # exit 1 = over budget
+```
+  Expected worst case during the soak: about 13 GB on top of today's baseline. That is capture 10 GB (hard cap, enforced every 30 s), Postgres about 0.2 GB/day plus WAL of at most 1 GB, and the replay prefix at about 3 GB. Container logs are capped at 50 MB per service. If the script reports more than 17 GB before starting, prune first: `docker builder prune -f`, `cargo clean`.
 - **Fresh capture directory**, so the replay prefix starts exactly at the soak's start:
 ```powershell
 docker compose --profile core stop scanner
@@ -28,12 +33,12 @@ Write down `LIVE` (the run_id) and `START` (started_ms).
 The capture budget later deletes the oldest hours, so save the first two **complete** UTC hours plus every universe record now. Hour files are named `HH.jsonl.zst` in `YYYY-MM-DD` folders (UTC):
 ```powershell
 docker run --rm -v cute-trading_data:/data alpine sh -c "ls -l /data/capture/*/"
-# copy the day folder(s), then delete from the copy every hour file newer than the 2nd complete hour:
-docker run --rm -v cute-trading_data:/data alpine sh -c "cp -a /data/capture /data/replay-prefix"
-docker run --rm -v cute-trading_data:/data alpine sh -c "ls /data/replay-prefix/*/"
-# e.g. if the soak started at 14:23 UTC, keep 14.jsonl.zst and 15.jsonl.zst (15 is complete once it is past 16:00):
-docker run --rm -v cute-trading_data:/data alpine sh -c "rm -f /data/replay-prefix/<YYYY-MM-DD>/16.jsonl.zst /data/replay-prefix/<YYYY-MM-DD>/17.jsonl.zst"
+# copy ONLY the two hour files plus every universe record (never the whole capture folder: that
+# would double the capture on disk). E.g. if the soak started at 14:23 UTC, keep 14 and 15
+# (15 is complete once it is past 16:00):
+docker run --rm -v cute-trading_data:/data alpine sh -c "d=<YYYY-MM-DD>; mkdir -p /data/replay-prefix/`$d && cp -a /data/capture/`$d/14.jsonl.zst /data/capture/`$d/15.jsonl.zst /data/capture/`$d/universe-* /data/replay-prefix/`$d/ && du -sh /data/replay-prefix"
 ```
+If the two hours span midnight UTC, copy each hour and the universe records from their own day folder.
 `CUTOFF` = the end of the last kept hour, in ms (e.g. 16:00:00 UTC that day). Keep every `universe-*.json.zst` file in the copy.
 
 ## 3. After ~24 h: the no-drops check
@@ -66,6 +71,12 @@ select (select count(*) from l) live, (select count(*) from r) replay,
        (select count(*) from (select * from r except select * from l) y) only_replay;
 ```
 Pass: `only_live = only_replay = 0` (and `live > 0`).
+
+Then free the prefix and re-check the budget:
+```powershell
+docker run --rm -v cute-trading_data:/data alpine sh -c "rm -rf /data/replay-prefix"
+powershell -ExecutionPolicy Bypass -File scripts\disk-budget.ps1
+```
 - `observations` differ by design: REST re-checks aren't part of replay.
 - `engine_suspect` can differ only where a REST-driven suspect mark wasn't captured. That would be a bug, so report it.
 
