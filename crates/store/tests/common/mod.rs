@@ -29,6 +29,32 @@ async fn admin_exec(admin: &PgConnectOptions, sql: &str) {
     s.close().await;
 }
 
+/// Drop any `ct_test_%` database left behind by a crashed run (its embedded nanos timestamp is
+/// older than 1 hour). Database names come only from `pg_database`, never user input.
+const STALE_TEST_DB_AGE_NS: u128 = 3_600 * 1_000_000_000;
+
+async fn sweep_stale_test_dbs(admin: &PgConnectOptions) {
+    let s = Store::connect_with(admin.clone(), 1)
+        .await
+        .expect("connect admin");
+    let names = s
+        .database_names_like("ct_test_%")
+        .await
+        .expect("list ct_test_% databases");
+    let now = nanos();
+    for name in names {
+        let Some(ts) = name.rsplit('_').next().and_then(|f| f.parse::<u128>().ok()) else {
+            continue;
+        };
+        if now.saturating_sub(ts) > STALE_TEST_DB_AGE_NS {
+            s.raw_exec(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                .await
+                .expect("drop stale test db");
+        }
+    }
+    s.close().await;
+}
+
 pub async fn fresh() -> Option<(Store, TestDb)> {
     let url = match std::env::var("TEST_DATABASE_URL") {
         Ok(u) => u,
@@ -42,6 +68,7 @@ pub async fn fresh() -> Option<(Store, TestDb)> {
         }
     };
     let admin = Store::options(&url).expect("TEST_DATABASE_URL");
+    sweep_stale_test_dbs(&admin).await;
     for role in ["scanner_rw", "analyze_ro"] {
         admin_exec(
             &admin,
