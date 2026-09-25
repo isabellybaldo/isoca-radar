@@ -1,0 +1,3597 @@
+# S3c · paper trader wired into the scanner (live and replay) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Run the pure `sim::PaperTrader` (S3b) inside the scanner, both live and in `scanner replay`. It writes every intent, fill, ledger entry, markout and mark to new `paper_*` tables. Markets settle from Gamma's payout vector. Live accounts survive restarts, and two replays of one capture produce identical ledgers (spec §19 Phase 3 exit: "Deterministic replay; equity identity holds").
+
+**Architecture:**
+- The engine owns an optional `PaperTrader` and lends it its own YES books through a zero-copy `Books` impl, built from split field borrows. It follows the S3b call contract: `on_frame` before a frame's events, `on_level`/`on_snapshot` after each applied change, `on_open` at each episode Open.
+- Paper rows leave the engine as `Out::Paper`. Live, they go through the existing batching writer. In replay they go straight into the replay batch. Both paths use one mapping function, `paper::push_sim`.
+- Resolutions reach the engine only as capture control lines (`Ctl::Resolved`), so replay settles exactly as live did. A live resolver task asks Gamma's read-only `/markets` route about the markets the trader holds.
+
+**Tech Stack:** Rust 1.98.1 (pinned), tokio 1.x, `sim` (S3b), `store` (sqlx 0.8, Postgres 17), `pm-api` (reqwest via its own client), `arb-core` (`stats::{parse_rfc3339_ms, days_to_end, annualized}` from S3b Task 1). No new external crates.
+
+**Spec:** `docs/superpowers/specs/2026-09-22-arb-scanner-design.md`: §5.5 (lock-up figures), §5.6 (accounting, payout vector), §8.2/§8.3 (paper trader beside the engine, same core for live and replay), §10 (storage, roles, zero is a measurement), §11 (policies, pre-registration hash, replay), §15 (sim/replay golden tests, role tests), §16 (route table), §18 Q19 (non-binary payouts), §19 (Phase 3 exit). Earlier plans that land **before** this one:
+- `docs/superpowers/plans/2026-09-25-s3a-scanner-hardening.md`: migration 0003 (explicit grants), store `build.rs`, `mark_suspect(event_id, until_ms, now_ms) -> Vec<Out>`, the `VecDeque` writer, and the single shutdown deadline (`by_deadline`, `SHUTDOWN_BUDGET`).
+- `docs/superpowers/plans/2026-09-25-s3b-sim.md`: the `sim` crate, `config/policies.toml`, and the call contract.
+
+Every "current code" anchor below refers to the tree **after** S3a and S3b.
+
+## Global Constraints
+
+- PAPER TRADING ONLY. No order placement, no wallet, no keys, no signing code. `sim` produces ledger rows and nothing else (spec §16 #5). The scanner reaches the network only through `pm-api`, and Postgres only through `store` (`deny.toml` wrappers).
+- `pm-api` exposes only the routes in `routes::ALLOWED`. `tests/routes.rs` asserts that table exactly, and no URL literal may appear outside `routes.rs` (spec §16 #3).
+- **The engine and `sim` are pure:** no clock and no IO. Time arrives on the inputs. Any new engine input that live feeds must also be fed by `replay.rs` from the capture's `ctl` lines, stamped with the same instant (spec §9.3).
+- Exact decimals only. No `f32`/`f64`. The workspace clippy config denies `float_arithmetic`, `unwrap_used` and `expect_used`. Test files (and `#[cfg(test)]` modules) start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
+- Money, sizes and prices in the new tables use **unconstrained `NUMERIC`** (the house deviation from §10's `NUMERIC(20,6)`, S2b plan: a 6 dp price × a 6 dp size has 12 dp, and a scaled column would round silently).
+- **Zero is a measurement** (§10): `NULL` = not measured, `0` = measured zero. `Option<Decimal>` stays `Option` all the way to Postgres.
+- After migration 0003, `scanner_rw` has **no** default INSERT/UPDATE: every new table needs an explicit `GRANT` in its own migration. `analyze_ro` only ever reads.
+- `paper_state` is **live only**. Replay never reads it and never writes it: each replay starts every account fresh.
+- The whole graceful stop, including the paper close and the state save, fits S3a's `SHUTDOWN_BUDGET` (20 s) inside compose's 30 s `stop_grace_period`.
+- Disk budget: the project stays under 30 GB. Debug `cargo test`/`clippy` only: no `--release`, no `docker build` in this plan.
+- Commit messages are plain, with **no** `Co-Authored-By` or any other attribution trailer. Stage only the files you touch.
+- Bash prefix for every command: `cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH" &&`
+- Store tests need Postgres. Start it once with `docker compose -f compose.yml -f compose.dev.yml up -d postgres`, then prefix store test commands with `set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" &&`. Output containing `SKIPPED` does **not** count as passing.
+
+## Review Focus
+
+1. **A market that is closed but still awaiting its UMA outcome.** Its `outcomePrices` still show trading prices (e.g. `["0.62","0.38"]`, which sum to 1). It must never settle a position at those prices. Pinned in Task 2 (`a_closed_market_awaiting_resolution_is_not_a_payout`).
+2. **Gamma ignoring the `id` filter** (the keyset lesson: a renamed parameter fails silently) and returning unrelated closed markets. These must not produce `Ctl::Resolved` lines, settlements or `non_binary_payout` rows for markets we never asked about. Pinned in Task 2 (`only_the_requested_markets_come_back`).
+3. **A restart after `policies.toml` changed an account** (same id, different `per_trade`). The saved account must not continue under the new spec. It is a different pre-registered experiment, so it starts fresh, with a log line. A corrupt saved state is an error, never a silent reset. Pinned in Task 3 (`a_saved_account_whose_spec_changed_starts_fresh`).
+4. **The same thing arriving twice.** A resolution can come from both the ws hint and the periodic poll. The writer can retry a batch whose commit actually succeeded. Neither may double a settlement or a row. Pinned in Task 4 (`a_repeated_resolution_settles_once`) and Task 1 (`paper_rows_round_trip_exactly_and_a_rewrite_changes_nothing`).
+5. **A Postgres outage long enough to hit `max_pending_rows`.** It must never evict paper rows: a gap in `paper_ledger` breaks the equity identity. Pinned in Task 6 (`paper_rows_are_never_evicted_by_the_cap`).
+
+---
+
+## File Structure
+
+```
+crates/store/migrations/0004_paper.sql       NEW: paper_* tables, explicit grants, integrity kind non_binary_payout
+crates/store/src/rows.rs                     MODIFY: Paper*Row types; Batch paper fields + rows/take_paper/extend_paper/into_singles
+crates/store/src/paper.rs                    NEW: write_paper (idempotent inserts, state upsert), readers, load_paper_state
+crates/store/src/batch.rs                    MODIFY: write_batch calls write_paper; Table gets the paper tables
+crates/store/src/lib.rs                      MODIFY: mod paper
+crates/store/tests/paper.rs                  NEW: round trip, idempotency, state upsert, FK data error, batch helpers
+crates/store/tests/roles.rs                  MODIFY: scanner appends/upserts paper rows; analyze_ro can't write them
+crates/store/tests/migrate.rs                MODIFY: the paper tables exist
+crates/pm-api/src/routes.rs                  MODIFY: GAMMA_MARKETS + ALLOWED entry
+crates/pm-api/src/gamma.rs                   MODIFY: umaResolutionStatus, Resolution, payout_vector, parse_resolutions, GammaClient::resolutions
+crates/pm-api/tests/routes.rs                MODIFY: the new table
+crates/pm-api/tests/resolutions.rs           NEW: fixture-based payout parsing
+crates/pm-api/tests/live.rs                  MODIFY: ignored live smoke of the new route
+docs/superpowers/specs/2026-09-22-arb-scanner-design.md  MODIFY: §16 route list
+crates/sim/src/trader.rs                     MODIFY: held_markets()
+crates/sim/tests/lifecycle.rs                MODIFY: held_markets test
+bins/scanner/Cargo.toml                      MODIFY: depend on sim
+bins/scanner/src/config.rs                   MODIFY: [paper] section
+config/scanner.toml                          MODIFY: [paper] section
+docker/rust.Dockerfile                       MODIFY: copy policies.toml into the image
+bins/scanner/src/paper.rs                    NEW: policies + hash, SimOut → rows, state rows + restore, resolver loop
+bins/scanner/src/lib.rs                      MODIFY: pub mod paper
+bins/scanner/src/engine.rs                   MODIFY: PaperTrader field, EngineBooks, call contract, OpenCtx, lock-up fields, on_resolution
+bins/scanner/tests/engine_paper.rs           NEW: engine ↔ trader wiring
+bins/scanner/src/capture.rs                  MODIFY: Ctl::Resolved
+bins/scanner/src/replay.rs                   MODIFY: replay_dir_paper; Resolved; paper close
+bins/scanner/src/run.rs                      MODIFY: replay_cmd writes paper rows (Task 5); live wiring (Task 7)
+bins/scanner/src/main.rs                     MODIFY: policies + run hash (Task 5 replay, Task 7 run)
+bins/scanner/tests/replay.rs                 MODIFY: paper replay golden test
+bins/scanner/src/writer.rs                   MODIFY: WriterMsg::Paper, Pending paper rows (never evicted), quarantine via into_singles
+docs/superpowers/runbooks/s3-paper.md        NEW: Phase 3 exit runbook
+```
+
+---
+
+### Task 1: store: migration 0004 (`paper_*` tables), rows, idempotent writes, state load
+
+**Files:**
+- Create: `crates/store/migrations/0004_paper.sql`, `crates/store/src/paper.rs`, `crates/store/tests/paper.rs`
+- Modify: `crates/store/src/rows.rs`, `crates/store/src/batch.rs`, `crates/store/src/lib.rs`, `crates/store/tests/roles.rs`, `crates/store/tests/migrate.rs`
+- Modify (compile fix only): `bins/scanner/src/writer.rs` (`Pending::take`)
+
+**Interfaces:**
+- Consumes: S3a's `crates/store/build.rs` (new migration files are picked up) and 0003's revoked default privileges.
+- Produces:
+  - `store::{PaperAccountRow, PaperIntentRow, PaperExecRow, PaperFillRow, PaperLedgerRow, PaperMarkoutRow, PaperMarkRow, PaperStateRow}`, with the fields shown in Step 3.
+  - `Batch` gains `paper_accounts, paper_intents, paper_execs, paper_fills, paper_ledger, paper_markouts, paper_marks, paper_state` (all `Vec`).
+  - `Batch::rows(&self) -> usize`, `Batch::paper_rows(&self) -> usize`, `Batch::take_paper(&mut self) -> Batch`, `Batch::extend_paper(&mut self, other: Batch)` and `Batch::into_singles(self) -> Vec<Batch>`. `is_empty` now means `rows() == 0`.
+  - `Store::write_batch` writes the paper rows in the same transaction: accounts first, then `ON CONFLICT DO NOTHING` on each natural key. `paper_state` is upserted, and the newer `updated_ms` wins.
+  - `Store::paper_ledger_for_run(run_id) -> Vec<PaperLedgerRow>` (ordered by account, seq), `Store::paper_marks_for_run(run_id) -> Vec<PaperMarkRow>` (by account, t_ms) and `Store::load_paper_state() -> Vec<PaperStateRow>` (by account).
+  - `Table::{PaperAccounts, PaperIntents, PaperExecs, PaperFills, PaperLedger, PaperMarkouts, PaperMarks, PaperState}`.
+  - Integrity kind `'non_binary_payout'`.
+
+- [ ] **Step 1: Write the failing tests.**
+
+Create `crates/store/tests/paper.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+mod common;
+use rust_decimal_macros::dec;
+use store::*;
+
+async fn new_run(store: &Store) -> i64 {
+    store
+        .start_run(&NewRun {
+            service: "scanner".into(),
+            started_ms: 1,
+            version: "t".into(),
+            config_hash: "c+p".into(),
+            mode: "replay".into(),
+        })
+        .await
+        .unwrap()
+}
+
+const A: &str = "P0-converter/sp-idle";
+
+fn ledger(run: i64) -> Vec<PaperLedgerRow> {
+    vec![
+        PaperLedgerRow {
+            run_id: run,
+            account_id: A.into(),
+            seq: 1,
+            t_ms: 1_300,
+            kind: "buy".into(),
+            episode_id: Some("replay-1-00000001".into()),
+            market_id: Some("m0".into()),
+            yes_token: Some("y0".into()),
+            outcome: Some("no".into()),
+            qty: dec!(51.2),
+            price: Some(dec!(0.6)),
+            cash_delta: dec!(-30.72),
+            fees: dec!(0),
+            realized_delta: dec!(0),
+            cash_after: dec!(969.28),
+            equity: None,
+        },
+        PaperLedgerRow {
+            run_id: run,
+            account_id: A.into(),
+            seq: 2,
+            t_ms: 60_000,
+            kind: "mark".into(),
+            episode_id: None,
+            market_id: None,
+            yes_token: None,
+            outcome: None,
+            qty: dec!(0),
+            price: None,
+            cash_delta: dec!(0),
+            fees: dec!(0),
+            realized_delta: dec!(0),
+            cash_after: dec!(969.28),
+            equity: Some(dec!(1000.000000000001)),
+        },
+    ]
+}
+
+fn paper_batch(run: i64) -> Batch {
+    Batch {
+        paper_accounts: vec![PaperAccountRow {
+            run_id: run,
+            account_id: A.into(),
+            policy: "P0-converter".into(),
+            scenario: "sp-idle".into(),
+            fee_bips: dec!(0),
+            bankroll: dec!(1000),
+            per_trade: dec!(100),
+            policies_sha256: "ab".repeat(32),
+        }],
+        paper_intents: vec![PaperIntentRow {
+            run_id: run,
+            account_id: A.into(),
+            episode_id: "replay-1-00000001".into(),
+            decided_ms: 1_000,
+            exec_ms: Some(1_300),
+            skip_reason: None,
+            q_target: Some(dec!(51.2)),
+            detected_q: Some(dec!(100)),
+            detected_pnl: Some(dec!(5)),
+            reserve: Some(dec!(99.841)),
+        }],
+        paper_execs: vec![PaperExecRow {
+            run_id: run,
+            account_id: A.into(),
+            episode_id: "replay-1-00000001".into(),
+            exec_ms: 1_300,
+            q_eff: dec!(51.2),
+            leg_risk_qty: dec!(0),
+            pnl_at_tx: None,
+            hit: false,
+        }],
+        paper_fills: vec![PaperFillRow {
+            run_id: run,
+            account_id: A.into(),
+            episode_id: "replay-1-00000001".into(),
+            market_id: "m0".into(),
+            yes_token: "y0".into(),
+            outcome: "no".into(),
+            side: "buy".into(),
+            t_ms: 1_300,
+            limit_price: Some(dec!(0.6)),
+            requested: dec!(51.2),
+            filled: dec!(51.2),
+            vwap: Some(dec!(0.6)),
+            fees: dec!(0),
+            levels_used: 1,
+        }],
+        paper_ledger: ledger(run),
+        paper_markouts: vec![PaperMarkoutRow {
+            run_id: run,
+            account_id: A.into(),
+            episode_id: "replay-1-00000001".into(),
+            market_id: "m0".into(),
+            yes_token: "y0".into(),
+            outcome: "no".into(),
+            fill_vwap: dec!(0.6),
+            offset_ms: 1_000,
+            mid: Some(dec!(0.48)),
+            markout: Some(dec!(-0.12)),
+        }],
+        paper_marks: vec![PaperMarkRow {
+            run_id: run,
+            account_id: A.into(),
+            t_ms: 60_000,
+            cash: dec!(969.28),
+            equity: dec!(1000),
+            realized: dec!(0),
+            unrealized: dec!(0),
+            fees_paid: dec!(0),
+            locked: dec!(30.72),
+            max_drawdown: dec!(0),
+            n_positions: 1,
+        }],
+        ..Batch::default()
+    }
+}
+
+async fn counts(s: &Store) -> Vec<i64> {
+    let mut v = Vec::new();
+    for t in [
+        Table::PaperAccounts,
+        Table::PaperIntents,
+        Table::PaperExecs,
+        Table::PaperFills,
+        Table::PaperLedger,
+        Table::PaperMarkouts,
+        Table::PaperMarks,
+    ] {
+        v.push(s.count(t).await.unwrap());
+    }
+    v
+}
+
+#[tokio::test]
+async fn paper_rows_round_trip_exactly_and_a_rewrite_changes_nothing() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let b = paper_batch(run);
+    store.write_batch(&b).await.unwrap();
+    assert_eq!(counts(&store).await, vec![1, 1, 1, 1, 2, 1, 1]);
+    let back = store.paper_ledger_for_run(run).await.unwrap();
+    assert_eq!(back, ledger(run), "exact, zeros stay zeros and NULLs stay NULL");
+    assert_eq!(back[1].equity, Some(dec!(1000.000000000001)), "12 dp survive");
+    assert_eq!(store.paper_marks_for_run(run).await.unwrap(), b.paper_marks);
+    // the writer re-sends a batch whose commit succeeded but whose ack was lost
+    store.write_batch(&b).await.unwrap();
+    assert_eq!(counts(&store).await, vec![1, 1, 1, 1, 2, 1, 1], "idempotent");
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn paper_state_keeps_the_newest_save_per_account() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let st = |id: &str, body: &str, ms: i64| PaperStateRow {
+        account_id: id.into(),
+        state: body.into(),
+        updated_ms: ms,
+    };
+    store
+        .write_batch(&Batch {
+            paper_state: vec![st("a", "{\"v\":1}", 1), st("a", "{\"v\":2}", 2), st("b", "{}", 2)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_paper_state().await.unwrap(),
+        vec![st("a", "{\"v\":2}", 2), st("b", "{}", 2)]
+    );
+    // an OLDER save (a restored batch from a failed write) never overwrites a newer one
+    store
+        .write_batch(&Batch {
+            paper_state: vec![st("a", "{\"v\":0}", 0), st("b", "{\"v\":3}", 3)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_paper_state().await.unwrap(),
+        vec![st("a", "{\"v\":2}", 2), st("b", "{\"v\":3}", 3)]
+    );
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn a_paper_row_without_its_account_is_a_data_error() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let mut b = paper_batch(run);
+    b.paper_accounts.clear();
+    let e = store.write_batch(&b).await.unwrap_err();
+    assert!(e.is_data_error(), "FK violation → quarantine path, not a retry loop: {e}");
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn integrity_accepts_non_binary_payout() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    store
+        .write_batch(&Batch {
+            integrity: vec![IntegrityRow {
+                run_id: run,
+                ts_ms: 1,
+                kind: "non_binary_payout".into(),
+                shard: None,
+                token: None,
+                event_id: Some("e1".into()),
+                detail: Some("market m0: payout yes 0.5 no 0.5".into()),
+            }],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.count(Table::IntegrityEvents).await.unwrap(), 1);
+    db.drop(store).await;
+}
+
+#[test]
+fn into_singles_puts_accounts_before_the_rows_that_reference_them() {
+    let b = paper_batch(1);
+    let n = b.rows();
+    assert_eq!((n, b.paper_rows()), (8, 8));
+    let singles = b.into_singles();
+    assert_eq!(singles.len(), n);
+    assert!(singles.iter().all(|s| s.rows() == 1));
+    assert_eq!(singles[0].paper_accounts.len(), 1, "accounts first");
+}
+
+#[test]
+fn take_and_extend_move_only_paper_rows() {
+    let mut b = paper_batch(1);
+    b.integrity.push(IntegrityRow {
+        run_id: 1,
+        ts_ms: 1,
+        kind: "drop".into(),
+        shard: None,
+        token: None,
+        event_id: None,
+        detail: None,
+    });
+    let p = b.take_paper();
+    assert_eq!((b.rows(), b.paper_rows(), p.rows()), (1, 0, 8));
+    let mut c = Batch::default();
+    c.extend_paper(p.clone());
+    c.extend_paper(p);
+    assert_eq!(c.paper_ledger.len(), 4);
+    assert!(!c.is_empty());
+    assert!(Batch::default().is_empty());
+}
+```
+
+Append to `crates/store/tests/roles.rs`:
+```rust
+#[tokio::test]
+async fn scanner_appends_paper_rows_and_upserts_state_but_analyze_only_reads() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let scanner = db.role("scanner_rw").await;
+    let run = scanner
+        .start_run(&NewRun {
+            service: "scanner".into(),
+            started_ms: 1,
+            version: "v".into(),
+            config_hash: "c".into(),
+            mode: "live".into(),
+        })
+        .await
+        .expect("run");
+    let acct = PaperAccountRow {
+        run_id: run,
+        account_id: "P0-converter/sp-idle".into(),
+        policy: "P0-converter".into(),
+        scenario: "sp-idle".into(),
+        fee_bips: 0.into(),
+        bankroll: 1000.into(),
+        per_trade: 100.into(),
+        policies_sha256: "ab".repeat(32),
+    };
+    let mark = PaperLedgerRow {
+        run_id: run,
+        account_id: acct.account_id.clone(),
+        seq: 1,
+        t_ms: 60_000,
+        kind: "mark".into(),
+        episode_id: None,
+        market_id: None,
+        yes_token: None,
+        outcome: None,
+        qty: 0.into(),
+        price: None,
+        cash_delta: 0.into(),
+        fees: 0.into(),
+        realized_delta: 0.into(),
+        cash_after: 1000.into(),
+        equity: Some(1000.into()),
+    };
+    let state = |ms: i64| PaperStateRow {
+        account_id: "P0-converter/sp-idle".into(),
+        state: format!("{{\"saved\":{ms}}}"),
+        updated_ms: ms,
+    };
+    scanner
+        .write_batch(&Batch {
+            paper_accounts: vec![acct],
+            paper_ledger: vec![mark],
+            paper_state: vec![state(1)],
+            ..Batch::default()
+        })
+        .await
+        .expect("scanner appends paper rows");
+    scanner
+        .write_batch(&Batch {
+            paper_state: vec![state(2)],
+            ..Batch::default()
+        })
+        .await
+        .expect("scanner upserts paper_state (needs UPDATE)");
+    assert_eq!(scanner.load_paper_state().await.expect("reads its state")[0].updated_ms, 2);
+    for sql in [
+        "UPDATE paper_ledger SET qty = qty",
+        "DELETE FROM paper_ledger",
+        "UPDATE paper_accounts SET bankroll = bankroll",
+    ] {
+        let e = scanner.raw_exec(sql).await.unwrap_err();
+        assert!(is_permission_denied(&e), "history is append-only: {sql}: {e}");
+    }
+    let analyze = db.role("analyze_ro").await;
+    assert_eq!(analyze.paper_ledger_for_run(run).await.expect("analyze reads").len(), 1);
+    for sql in [
+        "INSERT INTO paper_state (account_id, state, updated_ms) VALUES ('x', '{}', 1)",
+        "UPDATE paper_state SET updated_ms = 3",
+        "INSERT INTO paper_marks (run_id, account_id, t_ms, cash, equity, realized, unrealized, \
+         fees_paid, locked, max_drawdown, n_positions) VALUES (1, 'x', 1, 0, 0, 0, 0, 0, 0, 0, 0)",
+    ] {
+        let e = analyze.raw_exec(sql).await.unwrap_err();
+        assert!(is_permission_denied(&e), "{sql}: {e}");
+    }
+    analyze.close().await;
+    scanner.close().await;
+    db.drop(owner).await;
+}
+```
+
+In `crates/store/tests/migrate.rs`, extend the table list with the new tables:
+```rust
+    for t in [
+        "episode_legs",
+        "episodes",
+        "events",
+        "health",
+        "integrity_events",
+        "legs",
+        "observations",
+        "paper_accounts",
+        "paper_execs",
+        "paper_fills",
+        "paper_intents",
+        "paper_ledger",
+        "paper_markouts",
+        "paper_marks",
+        "paper_state",
+        "runs",
+        "universe_snapshots",
+    ] {
+```
+
+- [ ] **Step 2: Run them to verify they fail.**
+Run: `docker compose -f compose.yml -f compose.dev.yml up -d postgres && set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" && cargo test -p store`
+Expected: compile errors: `cannot find struct PaperLedgerRow`, `no field paper_ledger on type Batch`, `no variant PaperAccounts`.
+
+- [ ] **Step 3: Add the row types and the `Batch` helpers.** In `crates/store/src/rows.rs`, replace the `Batch` struct and its `impl` with:
+```rust
+/// One paper account of a run: its pre-registered spec (spec §11) and the policies file hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperAccountRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub policy: String,
+    pub scenario: String,
+    pub fee_bips: Decimal,
+    pub bankroll: Decimal,
+    pub per_trade: Decimal,
+    pub policies_sha256: String,
+}
+
+/// A policy's decision on an opened episode (taken, or skipped with a reason).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperIntentRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub decided_ms: i64,
+    pub exec_ms: Option<i64>,
+    pub skip_reason: Option<String>,
+    pub q_target: Option<Decimal>,
+    pub detected_q: Option<Decimal>,
+    pub detected_pnl: Option<Decimal>,
+    pub reserve: Option<Decimal>,
+}
+
+/// What happened at t_x.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperExecRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub exec_ms: i64,
+    pub q_eff: Decimal,
+    pub leg_risk_qty: Decimal,
+    pub pnl_at_tx: Option<Decimal>,
+    pub hit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperFillRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub market_id: String,
+    pub yes_token: String,
+    /// yes | no
+    pub outcome: String,
+    /// buy | sell
+    pub side: String,
+    pub t_ms: i64,
+    pub limit_price: Option<Decimal>,
+    pub requested: Decimal,
+    pub filled: Decimal,
+    pub vwap: Option<Decimal>,
+    pub fees: Decimal,
+    pub levels_used: i32,
+}
+
+/// One `sim::account::LedgerEntry`. Keyed (run_id, account_id, seq).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PaperLedgerRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub seq: i64,
+    pub t_ms: i64,
+    /// buy | sell | convert | settle | mark
+    pub kind: String,
+    pub episode_id: Option<String>,
+    pub market_id: Option<String>,
+    pub yes_token: Option<String>,
+    pub outcome: Option<String>,
+    pub qty: Decimal,
+    pub price: Option<Decimal>,
+    pub cash_delta: Decimal,
+    pub fees: Decimal,
+    pub realized_delta: Decimal,
+    pub cash_after: Decimal,
+    pub equity: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperMarkoutRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub market_id: String,
+    pub yes_token: String,
+    pub outcome: String,
+    pub fill_vwap: Decimal,
+    pub offset_ms: i64,
+    pub mid: Option<Decimal>,
+    pub markout: Option<Decimal>,
+}
+
+/// One `sim::rows::AccountRow` (a mark). Identity: equity = bankroll + realized + unrealized.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PaperMarkRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub t_ms: i64,
+    pub cash: Decimal,
+    pub equity: Decimal,
+    pub realized: Decimal,
+    pub unrealized: Decimal,
+    pub fees_paid: Decimal,
+    pub locked: Decimal,
+    pub max_drawdown: Decimal,
+    pub n_positions: i64,
+}
+
+/// Live only: one serialized `sim::account::Account` per account id (restored at start).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PaperStateRow {
+    pub account_id: String,
+    pub state: String,
+    pub updated_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Batch {
+    pub episodes: Vec<EpisodeWrite>,
+    pub observations: Vec<ObservationRow>,
+    pub integrity: Vec<IntegrityRow>,
+    pub health: Vec<HealthRow>,
+    /// Paper trading (S3c). Accounts are written first: every other paper row references one.
+    pub paper_accounts: Vec<PaperAccountRow>,
+    pub paper_intents: Vec<PaperIntentRow>,
+    pub paper_execs: Vec<PaperExecRow>,
+    pub paper_fills: Vec<PaperFillRow>,
+    pub paper_ledger: Vec<PaperLedgerRow>,
+    pub paper_markouts: Vec<PaperMarkoutRow>,
+    pub paper_marks: Vec<PaperMarkRow>,
+    /// Live only: upserted by account id (the newest `updated_ms` wins).
+    pub paper_state: Vec<PaperStateRow>,
+}
+
+impl Batch {
+    pub fn is_empty(&self) -> bool {
+        self.rows() == 0
+    }
+
+    pub fn paper_rows(&self) -> usize {
+        self.paper_accounts.len()
+            + self.paper_intents.len()
+            + self.paper_execs.len()
+            + self.paper_fills.len()
+            + self.paper_ledger.len()
+            + self.paper_markouts.len()
+            + self.paper_marks.len()
+            + self.paper_state.len()
+    }
+
+    pub fn rows(&self) -> usize {
+        self.episodes.len()
+            + self.observations.len()
+            + self.integrity.len()
+            + self.health.len()
+            + self.paper_rows()
+    }
+
+    /// Move the paper rows out into a batch of their own (the rest stays here).
+    pub fn take_paper(&mut self) -> Batch {
+        Batch {
+            paper_accounts: std::mem::take(&mut self.paper_accounts),
+            paper_intents: std::mem::take(&mut self.paper_intents),
+            paper_execs: std::mem::take(&mut self.paper_execs),
+            paper_fills: std::mem::take(&mut self.paper_fills),
+            paper_ledger: std::mem::take(&mut self.paper_ledger),
+            paper_markouts: std::mem::take(&mut self.paper_markouts),
+            paper_marks: std::mem::take(&mut self.paper_marks),
+            paper_state: std::mem::take(&mut self.paper_state),
+            ..Batch::default()
+        }
+    }
+
+    /// Append `other`'s paper rows after ours, in order. `other`'s non-paper rows are ignored.
+    pub fn extend_paper(&mut self, other: Batch) {
+        self.paper_accounts.extend(other.paper_accounts);
+        self.paper_intents.extend(other.paper_intents);
+        self.paper_execs.extend(other.paper_execs);
+        self.paper_fills.extend(other.paper_fills);
+        self.paper_ledger.extend(other.paper_ledger);
+        self.paper_markouts.extend(other.paper_markouts);
+        self.paper_marks.extend(other.paper_marks);
+        self.paper_state.extend(other.paper_state);
+    }
+
+    /// Every row as its own batch (the writer's quarantine path). Episodes come before the
+    /// observations that reference them, and paper accounts before the paper rows.
+    pub fn into_singles(self) -> Vec<Batch> {
+        let mut out = Vec::with_capacity(self.rows());
+        macro_rules! each {
+            ($($field:ident),*) => {$(
+                for x in self.$field {
+                    out.push(Batch { $field: vec![x], ..Batch::default() });
+                }
+            )*};
+        }
+        each!(
+            episodes,
+            observations,
+            integrity,
+            health,
+            paper_accounts,
+            paper_intents,
+            paper_execs,
+            paper_fills,
+            paper_ledger,
+            paper_markouts,
+            paper_marks,
+            paper_state
+        );
+        out
+    }
+}
+```
+
+- [ ] **Step 4: Write the migration.** Create `crates/store/migrations/0004_paper.sql`:
+```sql
+-- S3c: paper trading (spec §5.6 accounting, §11 policies). Rows are per run: live runs and replay
+-- runs each write under their own run_id, so two replays of one capture compare with EXCEPT.
+-- Money, sizes and prices are unconstrained NUMERIC (house rule since S2b: exact, never rounded on
+-- insert). Timestamps are BIGINT ms; *_at columns are for humans.
+-- Grants are explicit (0003): the scanner may only APPEND history (ON CONFLICT DO NOTHING needs
+-- no UPDATE) and upsert paper_state. analyze_ro reads everything.
+
+CREATE TABLE paper_accounts (
+    run_id           BIGINT  NOT NULL REFERENCES runs (run_id),
+    account_id       TEXT    NOT NULL,
+    policy           TEXT    NOT NULL CHECK (policy IN ('P0-converter', 'P1-settlement', 'P2-combo', 'P3-naive')),
+    scenario         TEXT    NOT NULL,
+    fee_bips         NUMERIC NOT NULL,
+    bankroll         NUMERIC NOT NULL,
+    per_trade        NUMERIC NOT NULL,
+    policies_sha256  TEXT    NOT NULL,
+    PRIMARY KEY (run_id, account_id)
+);
+
+CREATE TABLE paper_intents (
+    run_id        BIGINT NOT NULL,
+    account_id    TEXT   NOT NULL,
+    episode_id    TEXT   NOT NULL,
+    decided_ms    BIGINT NOT NULL,
+    exec_ms       BIGINT,
+    skip_reason   TEXT,
+    q_target      NUMERIC,
+    detected_q    NUMERIC,
+    detected_pnl  NUMERIC,
+    reserve       NUMERIC,
+    PRIMARY KEY (run_id, account_id, episode_id),
+    FOREIGN KEY (run_id, account_id) REFERENCES paper_accounts (run_id, account_id)
+);
+
+CREATE TABLE paper_execs (
+    run_id        BIGINT  NOT NULL,
+    account_id    TEXT    NOT NULL,
+    episode_id    TEXT    NOT NULL,
+    exec_ms       BIGINT  NOT NULL,
+    q_eff         NUMERIC NOT NULL,
+    leg_risk_qty  NUMERIC NOT NULL,
+    pnl_at_tx     NUMERIC,
+    hit           BOOLEAN NOT NULL,
+    PRIMARY KEY (run_id, account_id, episode_id),
+    FOREIGN KEY (run_id, account_id) REFERENCES paper_accounts (run_id, account_id)
+);
+
+CREATE TABLE paper_fills (
+    run_id       BIGINT  NOT NULL,
+    account_id   TEXT    NOT NULL,
+    episode_id   TEXT    NOT NULL,
+    market_id    TEXT    NOT NULL,
+    yes_token    TEXT    NOT NULL,
+    outcome      TEXT    NOT NULL CHECK (outcome IN ('yes', 'no')),
+    side         TEXT    NOT NULL CHECK (side IN ('buy', 'sell')),
+    t_ms         BIGINT  NOT NULL,
+    limit_price  NUMERIC,
+    requested    NUMERIC NOT NULL,
+    filled       NUMERIC NOT NULL,
+    vwap         NUMERIC,
+    fees         NUMERIC NOT NULL,
+    levels_used  INTEGER NOT NULL,
+    PRIMARY KEY (run_id, account_id, episode_id, market_id, outcome, side),
+    FOREIGN KEY (run_id, account_id) REFERENCES paper_accounts (run_id, account_id)
+);
+
+CREATE TABLE paper_ledger (
+    run_id          BIGINT  NOT NULL,
+    account_id      TEXT    NOT NULL,
+    seq             BIGINT  NOT NULL,
+    t_ms            BIGINT  NOT NULL,
+    kind            TEXT    NOT NULL CHECK (kind IN ('buy', 'sell', 'convert', 'settle', 'mark')),
+    episode_id      TEXT,
+    market_id       TEXT,
+    yes_token       TEXT,
+    outcome         TEXT CHECK (outcome IN ('yes', 'no')),
+    qty             NUMERIC NOT NULL,
+    price           NUMERIC,
+    cash_delta      NUMERIC NOT NULL,
+    fees            NUMERIC NOT NULL,
+    realized_delta  NUMERIC NOT NULL,
+    cash_after      NUMERIC NOT NULL,
+    equity          NUMERIC,
+    t_at            TIMESTAMPTZ GENERATED ALWAYS AS (to_timestamp(t_ms::double precision / 1000)) STORED,
+    PRIMARY KEY (run_id, account_id, seq),
+    FOREIGN KEY (run_id, account_id) REFERENCES paper_accounts (run_id, account_id)
+);
+CREATE INDEX paper_ledger_episode ON paper_ledger (episode_id);
+
+CREATE TABLE paper_markouts (
+    run_id      BIGINT  NOT NULL,
+    account_id  TEXT    NOT NULL,
+    episode_id  TEXT    NOT NULL,
+    market_id   TEXT    NOT NULL,
+    yes_token   TEXT    NOT NULL,
+    outcome     TEXT    NOT NULL CHECK (outcome IN ('yes', 'no')),
+    fill_vwap   NUMERIC NOT NULL,
+    offset_ms   BIGINT  NOT NULL,
+    mid         NUMERIC,
+    markout     NUMERIC,
+    PRIMARY KEY (run_id, account_id, episode_id, market_id, outcome, offset_ms),
+    FOREIGN KEY (run_id, account_id) REFERENCES paper_accounts (run_id, account_id)
+);
+
+-- One AccountRow per mark (every minute of input time, at resolutions, at close).
+CREATE TABLE paper_marks (
+    run_id        BIGINT  NOT NULL,
+    account_id    TEXT    NOT NULL,
+    t_ms          BIGINT  NOT NULL,
+    cash          NUMERIC NOT NULL,
+    equity        NUMERIC NOT NULL,
+    realized      NUMERIC NOT NULL,
+    unrealized    NUMERIC NOT NULL,
+    fees_paid     NUMERIC NOT NULL,
+    locked        NUMERIC NOT NULL,
+    max_drawdown  NUMERIC NOT NULL,
+    n_positions   BIGINT  NOT NULL,
+    t_at          TIMESTAMPTZ GENERATED ALWAYS AS (to_timestamp(t_ms::double precision / 1000)) STORED,
+    PRIMARY KEY (run_id, account_id, t_ms),
+    FOREIGN KEY (run_id, account_id) REFERENCES paper_accounts (run_id, account_id)
+);
+
+-- Live only: the accounts that survive a restart (one serialized sim Account per row, exact JSON).
+CREATE TABLE paper_state (
+    account_id  TEXT   PRIMARY KEY,
+    state       TEXT   NOT NULL,
+    updated_ms  BIGINT NOT NULL
+);
+
+GRANT SELECT, INSERT ON
+    paper_accounts, paper_intents, paper_execs, paper_fills, paper_ledger, paper_markouts, paper_marks
+TO scanner_rw;
+GRANT SELECT, INSERT, UPDATE ON paper_state TO scanner_rw;
+GRANT SELECT ON
+    paper_accounts, paper_intents, paper_execs, paper_fills, paper_ledger, paper_markouts,
+    paper_marks, paper_state
+TO analyze_ro;
+
+-- Q19: a resolution whose payout vector is not {1,0}/{0,1} (UMA 50-50, voided leg) is a flagged risk class.
+ALTER TABLE integrity_events DROP CONSTRAINT IF EXISTS integrity_events_kind_check;
+ALTER TABLE integrity_events ADD CONSTRAINT integrity_events_kind_check CHECK (kind IN (
+    'crossed_book', 'mirror_mismatch', 'top_mismatch', 'drift',
+    'drop', 'reconnect_gap', 'parse_error', 'shard_parked',
+    'capture_drop', 'writer_drop', 'capture_budget_delete',
+    'unit_oversize', 'non_binary_payout'
+));
+```
+
+- [ ] **Step 5: Write the paper SQL.** Create `crates/store/src/paper.rs`:
+```rust
+//! Paper-trading rows (S3c, migration 0004). Every table but `paper_state` is append-only and
+//! idempotent (`ON CONFLICT DO NOTHING` on its natural key), so a batch the writer re-sends after
+//! a commit whose ack was lost changes nothing. `paper_state` keeps the newest save per account.
+use crate::text::{clean, clean_opt};
+use crate::{Batch, PaperLedgerRow, PaperMarkRow, PaperStateRow, Store, StoreError};
+use sqlx::{PgConnection, Postgres, QueryBuilder};
+use std::collections::HashMap;
+
+/// ≤ 16 binds per row: 1000 rows stay far under Postgres's 65,535-parameter limit.
+const CHUNK: usize = 1000;
+
+const LEDGER_COLS: &str = "run_id, account_id, seq, t_ms, kind, episode_id, market_id, yes_token, outcome, \
+                           qty, price, cash_delta, fees, realized_delta, cash_after, equity";
+const MARK_COLS: &str = "run_id, account_id, t_ms, cash, equity, realized, unrealized, fees_paid, locked, \
+                         max_drawdown, n_positions";
+
+/// Keep only the last save of each account (one statement can't upsert the same key twice).
+fn dedupe_last_state(rows: &[PaperStateRow]) -> Vec<&PaperStateRow> {
+    let mut idx: HashMap<&str, usize> = HashMap::new();
+    let mut out: Vec<&PaperStateRow> = Vec::new();
+    for r in rows {
+        match idx.get(r.account_id.as_str()) {
+            Some(&i) => out[i] = r,
+            None => {
+                idx.insert(r.account_id.as_str(), out.len());
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// Inside `write_batch`'s transaction. Accounts first: every other paper row references one.
+pub(crate) async fn write_paper(conn: &mut PgConnection, b: &Batch) -> Result<(), StoreError> {
+    for chunk in b.paper_accounts.chunks(CHUNK) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO paper_accounts (run_id, account_id, policy, scenario, fee_bips, bankroll, \
+             per_trade, policies_sha256) ",
+        );
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(clean(&r.policy))
+                .push_bind(clean(&r.scenario))
+                .push_bind(r.fee_bips)
+                .push_bind(r.bankroll)
+                .push_bind(r.per_trade)
+                .push_bind(clean(&r.policies_sha256));
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_intents.chunks(CHUNK) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO paper_intents (run_id, account_id, episode_id, decided_ms, exec_ms, skip_reason, \
+             q_target, detected_q, detected_pnl, reserve) ",
+        );
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(clean(&r.episode_id))
+                .push_bind(r.decided_ms)
+                .push_bind(r.exec_ms)
+                .push_bind(clean_opt(&r.skip_reason))
+                .push_bind(r.q_target)
+                .push_bind(r.detected_q)
+                .push_bind(r.detected_pnl)
+                .push_bind(r.reserve);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_execs.chunks(CHUNK) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO paper_execs (run_id, account_id, episode_id, exec_ms, q_eff, leg_risk_qty, \
+             pnl_at_tx, hit) ",
+        );
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(clean(&r.episode_id))
+                .push_bind(r.exec_ms)
+                .push_bind(r.q_eff)
+                .push_bind(r.leg_risk_qty)
+                .push_bind(r.pnl_at_tx)
+                .push_bind(r.hit);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_fills.chunks(CHUNK) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO paper_fills (run_id, account_id, episode_id, market_id, yes_token, outcome, side, \
+             t_ms, limit_price, requested, filled, vwap, fees, levels_used) ",
+        );
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(clean(&r.episode_id))
+                .push_bind(clean(&r.market_id))
+                .push_bind(clean(&r.yes_token))
+                .push_bind(clean(&r.outcome))
+                .push_bind(clean(&r.side))
+                .push_bind(r.t_ms)
+                .push_bind(r.limit_price)
+                .push_bind(r.requested)
+                .push_bind(r.filled)
+                .push_bind(r.vwap)
+                .push_bind(r.fees)
+                .push_bind(r.levels_used);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_ledger.chunks(CHUNK) {
+        let mut qb =
+            QueryBuilder::<Postgres>::new(format!("INSERT INTO paper_ledger ({LEDGER_COLS}) "));
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(r.seq)
+                .push_bind(r.t_ms)
+                .push_bind(clean(&r.kind))
+                .push_bind(clean_opt(&r.episode_id))
+                .push_bind(clean_opt(&r.market_id))
+                .push_bind(clean_opt(&r.yes_token))
+                .push_bind(clean_opt(&r.outcome))
+                .push_bind(r.qty)
+                .push_bind(r.price)
+                .push_bind(r.cash_delta)
+                .push_bind(r.fees)
+                .push_bind(r.realized_delta)
+                .push_bind(r.cash_after)
+                .push_bind(r.equity);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_markouts.chunks(CHUNK) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO paper_markouts (run_id, account_id, episode_id, market_id, yes_token, outcome, \
+             fill_vwap, offset_ms, mid, markout) ",
+        );
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(clean(&r.episode_id))
+                .push_bind(clean(&r.market_id))
+                .push_bind(clean(&r.yes_token))
+                .push_bind(clean(&r.outcome))
+                .push_bind(r.fill_vwap)
+                .push_bind(r.offset_ms)
+                .push_bind(r.mid)
+                .push_bind(r.markout);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_marks.chunks(CHUNK) {
+        let mut qb =
+            QueryBuilder::<Postgres>::new(format!("INSERT INTO paper_marks ({MARK_COLS}) "));
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.account_id))
+                .push_bind(r.t_ms)
+                .push_bind(r.cash)
+                .push_bind(r.equity)
+                .push_bind(r.realized)
+                .push_bind(r.unrealized)
+                .push_bind(r.fees_paid)
+                .push_bind(r.locked)
+                .push_bind(r.max_drawdown)
+                .push_bind(r.n_positions);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in dedupe_last_state(&b.paper_state).chunks(CHUNK) {
+        let mut qb =
+            QueryBuilder::<Postgres>::new("INSERT INTO paper_state (account_id, state, updated_ms) ");
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(clean(&r.account_id))
+                .push_bind(clean(&r.state))
+                .push_bind(r.updated_ms);
+        });
+        // A restored (older) batch must never overwrite a newer save.
+        qb.push(
+            " ON CONFLICT (account_id) DO UPDATE SET state = EXCLUDED.state, updated_ms = EXCLUDED.updated_ms \
+             WHERE paper_state.updated_ms <= EXCLUDED.updated_ms",
+        );
+        qb.build().execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+impl Store {
+    pub async fn paper_ledger_for_run(&self, run_id: i64) -> Result<Vec<PaperLedgerRow>, StoreError> {
+        let sql = format!(
+            "SELECT {LEDGER_COLS} FROM paper_ledger WHERE run_id = $1 ORDER BY account_id, seq"
+        );
+        Ok(sqlx::query_as::<_, PaperLedgerRow>(&sql)
+            .bind(run_id)
+            .fetch_all(self.pool())
+            .await?)
+    }
+
+    pub async fn paper_marks_for_run(&self, run_id: i64) -> Result<Vec<PaperMarkRow>, StoreError> {
+        let sql =
+            format!("SELECT {MARK_COLS} FROM paper_marks WHERE run_id = $1 ORDER BY account_id, t_ms");
+        Ok(sqlx::query_as::<_, PaperMarkRow>(&sql)
+            .bind(run_id)
+            .fetch_all(self.pool())
+            .await?)
+    }
+
+    /// The live accounts saved by the last run (replay never calls this).
+    pub async fn load_paper_state(&self) -> Result<Vec<PaperStateRow>, StoreError> {
+        Ok(sqlx::query_as::<_, PaperStateRow>(
+            "SELECT account_id, state, updated_ms FROM paper_state ORDER BY account_id",
+        )
+        .fetch_all(self.pool())
+        .await?)
+    }
+}
+```
+
+In `crates/store/src/lib.rs`, add `mod paper;` below `mod batch;`.
+
+In `crates/store/src/batch.rs`:
+- Add the paper tables to `Table`:
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    Observations,
+    IntegrityEvents,
+    Health,
+    EpisodeLegs,
+    PaperAccounts,
+    PaperIntents,
+    PaperExecs,
+    PaperFills,
+    PaperLedger,
+    PaperMarkouts,
+    PaperMarks,
+    PaperState,
+}
+
+impl Table {
+    fn name(self) -> &'static str {
+        match self {
+            Table::Observations => "observations",
+            Table::IntegrityEvents => "integrity_events",
+            Table::Health => "health",
+            Table::EpisodeLegs => "episode_legs",
+            Table::PaperAccounts => "paper_accounts",
+            Table::PaperIntents => "paper_intents",
+            Table::PaperExecs => "paper_execs",
+            Table::PaperFills => "paper_fills",
+            Table::PaperLedger => "paper_ledger",
+            Table::PaperMarkouts => "paper_markouts",
+            Table::PaperMarks => "paper_marks",
+            Table::PaperState => "paper_state",
+        }
+    }
+}
+```
+- In `write_batch`, directly before `tx.commit().await?;`, add:
+```rust
+        crate::paper::write_paper(&mut tx, b).await?;
+```
+(`&mut tx` is a `&mut Transaction`, which derefs to `&mut PgConnection`. If the compiler asks for it explicitly, write `&mut *tx`.)
+
+- [ ] **Step 6: Keep the scanner compiling.** S3a's `Pending::take` in `bins/scanner/src/writer.rs` builds `Batch { episodes, observations, integrity, health }` field by field. Add `..Batch::default()` as the last line of that literal. Task 6 replaces this function.
+
+- [ ] **Step 7: Run the tests to verify they pass.**
+Run: `set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" && cargo test -p store && cargo check -p scanner --all-targets`
+Expected: PASS. `paper.rs` has 6 tests. `roles.rs` includes the new test and S3a's `a_table_created_after_0003_…`. `migrate.rs` sees every paper table. The output has no `SKIPPED`, and `scanner` compiles.
+
+- [ ] **Step 8: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p store -p scanner --all-targets -- -D warnings`
+Expected: clean.
+```bash
+git add crates/store/migrations/0004_paper.sql crates/store/src/paper.rs crates/store/src/rows.rs crates/store/src/batch.rs crates/store/src/lib.rs crates/store/tests/paper.rs crates/store/tests/roles.rs crates/store/tests/migrate.rs bins/scanner/src/writer.rs
+git commit -m "store: paper_* tables (append-only, idempotent), paper_state upsert, non_binary_payout kind"
+```
+
+---
+
+### Task 2: pm-api: Gamma `/markets` resolutions (read-only route)
+
+**Files:**
+- Modify: `crates/pm-api/src/routes.rs`, `crates/pm-api/src/gamma.rs`, `crates/pm-api/tests/routes.rs`, `crates/pm-api/tests/live.rs`, `docs/superpowers/specs/2026-09-22-arb-scanner-design.md` (§16 item 3)
+- Create: `crates/pm-api/tests/resolutions.rs`
+
+**Interfaces:**
+- Consumes: `wire::string_array`, `GammaMarket`, `http_client()`.
+- Produces:
+  - `routes::GAMMA_MARKETS = "/markets"` and `ALLOWED[1] = ("GET", "https://gamma-api.polymarket.com/markets")`.
+  - `GammaMarket.uma_resolution_status: Option<String>`.
+  - `gamma::Resolution { market_id: String, payout_yes: Decimal, payout_no: Decimal }` (Debug, Clone, PartialEq, Eq).
+  - `gamma::payout_vector(&GammaMarket) -> Option<(Decimal, Decimal)>` and `gamma::parse_markets(&str) -> Result<Vec<GammaMarket>, ApiError>`.
+  - `gamma::parse_resolutions(text: &str, wanted: &[String]) -> Result<Vec<Resolution>, ApiError>` (only markets in `wanted`, in response order).
+  - `gamma::RESOLUTION_CHUNK: usize = 50` and `GammaClient::resolutions(&self, market_ids: &[String]) -> Result<Vec<Resolution>, ApiError>`.
+
+**The acceptance rule** (spec §5.6 "the market's payout vector", Q19). A market's `outcomePrices` count as its payout only when all of the following hold:
+- the market is `closed`;
+- it has exactly two values, each in [0, 1], and they sum to exactly 1;
+- the vector is binary (1/0 or 0/1), or `umaResolutionStatus == "resolved"`. A closed market still in dispute shows its last trading prices, which also sum to 1, so a fractional vector needs that positive confirmation. See the rulings.
+
+- [ ] **Step 1: Write the failing tests.** Create `crates/pm-api/tests/resolutions.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use pm_api::gamma::{Resolution, parse_markets, parse_resolutions, payout_vector};
+use rust_decimal_macros::dec;
+
+/// Shaped like `GET /markets?id=…&closed=true`: an array of markets, `outcomePrices` as a
+/// JSON-encoded string (Gamma's habit), ids as strings or numbers, many fields we ignore.
+const MARKETS: &str = r#"[
+  {"id": "501001", "conditionId": "0xaa01", "question": "Will A win?", "slug": "will-a-win",
+   "active": true, "closed": true, "acceptingOrders": false, "enableOrderBook": true, "negRisk": true,
+   "clobTokenIds": "[\"111\", \"112\"]", "outcomes": "[\"Yes\", \"No\"]",
+   "outcomePrices": "[\"1\", \"0\"]", "umaResolutionStatus": "resolved",
+   "endDate": "2026-09-20T00:00:00Z", "closedTime": "2026-09-21 14:02:11+00"},
+  {"id": "501002", "active": true, "closed": true, "outcomePrices": "[\"0\", \"1\"]",
+   "umaResolutionStatus": "resolved"},
+  {"id": 501003, "active": true, "closed": true, "outcomePrices": "[\"0.5\", \"0.5\"]",
+   "umaResolutionStatus": "resolved"},
+  {"id": "501004", "active": true, "closed": true, "outcomePrices": "[\"0.62\", \"0.38\"]",
+   "umaResolutionStatus": "proposed"},
+  {"id": "501005", "active": true, "closed": false, "outcomePrices": "[\"0.45\", \"0.55\"]"},
+  {"id": "501006", "closed": true, "outcomePrices": "[\"0.7\", \"0.7\"]", "umaResolutionStatus": "resolved"},
+  {"id": "501007", "closed": true, "outcomePrices": "[\"1.2\", \"-0.2\"]", "umaResolutionStatus": "resolved"},
+  {"id": "501008", "closed": true, "outcomePrices": null},
+  {"id": "501009", "closed": true, "outcomePrices": "[\"1\", \"0\"]"},
+  {"id": "501010", "closed": true, "outcomePrices": "[\"0.5\", \"0.5\"]"}
+]"#;
+
+fn ids(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+fn all_ids() -> Vec<String> {
+    (1..=10).map(|i| format!("5010{i:02}")).collect()
+}
+
+fn r(id: &str, y: rust_decimal::Decimal, n: rust_decimal::Decimal) -> Resolution {
+    Resolution { market_id: id.into(), payout_yes: y, payout_no: n }
+}
+
+#[test]
+fn parses_payout_vectors_exactly() {
+    assert_eq!(
+        parse_resolutions(MARKETS, &all_ids()).unwrap(),
+        vec![
+            r("501001", dec!(1), dec!(0)),
+            r("501002", dec!(0), dec!(1)),
+            r("501003", dec!(0.5), dec!(0.5)), // Q19: a confirmed 50-50 is a payout, flagged later
+            r("501009", dec!(1), dec!(0)),     // binary: accepted without a UMA status
+        ]
+    );
+}
+
+#[test]
+fn a_closed_market_awaiting_resolution_is_not_a_payout() {
+    let ms = parse_markets(MARKETS).unwrap();
+    let by_id = |id: &str| ms.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(payout_vector(by_id("501004")), None, "closed, still in dispute: trading prices");
+    assert_eq!(payout_vector(by_id("501005")), None, "still open");
+    assert_eq!(payout_vector(by_id("501006")), None, "sums to 1.4");
+    assert_eq!(payout_vector(by_id("501007")), None, "outside [0, 1]");
+    assert_eq!(payout_vector(by_id("501008")), None, "no prices");
+    assert_eq!(payout_vector(by_id("501010")), None, "fractional without a resolved status");
+    assert_eq!(payout_vector(by_id("501003")), Some((dec!(0.5), dec!(0.5))));
+}
+
+#[test]
+fn only_the_requested_markets_come_back() {
+    // if Gamma ever ignores the id filter, unrelated closed markets must not leak through
+    assert_eq!(
+        parse_resolutions(MARKETS, &ids(&["501002", "999"])).unwrap(),
+        vec![r("501002", dec!(0), dec!(1))]
+    );
+    assert!(parse_resolutions(MARKETS, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn a_body_that_is_not_a_market_list_is_an_error() {
+    assert!(parse_resolutions(r#"{"error": "rate limited"}"#, &all_ids()).is_err());
+    assert!(parse_resolutions("[]", &all_ids()).unwrap().is_empty());
+}
+```
+In `crates/pm-api/tests/routes.rs`, replace the first two tests with:
+```rust
+#[test]
+fn route_table_is_exactly_the_read_only_set() {
+    assert_eq!(
+        ALLOWED,
+        &[
+            ("GET", "https://gamma-api.polymarket.com/events/keyset"),
+            ("GET", "https://gamma-api.polymarket.com/markets"),
+            ("GET", "https://clob.polymarket.com/book"),
+            ("POST", "https://clob.polymarket.com/books"),
+            ("GET", "https://clob.polymarket.com/ok"),
+            ("WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market"),
+            ("WS", "wss://sports-api.polymarket.com/ws"),
+        ]
+    );
+}
+
+#[test]
+fn table_agrees_with_the_constants() {
+    assert_eq!(ALLOWED[0].1, format!("{GAMMA_BASE}{GAMMA_EVENTS_KEYSET}"));
+    assert_eq!(ALLOWED[1].1, format!("{GAMMA_BASE}{GAMMA_MARKETS}"));
+    assert_eq!(ALLOWED[2].1, format!("{CLOB_BASE}{CLOB_BOOK}"));
+    assert_eq!(ALLOWED[3].1, format!("{CLOB_BASE}{CLOB_BOOKS}"));
+    assert_eq!(ALLOWED[4].1, format!("{CLOB_BASE}{CLOB_OK}"));
+    assert_eq!(ALLOWED[5].1, WS_MARKET);
+    assert_eq!(ALLOWED[6].1, WS_SPORTS);
+}
+```
+Append to `crates/pm-api/tests/live.rs` (ignored by default, like the others):
+```rust
+#[tokio::test]
+#[ignore]
+async fn live_resolutions_route_answers_for_open_markets() {
+    let client = GammaClient::new().unwrap();
+    let page = client.page(None).await.unwrap();
+    let ids: Vec<String> = page
+        .events
+        .iter()
+        .flat_map(|e| e.markets().iter())
+        .map(|m| m.id.clone())
+        .take(10)
+        .collect();
+    assert!(!ids.is_empty());
+    let found = client.resolutions(&ids).await.unwrap();
+    assert!(found.is_empty(), "active markets are not resolved: {found:?}");
+}
+```
+
+- [ ] **Step 2: Run them to verify they fail.**
+Run: `cargo test -p pm-api --test resolutions --test routes`
+Expected: compile errors: `parse_resolutions`, `payout_vector`, `Resolution` and `GAMMA_MARKETS` not found.
+
+- [ ] **Step 3: Implement.** In `crates/pm-api/src/routes.rs`, add the constant under `GAMMA_EVENTS_KEYSET` and the table entry as the second row:
+```rust
+pub const GAMMA_MARKETS: &str = "/markets";
+```
+```rust
+pub const ALLOWED: &[(&str, &str)] = &[
+    ("GET", "https://gamma-api.polymarket.com/events/keyset"),
+    ("GET", "https://gamma-api.polymarket.com/markets"),
+    ("GET", "https://clob.polymarket.com/book"),
+    ("POST", "https://clob.polymarket.com/books"),
+    ("GET", "https://clob.polymarket.com/ok"),
+    ("WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market"),
+    ("WS", "wss://sports-api.polymarket.com/ws"),
+];
+```
+In `crates/pm-api/src/gamma.rs`:
+- change the routes import to `use crate::routes::{GAMMA_BASE, GAMMA_EVENTS_KEYSET, GAMMA_MARKETS};`;
+- add a field to `GammaMarket`, after `end_date`:
+```rust
+    /// UMA adapter state, e.g. "proposed", "disputed", "resolved" (S3c payout acceptance).
+    pub uma_resolution_status: Option<String>,
+```
+- add, after `leg_status`:
+```rust
+/// A market's final payout per share of YES and of NO (spec §5.6: never an assumed {0,1}).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub market_id: String,
+    pub payout_yes: Decimal,
+    pub payout_no: Decimal,
+}
+
+/// Ids per `/markets` request.
+pub const RESOLUTION_CHUNK: usize = 50;
+
+/// The payout vector of a CLOSED market: two values in [0, 1] summing to exactly 1. A fractional
+/// vector (50-50, Q19) also needs `umaResolutionStatus == "resolved"`, because a closed market
+/// still in dispute shows its last trading prices, which sum to 1 as well.
+pub fn payout_vector(m: &GammaMarket) -> Option<(Decimal, Decimal)> {
+    if m.closed != Some(true) {
+        return None;
+    }
+    let p = string_array(&m.outcome_prices, "outcomePrices").ok()?;
+    let [y, n] = p.as_slice() else {
+        return None;
+    };
+    let y = Decimal::from_str_exact(y.trim()).ok()?;
+    let n = Decimal::from_str_exact(n.trim()).ok()?;
+    let unit = |x: Decimal| x >= Decimal::ZERO && x <= Decimal::ONE;
+    if !unit(y) || !unit(n) || y + n != Decimal::ONE {
+        return None;
+    }
+    let binary = (y == Decimal::ONE && n == Decimal::ZERO) || (y == Decimal::ZERO && n == Decimal::ONE);
+    if !binary && m.uma_resolution_status.as_deref() != Some("resolved") {
+        return None;
+    }
+    Some((y, n))
+}
+
+pub fn parse_markets(text: &str) -> Result<Vec<GammaMarket>, ApiError> {
+    Ok(serde_json::from_str(text)?)
+}
+
+/// Accepted payouts among the markets we asked about (`wanted`), in response order. Anything
+/// else in the response is ignored, so a filter Gamma silently drops can't settle a stranger.
+pub fn parse_resolutions(text: &str, wanted: &[String]) -> Result<Vec<Resolution>, ApiError> {
+    Ok(parse_markets(text)?
+        .into_iter()
+        .filter(|m| wanted.contains(&m.id))
+        .filter_map(|m| {
+            payout_vector(&m).map(|(payout_yes, payout_no)| Resolution {
+                market_id: m.id.clone(),
+                payout_yes,
+                payout_no,
+            })
+        })
+        .collect())
+}
+```
+- add to `impl GammaClient`:
+```rust
+    /// Closed markets among `market_ids` with an accepted payout vector (read-only `GET /markets`).
+    pub async fn resolutions(&self, market_ids: &[String]) -> Result<Vec<Resolution>, ApiError> {
+        let mut out = Vec::new();
+        for chunk in market_ids.chunks(RESOLUTION_CHUNK) {
+            let mut query: Vec<(&str, String)> = vec![
+                ("closed", "true".to_string()),
+                ("limit", chunk.len().to_string()),
+            ];
+            for id in chunk {
+                query.push(("id", id.clone()));
+            }
+            let text = self
+                .http
+                .get(format!("{}{}", self.base, GAMMA_MARKETS))
+                .query(&query)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?;
+            out.extend(parse_resolutions(&text, chunk)?);
+        }
+        Ok(out)
+    }
+```
+
+- [ ] **Step 4: Note the route in the spec.** In `docs/superpowers/specs/2026-09-22-arb-scanner-design.md` §16, replace item 3 with:
+```markdown
+3. `pm-api` exposes only `GET /events/keyset`, `GET /markets` (Gamma, closed markets by id: the paper trader's resolutions, S3c), `GET /book`, `POST /books`, `GET /ok`, the market websocket, and the Sports websocket. A test asserts that route table.
+```
+
+- [ ] **Step 5: Run the tests to verify they pass.**
+Run: `cargo test -p pm-api`
+Expected: PASS. That includes `resolutions` (4 tests), `routes` (3, including `no_url_literals_outside_routes_rs`) and the existing `gamma` tests. The `live` tests show as ignored.
+
+- [ ] **Step 6: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p pm-api --all-targets -- -D warnings`
+Expected: clean.
+```bash
+git add crates/pm-api/src/routes.rs crates/pm-api/src/gamma.rs crates/pm-api/tests/routes.rs crates/pm-api/tests/resolutions.rs crates/pm-api/tests/live.rs docs/superpowers/specs/2026-09-22-arb-scanner-design.md
+git commit -m "pm-api: read-only Gamma /markets resolutions with a strict payout-vector rule"
+```
+
+---
+
+### Task 3: scanner paper glue: `[paper]` config, policies + hash, row mapping, state, resolver loop
+
+**Files:**
+- Modify: `bins/scanner/Cargo.toml`, `bins/scanner/src/lib.rs`, `bins/scanner/src/config.rs`, `config/scanner.toml`, `docker/rust.Dockerfile`
+- Create: `bins/scanner/src/paper.rs`
+
+**Interfaces:**
+- Consumes: store `Paper*Row` + `Batch` (Task 1), `pm_api::gamma::Resolution` + `pm_api::ApiError` (Task 2); `sim::{config::SimConfig, trader::{PaperTrader, TraderState}, rows::SimOut, account::Account}` (S3b).
+- Produces:
+  - `config::PaperCfg { enabled: bool, policies: String, resolver_every_secs: u64, state_save_every_secs: u64 }` as `Config.paper`.
+  - `paper::Policies { sim: SimConfig, sha256: String }`.
+  - `paper::sha256_hex(&[u8]) -> String` and `paper::parse_policies(&str) -> anyhow::Result<Policies>`.
+  - `paper::load_policies(&PaperCfg) -> anyhow::Result<Option<Policies>>` (None when disabled).
+  - `paper::run_hash(cfg_hash: &str, Option<&Policies>) -> String` (`"<cfg>+<policies sha256>"`) and `paper::with_policies(&PaperCfg, cfg_hash: &str) -> anyhow::Result<(Option<Policies>, String)>`.
+  - `paper::account_rows(run_id: i64, &Policies) -> Vec<PaperAccountRow>` and `paper::push_sim(run_id: i64, SimOut, &mut Batch)`.
+  - `paper::state_batch(&TraderState, updated_ms: i64) -> anyhow::Result<Batch>` and `paper::restore_trader(&Policies, &[PaperStateRow]) -> anyhow::Result<PaperTrader>`.
+  - `paper::RESOLVE_HINT_DELAY: Duration` (30 s) and `paper::run_resolver(fetch, held: watch::Receiver<Vec<String>>, hint: Arc<Notify>, every: Duration, hint_delay: Duration, out: mpsc::Sender<Resolution>)`, where `fetch: FnMut(Vec<String>) -> Future<Output = Result<Vec<Resolution>, ApiError>>`.
+
+- [ ] **Step 1: Write the failing tests.** Create `bins/scanner/src/paper.rs` containing only the test module for now (the implementation arrives in Step 3):
+```rust
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use rust_decimal::Decimal;
+    use sim::account::{EntryKind, LedgerEntry};
+    use sim::rows::{AccountRow, ExecRow, FillRow, IntentRow, MarkoutRow};
+    use sim::types::{LegKey, Outcome};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const POLICIES: &str = include_str!("../../../config/policies.toml");
+
+    fn d(s: &str) -> Decimal {
+        Decimal::from_str_exact(s).unwrap()
+    }
+
+    #[test]
+    fn repo_policies_parse_and_join_the_run_hash() {
+        let p = parse_policies(POLICIES).unwrap();
+        assert_eq!(p.sha256.len(), 64);
+        assert_eq!(p.sha256, parse_policies(POLICIES).unwrap().sha256, "stable");
+        assert_eq!(run_hash("abc", Some(&p)), format!("abc+{}", p.sha256));
+        assert_eq!(run_hash("abc", None), "abc");
+        let rows = account_rows(7, &p);
+        assert_eq!(rows.len(), p.sim.accounts.len());
+        assert!(rows.iter().all(|r| r.run_id == 7 && r.policies_sha256 == p.sha256));
+        assert!(rows.iter().any(|r| r.account_id == "P0-converter/sp-idle/fee10" && r.fee_bips == d("10")));
+        let zero = POLICIES.replacen("bankroll = \"1000\"", "bankroll = \"0\"", 1);
+        assert!(parse_policies(&zero).is_err(), "validated, not just parsed");
+    }
+
+    fn leg() -> LegKey {
+        LegKey { market_id: "m0".into(), yes_token: "y0".into(), outcome: Outcome::No }
+    }
+
+    #[test]
+    fn every_sim_row_maps_to_its_table() {
+        let mut b = Batch::default();
+        let rows = [
+            SimOut::Intent(IntentRow {
+                account: "a".into(),
+                episode_id: "e".into(),
+                decided_ms: 1,
+                exec_ms: None,
+                skip_reason: Some("no_cash".into()),
+                q_target: None,
+                detected_q: None,
+                detected_pnl: None,
+                reserve: None,
+            }),
+            SimOut::Exec(ExecRow {
+                account: "a".into(),
+                episode_id: "e".into(),
+                exec_ms: 2,
+                q_eff: d("0"),
+                leg_risk_qty: d("0"),
+                pnl_at_tx: None,
+                hit: false,
+            }),
+            SimOut::Fill(FillRow {
+                account: "a".into(),
+                episode_id: "e".into(),
+                leg: leg(),
+                t_ms: 2,
+                side: "buy",
+                limit: Some(d("0.6")),
+                requested: d("51.2"),
+                filled: d("51.2"),
+                vwap: Some(d("0.6")),
+                fees: d("0"),
+                levels_used: 1,
+            }),
+            SimOut::Ledger(LedgerEntry {
+                account: "a".into(),
+                seq: 4,
+                t_ms: 2,
+                kind: EntryKind::Buy,
+                episode_id: Some("e".into()),
+                leg: Some(leg()),
+                qty: d("51.2"),
+                price: Some(d("0.6")),
+                cash_delta: d("-30.72"),
+                fees: d("0"),
+                realized_delta: d("0"),
+                cash_after: d("969.28"),
+                equity: None,
+            }),
+            SimOut::Markout(MarkoutRow {
+                account: "a".into(),
+                episode_id: "e".into(),
+                leg: leg(),
+                fill_vwap: d("0.6"),
+                offset_ms: 1000,
+                mid: None,
+                markout: None,
+            }),
+            SimOut::Account(AccountRow {
+                account: "a".into(),
+                t_ms: 60_000,
+                cash: d("969.28"),
+                equity: d("1000"),
+                realized: d("0"),
+                unrealized: d("0"),
+                fees_paid: d("0"),
+                locked: d("30.72"),
+                max_drawdown: d("0"),
+                n_positions: 1,
+            }),
+        ];
+        for r in rows {
+            push_sim(3, r, &mut b);
+        }
+        assert_eq!(b.rows(), 6);
+        assert_eq!(b.paper_intents[0].skip_reason.as_deref(), Some("no_cash"));
+        assert_eq!(b.paper_execs[0].pnl_at_tx, None, "unmeasured stays NULL");
+        assert_eq!((b.paper_fills[0].outcome.as_str(), b.paper_fills[0].side.as_str()), ("no", "buy"));
+        let l = &b.paper_ledger[0];
+        assert_eq!(
+            (l.run_id, l.seq, l.kind.as_str(), l.outcome.as_deref(), l.realized_delta),
+            (3, 4, "buy", Some("no"), d("0"))
+        );
+        assert_eq!((b.paper_markouts[0].offset_ms, b.paper_marks[0].n_positions), (1000, 1));
+    }
+
+    #[test]
+    fn a_saved_account_whose_spec_changed_starts_fresh() {
+        let p = parse_policies(POLICIES).unwrap();
+        let mut st = PaperTrader::new(p.sim.clone()).unwrap().state();
+        st.accounts[0].cash = d("900");
+        st.accounts[1].cash = d("800");
+        let rows = state_batch(&st, 5).unwrap().paper_state;
+        assert_eq!(rows.len(), st.accounts.len());
+        assert!(rows.iter().all(|r| r.updated_ms == 5));
+        let same = restore_trader(&p, &rows).unwrap();
+        assert_eq!((same.accounts()[0].cash, same.accounts()[1].cash), (d("900"), d("800")));
+        // the first account's per_trade changed: a different pre-registered experiment
+        let changed =
+            parse_policies(&POLICIES.replacen("per_trade = \"100\"", "per_trade = \"50\"", 1)).unwrap();
+        let t = restore_trader(&changed, &rows).unwrap();
+        assert_eq!((t.accounts()[0].cash, t.accounts()[1].cash), (d("1000"), d("800")));
+        let bad = vec![store::PaperStateRow {
+            account_id: "x".into(),
+            state: "{not json".into(),
+            updated_ms: 1,
+        }];
+        assert!(restore_trader(&p, &bad).is_err(), "a corrupt save is loud, never a silent reset");
+    }
+
+    fn resolved(id: &str) -> Resolution {
+        Resolution { market_id: id.into(), payout_yes: Decimal::ONE, payout_no: Decimal::ZERO }
+    }
+
+    #[tokio::test]
+    async fn resolver_asks_about_held_markets_and_forwards_what_resolved() {
+        let (_held_tx, held_rx) = watch::channel(vec!["m1".to_string(), "m2".to_string()]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let seen = asked.clone();
+        let task = tokio::spawn(run_resolver(
+            move |ids: Vec<String>| {
+                seen.lock().unwrap().push(ids);
+                async { Ok::<_, pm_api::ApiError>(vec![resolved("m1")]) }
+            },
+            held_rx,
+            Arc::new(Notify::new()),
+            Duration::from_millis(20),
+            Duration::ZERO,
+            tx,
+        ));
+        let r = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(r, resolved("m1"));
+        assert_eq!(asked.lock().unwrap()[0], vec!["m1".to_string(), "m2".to_string()]);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_ws_hint_polls_soon_without_waiting_for_the_period() {
+        let (_held_tx, held_rx) = watch::channel(vec!["m1".to_string()]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let hint = Arc::new(Notify::new());
+        let task = tokio::spawn(run_resolver(
+            |_ids: Vec<String>| async { Ok::<_, pm_api::ApiError>(vec![resolved("m1")]) },
+            held_rx,
+            hint.clone(),
+            Duration::from_secs(3_600),
+            Duration::from_millis(10),
+            tx,
+        ));
+        hint.notify_one();
+        let r = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(r.market_id, "m1");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn nothing_held_means_no_gamma_calls() {
+        let (_held_tx, held_rx) = watch::channel(Vec::<String>::new());
+        let (tx, _rx) = mpsc::channel(8);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let task = tokio::spawn(run_resolver(
+            move |_ids: Vec<String>| {
+                c.fetch_add(1, Ordering::Relaxed);
+                async { Ok::<_, pm_api::ApiError>(Vec::new()) }
+            },
+            held_rx,
+            Arc::new(Notify::new()),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            tx,
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        task.abort();
+    }
+}
+```
+Add `sim = { path = "../../crates/sim" }` to `[dependencies]` in `bins/scanner/Cargo.toml` (after `store`), and add `pub mod paper;` to `bins/scanner/src/lib.rs` (after `pub mod metrics;`).
+
+In `bins/scanner/src/config.rs` `mod tests`, extend `repo_config_parses_with_a_stable_hash` with the lines below (before its closing brace), and add one test:
+```rust
+        assert!(cfg.paper.enabled);
+        assert_eq!(cfg.paper.policies, "/etc/cute-trading/policies.toml");
+        assert_eq!((cfg.paper.resolver_every_secs, cfg.paper.state_save_every_secs), (600, 60));
+```
+```rust
+    #[test]
+    fn rejects_a_hammering_resolver_or_odd_save_cadence() {
+        let fast = REPO.replace("resolver_every_secs = 600", "resolver_every_secs = 10");
+        assert!(Config::parse(&fast).is_err());
+        let never = REPO.replace("state_save_every_secs = 60", "state_save_every_secs = 0");
+        assert!(Config::parse(&never).is_err());
+    }
+```
+
+- [ ] **Step 2: Run them to verify they fail.**
+Run: `cargo test -p scanner --lib -- paper:: config::`
+Expected: compile errors: `parse_policies`, `run_resolver`, `push_sim` not found; no field `paper` on `Config`.
+
+- [ ] **Step 3: Implement the config.** In `bins/scanner/src/config.rs`, add `pub paper: PaperCfg,` as the last field of `Config`, and this struct after `StoreCfg`:
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaperCfg {
+    /// Run the paper trader (live and replay). Off = scanner only, as in S2.
+    pub enabled: bool,
+    /// The frozen policies file (spec §11). Its sha256 joins the run's config_hash.
+    pub policies: String,
+    /// Ask Gamma about held markets this often (and soon after a ws market_resolved).
+    pub resolver_every_secs: u64,
+    /// Save live account state to paper_state this often (restored at start).
+    pub state_save_every_secs: u64,
+}
+```
+and at the end of `validate` (before `Ok(())`):
+```rust
+        anyhow::ensure!(
+            self.paper.resolver_every_secs >= 60,
+            "paper.resolver_every_secs must be ≥ 60 (Gamma is polled, not hammered)"
+        );
+        anyhow::ensure!(
+            (10..=3600).contains(&self.paper.state_save_every_secs),
+            "paper.state_save_every_secs must be 10..=3600"
+        );
+        anyhow::ensure!(
+            !self.paper.enabled || !self.paper.policies.trim().is_empty(),
+            "paper.policies must name the policies file"
+        );
+```
+Append to `config/scanner.toml`:
+```toml
+
+[paper]
+enabled = true                  # spec §11: P0–P3 paper accounts, live and in replay
+policies = "/etc/cute-trading/policies.toml"   # frozen per evaluation run; its sha256 joins config_hash
+resolver_every_secs = 600       # ask Gamma about held markets (and 30 s after a ws market_resolved)
+state_save_every_secs = 60      # live account state → paper_state (restored at the next start)
+```
+In `docker/rust.Dockerfile`, directly below `COPY config/scanner.toml /etc/cute-trading/scanner.toml`, add:
+```dockerfile
+COPY config/policies.toml /etc/cute-trading/policies.toml
+```
+
+- [ ] **Step 4: Implement `paper.rs`.** Put this ABOVE the test module in `bins/scanner/src/paper.rs`:
+```rust
+//! Paper-trading glue for the scanner (S3c):
+//! - the frozen policies file and its hash (spec §11 pre-registration);
+//! - `SimOut` → `store` rows (one mapping for live and replay);
+//! - the live `paper_state` rows (restore at start);
+//! - the live resolver loop.
+//! PAPER ONLY: nothing here can place an order. `sim` produces ledger rows and nothing else.
+use crate::config::PaperCfg;
+use anyhow::Context;
+use pm_api::gamma::Resolution;
+use sha2::{Digest, Sha256};
+use sim::account::Account;
+use sim::config::SimConfig;
+use sim::rows::SimOut;
+use sim::trader::{PaperTrader, TraderState};
+use std::fmt::Write as _;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+use store::{
+    Batch, PaperAccountRow, PaperExecRow, PaperFillRow, PaperIntentRow, PaperLedgerRow, PaperMarkRow,
+    PaperMarkoutRow, PaperStateRow,
+};
+use tokio::sync::{Notify, mpsc, watch};
+
+/// After a ws `market_resolved`, wait this long before asking Gamma (its payout lags the event).
+pub const RESOLVE_HINT_DELAY: Duration = Duration::from_secs(30);
+
+/// The parsed policies file and the sha256 of its exact bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Policies {
+    pub sim: SimConfig,
+    pub sha256: String,
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(64);
+    for b in Sha256::digest(bytes) {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+pub fn parse_policies(text: &str) -> anyhow::Result<Policies> {
+    let sim: SimConfig = toml::from_str(text).context("parse policies")?;
+    sim.validate().context("validate policies")?;
+    Ok(Policies {
+        sim,
+        sha256: sha256_hex(text.as_bytes()),
+    })
+}
+
+/// None when paper trading is off.
+pub fn load_policies(cfg: &PaperCfg) -> anyhow::Result<Option<Policies>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&cfg.policies)
+        .with_context(|| format!("read {}", cfg.policies))?;
+    parse_policies(&text).map(Some)
+}
+
+/// `runs.config_hash` (and every episode's): the scanner config hash, plus `+<policies sha256>`
+/// when paper trading is on, so a run names the exact policies it was evaluated under.
+pub fn run_hash(cfg_hash: &str, p: Option<&Policies>) -> String {
+    match p {
+        Some(p) => format!("{cfg_hash}+{}", p.sha256),
+        None => cfg_hash.to_string(),
+    }
+}
+
+pub fn with_policies(cfg: &PaperCfg, cfg_hash: &str) -> anyhow::Result<(Option<Policies>, String)> {
+    let p = load_policies(cfg)?;
+    let h = run_hash(cfg_hash, p.as_ref());
+    Ok((p, h))
+}
+
+/// One row per configured account for this run (written before any other paper row).
+pub fn account_rows(run_id: i64, p: &Policies) -> Vec<PaperAccountRow> {
+    p.sim
+        .accounts
+        .iter()
+        .map(|a| PaperAccountRow {
+            run_id,
+            account_id: a.id(),
+            policy: a.policy.as_str().to_string(),
+            scenario: a.scenario.clone(),
+            fee_bips: a.fee_bips,
+            bankroll: a.bankroll,
+            per_trade: a.per_trade,
+            policies_sha256: p.sha256.clone(),
+        })
+        .collect()
+}
+
+/// Map one paper-trader output onto its table (live: `Io::route`; replay: `replay_cmd`).
+pub fn push_sim(run_id: i64, o: SimOut, b: &mut Batch) {
+    match o {
+        SimOut::Intent(r) => b.paper_intents.push(PaperIntentRow {
+            run_id,
+            account_id: r.account,
+            episode_id: r.episode_id,
+            decided_ms: r.decided_ms,
+            exec_ms: r.exec_ms,
+            skip_reason: r.skip_reason,
+            q_target: r.q_target,
+            detected_q: r.detected_q,
+            detected_pnl: r.detected_pnl,
+            reserve: r.reserve,
+        }),
+        SimOut::Exec(r) => b.paper_execs.push(PaperExecRow {
+            run_id,
+            account_id: r.account,
+            episode_id: r.episode_id,
+            exec_ms: r.exec_ms,
+            q_eff: r.q_eff,
+            leg_risk_qty: r.leg_risk_qty,
+            pnl_at_tx: r.pnl_at_tx,
+            hit: r.hit,
+        }),
+        SimOut::Fill(r) => b.paper_fills.push(PaperFillRow {
+            run_id,
+            account_id: r.account,
+            episode_id: r.episode_id,
+            outcome: r.leg.outcome.as_str().to_string(),
+            market_id: r.leg.market_id,
+            yes_token: r.leg.yes_token,
+            side: r.side.to_string(),
+            t_ms: r.t_ms,
+            limit_price: r.limit,
+            requested: r.requested,
+            filled: r.filled,
+            vwap: r.vwap,
+            fees: r.fees,
+            levels_used: i32::try_from(r.levels_used).unwrap_or(i32::MAX),
+        }),
+        SimOut::Ledger(e) => {
+            let (market_id, yes_token, outcome) = match e.leg {
+                Some(l) => (
+                    Some(l.market_id),
+                    Some(l.yes_token),
+                    Some(l.outcome.as_str().to_string()),
+                ),
+                None => (None, None, None),
+            };
+            b.paper_ledger.push(PaperLedgerRow {
+                run_id,
+                account_id: e.account,
+                seq: i64::try_from(e.seq).unwrap_or(i64::MAX),
+                t_ms: e.t_ms,
+                kind: e.kind.as_str().to_string(),
+                episode_id: e.episode_id,
+                market_id,
+                yes_token,
+                outcome,
+                qty: e.qty,
+                price: e.price,
+                cash_delta: e.cash_delta,
+                fees: e.fees,
+                realized_delta: e.realized_delta,
+                cash_after: e.cash_after,
+                equity: e.equity,
+            });
+        }
+        SimOut::Markout(m) => b.paper_markouts.push(PaperMarkoutRow {
+            run_id,
+            account_id: m.account,
+            episode_id: m.episode_id,
+            outcome: m.leg.outcome.as_str().to_string(),
+            market_id: m.leg.market_id,
+            yes_token: m.leg.yes_token,
+            fill_vwap: m.fill_vwap,
+            offset_ms: m.offset_ms,
+            mid: m.mid,
+            markout: m.markout,
+        }),
+        SimOut::Account(a) => b.paper_marks.push(PaperMarkRow {
+            run_id,
+            account_id: a.account,
+            t_ms: a.t_ms,
+            cash: a.cash,
+            equity: a.equity,
+            realized: a.realized,
+            unrealized: a.unrealized,
+            fees_paid: a.fees_paid,
+            locked: a.locked,
+            max_drawdown: a.max_drawdown,
+            n_positions: a.n_positions,
+        }),
+    }
+}
+
+/// The live accounts as `paper_state` rows (exact JSON: decimals serialize as strings).
+pub fn state_batch(st: &TraderState, updated_ms: i64) -> anyhow::Result<Batch> {
+    let paper_state = st
+        .accounts
+        .iter()
+        .map(|a| {
+            Ok(PaperStateRow {
+                account_id: a.id.clone(),
+                state: serde_json::to_string(a).context("serialize paper account")?,
+                updated_ms,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(Batch {
+        paper_state,
+        ..Batch::default()
+    })
+}
+
+/// Rebuild the live trader from `paper_state`. A saved account whose spec differs from the
+/// policies file (same id, e.g. a new per_trade) is a different pre-registered experiment: it
+/// starts fresh, with a log line. A row that isn't a saved account is an error.
+pub fn restore_trader(p: &Policies, rows: &[PaperStateRow]) -> anyhow::Result<PaperTrader> {
+    let mut accounts = Vec::new();
+    for r in rows {
+        let a: Account = serde_json::from_str(&r.state)
+            .with_context(|| format!("paper_state row {} is not a saved account", r.account_id))?;
+        match p.sim.accounts.iter().find(|s| s.id() == a.id) {
+            Some(spec) if *spec == a.spec => accounts.push(a),
+            Some(_) => eprintln!(
+                "paper: account {} changed in policies.toml since it was saved; it starts fresh",
+                a.id
+            ),
+            None => {} // no longer configured: PaperTrader::restore would drop it anyway
+        }
+    }
+    PaperTrader::restore(p.sim.clone(), TraderState { accounts }).context("restore paper trader")
+}
+
+/// Live resolver: every `every`, and `hint_delay` after each ws hint, ask `fetch` about the
+/// markets the trader holds and forward each resolution found. The engine loop captures it as
+/// `Ctl::Resolved` BEFORE applying it, so replay settles identically. Nothing held → no call.
+pub async fn run_resolver<F, Fut>(
+    mut fetch: F,
+    held: watch::Receiver<Vec<String>>,
+    hint: Arc<Notify>,
+    every: Duration,
+    hint_delay: Duration,
+    out: mpsc::Sender<Resolution>,
+) where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<Vec<Resolution>, pm_api::ApiError>>,
+{
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(every) => {}
+            _ = hint.notified() => { tokio::time::sleep(hint_delay).await; }
+        }
+        let markets = held.borrow().clone();
+        if markets.is_empty() {
+            continue;
+        }
+        match fetch(markets).await {
+            Ok(found) => {
+                for r in found {
+                    if out.send(r).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => eprintln!("resolver: {e}"),
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Run the tests to verify they pass.**
+Run: `cargo test -p scanner --lib -- paper:: config::`
+Expected: PASS: 6 `paper::tests` and 3 `config::tests`.
+Run: `grep -n "policies.toml" docker/rust.Dockerfile && docker compose -f compose.yml config --quiet`
+Expected: the new `COPY` line is printed, and compose validates quietly. Do not build the image.
+
+- [ ] **Step 6: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p scanner --all-targets -- -D warnings && cargo test -p scanner --test arch`
+Expected: clean. `arch` passes: `sim` is pure, and the scanner still reaches the network only through `pm-api`.
+```bash
+git add bins/scanner/Cargo.toml Cargo.lock bins/scanner/src/lib.rs bins/scanner/src/config.rs bins/scanner/src/paper.rs config/scanner.toml docker/rust.Dockerfile
+git commit -m "scanner: [paper] config, policies hash, SimOut→row mapping, state restore, resolver loop"
+```
+
+---
+
+### Task 4: engine: the paper trader rides the engine's own books (call contract, open context, lock-up, resolutions)
+
+**Files:**
+- Modify: `crates/sim/src/trader.rs`, `crates/sim/tests/lifecycle.rs`
+- Modify: `bins/scanner/src/engine.rs`, `bins/scanner/src/run.rs` (one placeholder `Io::route` arm; Task 7 replaces it)
+- Create: `bins/scanner/tests/engine_paper.rs`
+
+**Interfaces:**
+- Consumes: `sim::trader::{PaperTrader, Books, TraderState}`, `sim::policy::{OpenCtx, LegInfo}`, `sim::rows::SimOut`, `sim::types::BookSide`; `arb_core::stats::{parse_rfc3339_ms, days_to_end, annualized}`; `arb_core::fill::BasketQuote`. The S3b call contract: `on_frame(recv_ms, books)` BEFORE a frame's events, `on_level`/`on_snapshot` AFTER each applied change, `on_open` at each Open.
+- Produces:
+  - `PaperTrader::held_markets(&self) -> BTreeSet<String>` (sim): markets with a position or returned YES in any account.
+  - `Out::Paper(Box<SimOut>)` and `Out::ResolvedHint`.
+  - `Engine::set_paper(&mut self, PaperTrader)`, `Engine::paper(&self) -> Option<&PaperTrader>`.
+  - `Engine::paper_held_markets(&self) -> Vec<String>` (sorted), `Engine::paper_state(&self) -> Option<TraderState>`, `Engine::paper_close(&mut self, t_ms: i64) -> Vec<Out>`.
+  - `Engine::on_resolution(&mut self, t_ms: i64, market_id: &str, payout_yes: Decimal, payout_no: Decimal) -> Vec<Out>`. A non-binary vector also yields an `Out::Integrity` of kind `non_binary_payout`.
+  - `EpisodeRow.days_to_end / annualized_return / post_end` are now filled when an end date is known.
+
+- [ ] **Step 1: Write the failing sim test.** Append to `crates/sim/tests/lifecycle.rs`:
+```rust
+#[test]
+fn held_markets_lists_positions_and_returned_yes() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[PolicyKind::P0Converter])).unwrap();
+    assert!(t.held_markets().is_empty());
+    t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
+    t.on_frame(1100, &books);
+    assert_eq!(t.held_markets().into_iter().collect::<Vec<_>>(), vec!["m0", "m1", "m2"]);
+    t.on_frame(3100, &books);
+    assert_eq!(
+        t.held_markets().into_iter().collect::<Vec<_>>(),
+        vec!["m3"],
+        "after conversion only the returned YES is held"
+    );
+    t.on_resolution(9_000, "m3", d("1"), d("0"));
+    assert!(t.held_markets().is_empty());
+}
+```
+
+- [ ] **Step 2: Run it to verify it fails.**
+Run: `cargo test -p sim --test lifecycle held_markets`
+Expected: compile error, no method `held_markets` on `PaperTrader`.
+
+- [ ] **Step 3: Implement it.** In `crates/sim/src/trader.rs`, change `use std::collections::HashMap;` to `use std::collections::{BTreeSet, HashMap};` and add to `impl PaperTrader` (after `accounts`):
+```rust
+    /// Markets any account holds a position or returned YES in: what the live resolver asks
+    /// Gamma about (S3c). Sorted, so callers can compare snapshots cheaply.
+    pub fn held_markets(&self) -> BTreeSet<String> {
+        self.accounts
+            .iter()
+            .flat_map(|a| a.positions.keys().chain(a.returned.keys()))
+            .map(|k| k.market_id.clone())
+            .collect()
+    }
+```
+Run: `cargo test -p sim --test lifecycle`
+Expected: PASS (7).
+
+- [ ] **Step 4: Write the failing engine tests.** Create `bins/scanner/tests/engine_paper.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+mod common;
+use arb_core::book::Side;
+use arb_core::stats::{annualized, days_to_end};
+use common::*;
+use pm_api::ws::MarketEvent;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use scanner::engine::{Engine, Out};
+use scanner::universe::Universe;
+use sim::account::EntryKind;
+use sim::config::{AccountSpec, P1Params, PolicyKind, Scenario, SimConfig};
+use sim::rows::SimOut;
+use sim::trader::PaperTrader;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// One account; t_x = r_open + 100 ms; settle delay 2 s; one markout at +1 s.
+fn sim_cfg(policy: PolicyKind) -> SimConfig {
+    SimConfig {
+        settle_delay_ms: 2000,
+        markout_offsets_ms: vec![1000],
+        mark_every_ms: 60_000,
+        burst_window_ms: 10_000,
+        min_order_shares: dec!(5),
+        p1: P1Params { min_annualized: dec!(0.10), max_days_to_end: dec!(30) },
+        scenarios: vec![Scenario {
+            name: "t".into(),
+            proc_ms: 0,
+            net_ms: 0,
+            match_ms: 100,
+            honor_seconds_delay: true,
+            burst: vec![],
+        }],
+        accounts: vec![AccountSpec {
+            policy,
+            scenario: "t".into(),
+            bankroll: dec!(1000),
+            per_trade: dec!(100),
+            fee_bips: Decimal::ZERO,
+        }],
+    }
+}
+
+fn paper_engine(policy: PolicyKind) -> Engine {
+    let mut e = engine();
+    e.set_paper(PaperTrader::new(sim_cfg(policy)).unwrap());
+    e
+}
+
+fn sims(outs: &[Out]) -> Vec<SimOut> {
+    outs.iter()
+        .filter_map(|o| match o {
+            Out::Paper(s) => Some((**s).clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn fills(outs: &[Out]) -> Vec<(String, Decimal)> {
+    sims(outs)
+        .into_iter()
+        .filter_map(|s| match s {
+            SimOut::Fill(f) => Some((f.leg.market_id, f.filled)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn all3(a: Decimal, b: Decimal, c: Decimal) -> Vec<(String, Decimal)> {
+    vec![("e1-m0".to_string(), a), ("e1-m1".to_string(), b), ("e1-m2".to_string(), c)]
+}
+
+/// YES books: bids `bids` (size 100), asks 0.45 / 0.40 / 0.35 (ΣA = 1.20: never a YES basket).
+fn books(e: &mut Engine, recv_ms: i64, ts: i64, bids: [&str; 3]) -> Vec<Out> {
+    let asks = ["0.45", "0.40", "0.35"];
+    let evs: Vec<MarketEvent> = (0..3)
+        .map(|i| snap(&format!("e1-y{i}"), ts, &[(bids[i], "100")], &[(asks[i], "100")]))
+        .collect();
+    e.on_frame(0, recv_ms, &evs)
+}
+
+/// A frame that changes no book: only time passes.
+fn quiet(e: &mut Engine, recv_ms: i64) -> Vec<Out> {
+    e.on_frame(
+        0,
+        recv_ms,
+        &[MarketEvent::LastTrade { token: "e1-y0".into(), server_ts_ms: recv_ms }],
+    )
+}
+
+fn bid(token: &str, ts: i64, price: &str, size: &str) -> MarketEvent {
+    MarketEvent::Delta {
+        token: token.into(),
+        server_ts_ms: ts,
+        side: Side::Bid,
+        price: p(price),
+        size: sh(size),
+        best_bid: None,
+        best_ask: None,
+    }
+}
+
+/// ΣNO = 3 × 0.70 = 2.10 first (nothing), then NO asks 0.60/0.65/0.70 (Σ 1.95 < 2): a NO basket
+/// opens at recv 2 100, so the account's execution is due at 2 200.
+fn open_no_basket(e: &mut Engine) -> Vec<Out> {
+    books(e, 1_100, 1_000, ["0.30", "0.30", "0.30"]);
+    books(e, 2_100, 2_000, ["0.40", "0.35", "0.30"])
+}
+
+#[test]
+fn a_no_basket_open_reaches_the_paper_trader_and_fills_at_t_x() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    let outs = open_no_basket(&mut e);
+    let eps = episodes(&outs);
+    assert_eq!((eps.len(), eps[0].kind.as_str()), (1, "no_basket"));
+    let intents: Vec<_> = sims(&outs)
+        .into_iter()
+        .filter_map(|s| if let SimOut::Intent(i) = s { Some(i) } else { None })
+        .collect();
+    assert_eq!(intents.len(), 1);
+    assert_eq!((intents[0].account.as_str(), intents[0].episode_id.as_str()), ("P0-converter/t", "live-7-00000001"));
+    assert_eq!((intents[0].exec_ms, intents[0].q_target), (Some(2_200), Some(dec!(51.2))));
+    assert!(fills(&quiet(&mut e, 2_150)).is_empty(), "not due yet");
+    assert_eq!(fills(&quiet(&mut e, 2_300)), all3(dec!(51.2), dec!(51.2), dec!(51.2)));
+    assert_eq!(e.paper_held_markets(), vec!["e1-m0", "e1-m1", "e1-m2"]);
+}
+
+#[test]
+fn due_work_sees_the_book_before_the_frame_that_changes_it() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    open_no_basket(&mut e); // execution due at recv 2 200
+    // The frame received at 2 200 thins leg 2's YES bid (its NO ask 0.70) to 20. The execution
+    // due at 2 200 must see the book as it stood BEFORE this frame (S3b call contract).
+    let outs = e.on_frame(0, 2_200, &[bid("e1-y2", 2_150, "0.30", "20")]);
+    assert_eq!(fills(&outs), all3(dec!(51.2), dec!(51.2), dec!(51.2)));
+}
+
+#[test]
+fn an_emptied_level_clears_consumed_liquidity() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    open_no_basket(&mut e);
+    assert_eq!(fills(&quiet(&mut e, 2_300)), all3(dec!(51.2), dec!(51.2), dec!(51.2)));
+    // leg 0's YES bid 0.40 empties (the basket closes) and comes back (episode 2 opens)
+    let outs = e.on_frame(0, 2_400, &[bid("e1-y0", 2_400, "0.40", "0")]);
+    assert!(episodes(&outs).iter().any(|r| r.closed_server_ms.is_some()));
+    let outs = e.on_frame(0, 2_500, &[bid("e1-y0", 2_500, "0.40", "100")]);
+    assert!(episodes(&outs).iter().any(|r| r.episode_id == "live-7-00000002"));
+    // on_level cleared leg 0's consumed 51.2; legs 1 and 2 still carry ours (100 − 51.2)
+    assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(51.2), dec!(48.8), dec!(48.8)));
+}
+
+/// P3 buys a YES basket (asks 0.30/0.35/0.30, size 10) and holds it to resolution.
+fn yes_basket_held() -> Engine {
+    let mut e = paper_engine(PolicyKind::P3Naive);
+    seed(&mut e);
+    e.on_frame(
+        0,
+        2_150,
+        &[ask("e1-y0", 2_000, "0.30", "10"), ask("e1-y0", 2_000, "0.40", "0")],
+    );
+    assert_eq!(fills(&quiet(&mut e, 2_300)), all3(dec!(10), dec!(10), dec!(10)));
+    e
+}
+
+fn settles(outs: &[Out]) -> Vec<(Decimal, Option<Decimal>, Decimal)> {
+    sims(outs)
+        .into_iter()
+        .filter_map(|s| match s {
+            SimOut::Ledger(l) if l.kind == EntryKind::Settle => Some((l.qty, l.price, l.cash_delta)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn resolutions_settle_at_the_payout_vector_and_flag_non_binary_ones() {
+    let mut e = yes_basket_held();
+    assert_eq!(e.paper_held_markets(), vec!["e1-m0", "e1-m1", "e1-m2"]);
+    let outs = e.on_resolution(9_000, "e1-m0", dec!(0.5), dec!(0.5));
+    assert!(outs.iter().any(|o| matches!(o, Out::Integrity(i)
+        if i.kind == "non_binary_payout" && i.event_id.as_deref() == Some("e1") && i.ts_ms == 9_000)));
+    assert_eq!(settles(&outs), vec![(dec!(10), Some(dec!(0.5)), dec!(5))]);
+    let outs = e.on_resolution(9_001, "e1-m1", dec!(1), dec!(0));
+    assert!(!outs.iter().any(|o| matches!(o, Out::Integrity(_))), "a binary payout is not flagged");
+    assert_eq!(settles(&outs), vec![(dec!(10), Some(dec!(1)), dec!(10))]);
+    assert_eq!(e.paper_held_markets(), vec!["e1-m2"]);
+}
+
+#[test]
+fn a_repeated_resolution_settles_once() {
+    let mut e = yes_basket_held();
+    assert_eq!(settles(&e.on_resolution(9_000, "e1-m1", dec!(1), dec!(0))).len(), 1);
+    // the ws hint and the periodic poll both found it
+    let again = e.on_resolution(9_500, "e1-m1", dec!(1), dec!(0));
+    assert!(sims(&again).iter().all(|s| !matches!(s, SimOut::Ledger(_))), "{again:?}");
+}
+
+#[test]
+fn lockup_figures_use_the_latest_live_end_date() {
+    let mut m = meta("e1", 3);
+    m.legs[0].end_date = Some("1970-01-06T00:00:00Z".into()); // 5 days
+    m.legs[1].end_date = Some("1970-01-11T00:00:00Z".into()); // 10 days: the max
+    let mut e = Engine::new(ctx());
+    let conn: HashMap<String, usize> = [("e1".to_string(), 0)].into_iter().collect();
+    let _ = e.apply_universe(Arc::new(Universe { taken_ms: 0, groups: vec![m], canary: vec![] }), &conn, 0);
+    e.set_paper(PaperTrader::new(sim_cfg(PolicyKind::P0Converter)).unwrap());
+    let outs = open_no_basket(&mut e);
+    let r = &episodes(&outs)[0];
+    let days = days_to_end(864_000_000, 2_000); // relative to the opening server ts
+    assert_eq!(r.days_to_end, Some(days));
+    assert_eq!(r.annualized_return, annualized(r.peak_pnl_net_usd / r.peak_cost_usd, days));
+    assert_eq!(r.post_end, Some(false));
+    // no end dates: unmeasured (NULL), never 0
+    let mut plain = paper_engine(PolicyKind::P0Converter);
+    let r = &episodes(&open_no_basket(&mut plain))[0];
+    assert_eq!((r.days_to_end, r.annualized_return, r.post_end), (None, None, None));
+}
+
+#[test]
+fn close_completes_conversions_marks_every_account_and_exposes_state() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    open_no_basket(&mut e);
+    quiet(&mut e, 2_300); // executed; the conversion is due at 4 200
+    let outs = e.paper_close(3_000);
+    assert!(sims(&outs).iter().any(|s| matches!(s, SimOut::Ledger(l) if l.kind == EntryKind::Convert && l.t_ms == 3_000)));
+    let marks: Vec<_> = sims(&outs)
+        .into_iter()
+        .filter_map(|s| if let SimOut::Account(a) = s { Some(a) } else { None })
+        .collect();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].equity, dec!(1000) + marks[0].realized + marks[0].unrealized, "equity identity");
+    assert_eq!(e.paper_state().unwrap().accounts.len(), 1);
+
+    let mut bare = engine();
+    assert!(bare.paper_state().is_none());
+    assert!(bare.paper_close(1).is_empty());
+    assert!(bare.paper_held_markets().is_empty());
+}
+
+#[test]
+fn a_ws_market_resolved_asks_for_a_resolver_poll() {
+    let mut e = engine();
+    let outs = e.on_frame(
+        0,
+        100,
+        &[MarketEvent::Resolved { market: Some("0xabc".into()), server_ts_ms: Some(90) }],
+    );
+    assert!(outs.contains(&Out::ResolvedHint) && outs.contains(&Out::UniverseChanged));
+}
+```
+
+- [ ] **Step 5: Run them to verify they fail.**
+Run: `cargo test -p scanner --test engine_paper`
+Expected: compile errors: no method `set_paper`, no variant `Out::Paper`, no method `on_resolution`.
+
+- [ ] **Step 6: Implement in `bins/scanner/src/engine.rs`.**
+
+Imports (add next to the existing ones):
+```rust
+use arb_core::fill::BasketQuote;
+use arb_core::stats::{annualized, days_to_end, parse_rfc3339_ms};
+use sim::policy::{LegInfo, OpenCtx};
+use sim::rows::SimOut;
+use sim::trader::{Books, PaperTrader, TraderState};
+use sim::types::BookSide;
+```
+(`arb_core::fill::{BasketRule, BuyLeg, walk}` is already imported. Add `BasketQuote` to that line instead if you prefer.)
+
+Add two variants at the end of `pub enum Out`:
+```rust
+    /// A paper-trader row (S3c), boxed like `Episode` to keep `Out` small.
+    Paper(Box<SimOut>),
+    /// A ws `market_resolved` arrived: the live resolver should ask Gamma soon.
+    ResolvedHint,
+```
+Add one field to `struct OpenEp` (after `censor_left`):
+```rust
+    /// Latest endDate over the group's live legs at open (spec §5.5 lock-up estimate).
+    end_ms: Option<i64>,
+```
+Add one field to `pub struct Engine` (last), and `paper: None,` to the struct literal in `Engine::new`:
+```rust
+    /// The paper trader (S3c), fed by the S3b call contract. None = scanner only.
+    paper: Option<PaperTrader>,
+```
+Add these free items below `fn leg_fee`:
+```rust
+/// The engine's YES books seen through `sim::trader::Books`. The fields are borrowed one by one,
+/// so the trader (another field of the engine) can read them with no clone.
+struct EngineBooks<'a> {
+    token_ix: &'a HashMap<String, (usize, usize)>,
+    groups: &'a [Group],
+}
+
+impl Books for EngineBooks<'_> {
+    fn yes_book(&self, yes_token: &str) -> Option<&Book> {
+        let &(g, l) = self.token_ix.get(yes_token)?;
+        self.groups.get(g)?.legs.get(l).map(|leg| &leg.book)
+    }
+}
+
+fn paper_outs(v: Vec<SimOut>, out: &mut Vec<Out>) {
+    out.extend(v.into_iter().map(|o| Out::Paper(Box::new(o))));
+}
+
+/// Spec §5.5's secondary figure for a quote: (1 + Π/cost)^(365/max(days, 7)) − 1 (no cost → None).
+fn lockup_annualized(q: &BasketQuote, days: Decimal) -> Option<Decimal> {
+    if q.cost <= Decimal::ZERO {
+        return None;
+    }
+    annualized(q.pnl.checked_div(q.cost)?, days)
+}
+```
+In `on_frame`, directly after `let mut frame_tokens: Vec<String> = Vec::new();` (before `for ev in events`):
+```rust
+        // S3b call contract: work due at or before this frame runs on the books as they were
+        // just BEFORE it (the state at its due time).
+        if let Some(t) = self.paper.as_mut() {
+            let books = EngineBooks { token_ix: &self.token_ix, groups: &self.groups };
+            paper_outs(t.on_frame(recv_ms, &books), &mut out);
+        }
+```
+In the `MarketEvent::Snapshot` arm, inside `if self.on_book(...) { … }`, after the `frame_tokens` push block:
+```rust
+                        if let (Some(t), Some(&(g, l))) =
+                            (self.paper.as_mut(), self.token_ix.get(token.as_str()))
+                        {
+                            t.on_snapshot(token, &self.groups[g].legs[l].book);
+                        }
+```
+In the `MarketEvent::Delta` arm, after the `if found { self.pending_tops.insert(…); }` block:
+```rust
+                    if found
+                        && self.token_ix.contains_key(token.as_str())
+                        && let Some(t) = self.paper.as_mut()
+                    {
+                        t.on_level(token, BookSide::from_core(side), price.get(), size.get());
+                    }
+```
+Replace the `MarketEvent::Resolved { .. } | MarketEvent::NewMarket { .. } => out.push(Out::UniverseChanged)` arm with:
+```rust
+                MarketEvent::Resolved { .. } => {
+                    out.push(Out::UniverseChanged);
+                    out.push(Out::ResolvedHint);
+                }
+                MarketEvent::NewMarket { .. } => out.push(Out::UniverseChanged),
+```
+Split `snap` so the open context can reuse its levels. Replace `fn snap` with:
+```rust
+    /// The bought outcome's ask levels per used leg: YES asks, or NO asks (= 1 − YES bids, L1).
+    fn buy_legs(&self, at: At, s: &Signal) -> Vec<BuyLeg> {
+        s.legs_used
+            .iter()
+            .map(|&i| {
+                let leg = &self.groups[at.g].legs[i];
+                BuyLeg {
+                    levels: match at.det {
+                        Det::Yes => leg.book.asks_best_first(),
+                        Det::No => leg.book.no_asks_best_first(),
+                    },
+                    fee: leg.fee,
+                }
+            })
+            .collect()
+    }
+
+    fn snap(&self, at: At, s: &Signal) -> Snap {
+        let legs = self.buy_legs(at, s);
+        let rule = match at.det {
+            Det::Yes => BasketRule::AllLegs {
+                payoff: Decimal::ONE,
+            },
+            Det::No => BasketRule::NestedNo,
+        };
+        let budget100 = walk(&legs, rule, Some(Decimal::from(100))).pnl;
+        let best = legs
+            .iter()
+            .map(|l| {
+                l.levels
+                    .first()
+                    .map_or((None, None), |&(p, q)| (Some(p), Some(q)))
+            })
+            .collect();
+        let leg_fees = legs
+            .iter()
+            .zip(&s.quote.legs)
+            .map(|(l, f)| leg_fee(l, f.filled))
+            .collect();
+        Snap {
+            signal: s.clone(),
+            budget100,
+            best,
+            leg_fees,
+            ts_ms: at.ts,
+        }
+    }
+
+    /// The latest endDate over the group's live legs (spec §5.5: an estimate of lock-up).
+    fn group_end_ms(&self, g: usize) -> Option<i64> {
+        self.universe
+            .groups
+            .get(g)?
+            .legs
+            .iter()
+            .filter(|l| l.status == Status::Live)
+            .filter_map(|l| l.end_date.as_deref().and_then(parse_rfc3339_ms))
+            .max()
+    }
+
+    /// Everything a policy may look at when this episode opens (S3b `OpenCtx`).
+    fn open_ctx(&self, ep: &OpenEp, at: At, s: &Signal) -> OpenCtx {
+        let meta = &self.universe.groups[at.g];
+        let days = ep.end_ms.map(|e| days_to_end(e, at.ts));
+        OpenCtx {
+            episode_id: ep.episode_id.clone(),
+            event_id: meta.event_id.clone(),
+            r_open_ms: at.recv_ms,
+            signal: s.clone(),
+            legs: meta
+                .legs
+                .iter()
+                .map(|l| LegInfo {
+                    market_id: l.market_id.clone(),
+                    yes_token: l.yes_token.clone(),
+                    fee: l.fee(),
+                    seconds_delay: l.seconds_delay,
+                })
+                .collect(),
+            open_levels: self.buy_legs(at, s).into_iter().map(|l| l.levels).collect(),
+            days_to_end: days,
+            annualized: days.and_then(|d| lockup_annualized(&s.quote, d)),
+            pair_approved: false,
+        }
+    }
+```
+In `open_episode`:
+- add `end_ms: self.group_end_ms(at.g),` to the `OpenEp { … }` literal (after `censor_left,`);
+- directly before `self.open_by_key.insert(key.to_string(), id);`, add:
+```rust
+        if self.paper.is_some() {
+            let ctx = self.open_ctx(&ep, at, s);
+            if let Some(t) = self.paper.as_mut() {
+                paper_outs(t.on_open(&ctx), out);
+            }
+        }
+```
+In `fn row`, after `let q = &s.quote;` add
+```rust
+        let days = ep.end_ms.map(|e| days_to_end(e, ep.opened_ms));
+```
+and replace the three `None` lines:
+```rust
+            days_to_end: days,
+            annualized_return: days.and_then(|d| lockup_annualized(q, d)),
+            post_end: days.map(|d| d < Decimal::ZERO),
+```
+In `rest_snapshot`, directly after `self.groups[g].legs[l].book = book;`:
+```rust
+            if let Some(t) = self.paper.as_mut() {
+                t.on_snapshot(token, &self.groups[g].legs[l].book);
+            }
+```
+Add these methods at the end of `impl Engine`:
+```rust
+    pub fn set_paper(&mut self, trader: PaperTrader) {
+        self.paper = Some(trader);
+    }
+
+    pub fn paper(&self) -> Option<&PaperTrader> {
+        self.paper.as_ref()
+    }
+
+    /// Sorted market ids the trader holds (the live resolver's question list).
+    pub fn paper_held_markets(&self) -> Vec<String> {
+        self.paper
+            .as_ref()
+            .map(|t| t.held_markets().into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn paper_state(&self) -> Option<TraderState> {
+        self.paper.as_ref().map(PaperTrader::state)
+    }
+
+    /// Shutdown at `t_ms` (live: the Ctl::Shutdown instant; replay: the same line, or the last
+    /// input): pending conversions complete, other pending work is dropped, every account marks.
+    pub fn paper_close(&mut self, t_ms: i64) -> Vec<Out> {
+        let mut out = Vec::new();
+        if let Some(t) = self.paper.as_mut() {
+            let books = EngineBooks { token_ix: &self.token_ix, groups: &self.groups };
+            paper_outs(t.close(t_ms, &books), &mut out);
+        }
+        out
+    }
+
+    /// A market resolved with this payout vector (live: from Gamma via `Ctl::Resolved`; replay:
+    /// the same line). A vector other than {1,0}/{0,1} is also a Q19 integrity row.
+    pub fn on_resolution(
+        &mut self,
+        t_ms: i64,
+        market_id: &str,
+        payout_yes: Decimal,
+        payout_no: Decimal,
+    ) -> Vec<Out> {
+        let mut out = Vec::new();
+        let binary = (payout_yes == Decimal::ONE && payout_no == Decimal::ZERO)
+            || (payout_yes == Decimal::ZERO && payout_no == Decimal::ONE);
+        if !binary {
+            let event_id = self
+                .universe
+                .groups
+                .iter()
+                .find(|m| m.legs.iter().any(|l| l.market_id == market_id))
+                .map(|m| m.event_id.clone());
+            out.push(self.integrity(
+                t_ms,
+                Issue {
+                    kind: "non_binary_payout",
+                    event_id,
+                    detail: Some(format!(
+                        "market {market_id}: payout yes {payout_yes} no {payout_no}"
+                    )),
+                    ..Issue::default()
+                },
+            ));
+        }
+        if let Some(t) = self.paper.as_mut() {
+            paper_outs(t.on_resolution(t_ms, market_id, payout_yes, payout_no), &mut out);
+        }
+        out
+    }
+```
+`Io::route` in `run.rs` matches `Out` exhaustively, so keep the build green now: add these two arms after `Out::Lag(ms) => self.metrics.push_lag(ms),` (Task 7 replaces them with the real routing):
+```rust
+                Out::Paper(_) | Out::ResolvedHint => {} // routed in S3c Task 7
+```
+
+- [ ] **Step 7: Run the tests to verify they pass.**
+Run: `cargo test -p scanner --test engine_paper`
+Expected: PASS (8). If a fill quantity differs, recompute it from the fixture before touching the code. The per-trade budget is 100 / 1.95 → 51.2 (sizes must keep price × size at ≤ 2 dp for limits 0.60/0.65/0.70). The second episode sees 100 − 51.2 = 48.8 on the legs whose consumption did not clear.
+Run: `cargo test -p scanner && cargo test -p sim`
+Expected: PASS. The existing engine, engine_checks and replay tests are unchanged: without a paper trader the engine emits exactly what it did before, plus `ResolvedHint` on `market_resolved`.
+
+- [ ] **Step 8: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p scanner -p sim --all-targets -- -D warnings`
+Expected: clean.
+```bash
+git add crates/sim/src/trader.rs crates/sim/tests/lifecycle.rs bins/scanner/src/engine.rs bins/scanner/src/run.rs bins/scanner/tests/engine_paper.rs
+git commit -m "scanner/engine: paper trader on the engine's own books (call contract, open context, lock-up, resolutions)"
+```
+
+---
+
+### Task 5: capture `Ctl::Resolved` + replay with the paper trader (golden test) + `replay_cmd`
+
+**Files:**
+- Modify: `bins/scanner/src/capture.rs`, `bins/scanner/src/replay.rs`, `bins/scanner/src/run.rs` (`replay_cmd` only), `bins/scanner/src/main.rs`
+- Test: `bins/scanner/tests/replay.rs`
+
+**Interfaces:**
+- Consumes: `Engine::{set_paper, on_resolution, paper_close}` (Task 4); `paper::{push_sim, account_rows, with_policies, Policies}` (Task 3); `Batch::rows` (Task 1). S3a's replay `Ctl::Suspect` arm (`engine.mark_suspect(&event_id, until_ms, ms)` returning rows).
+- Produces:
+  - `capture::Ctl::Resolved { market_id: String, payout_yes: String, payout_no: String }`. The decimals are exact strings, like `RestSnapshot`, serialized as `{"kind":"resolved",…}`.
+  - `replay::replay_dir_paper(dir: &Path, ctx: EngineCtx, paper: Option<PaperTrader>) -> anyhow::Result<ReplayOut>`. `replay_dir(dir, ctx)` is unchanged and equals `replay_dir_paper(dir, ctx, None)`.
+  - `run::replay_cmd(cfg, cfg_hash, dir, dry_run, policies: Option<&Policies>)`.
+
+- [ ] **Step 1: Write the failing golden test.** In `bins/scanner/tests/replay.rs`, change the replay import to
+```rust
+use scanner::replay::{ReplayOut, replay_dir, replay_dir_paper};
+```
+add these imports
+```rust
+use scanner::paper::push_sim;
+use sim::config::SimConfig;
+use sim::trader::PaperTrader;
+use store::Batch;
+```
+and append:
+```rust
+const POLICIES: &str = include_str!("../../../config/policies.toml");
+
+/// Book snapshots for y0..y2 with one bid and one ask level each, size 100.
+fn paper_frame(ts: i64, bids: [&str; 3], asks: [&str; 3]) -> String {
+    let items: Vec<String> = (0..3)
+        .map(|i| {
+            format!(
+                r#"{{"event_type":"book","asset_id":"y{i}","market":"0x","timestamp":"{ts}","hash":"h","bids":[{{"price":"{}","size":"100"}}],"asks":[{{"price":"{}","size":"100"}}]}}"#,
+                bids[i], asks[i]
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+fn paper_rows(r: &ReplayOut) -> Batch {
+    let mut b = Batch::default();
+    for o in &r.outs {
+        if let Out::Paper(s) = o {
+            push_sim(1, (**s).clone(), &mut b);
+        }
+    }
+    b
+}
+
+#[test]
+fn replay_paper_trades_deterministically_and_keeps_the_equity_identity() {
+    let dir = tmp("paper");
+    let u = universe();
+    let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
+    let t0 = 1_790_121_600_000_i64;
+    let ufile = universe_file_name(u.taken_ms, 1);
+    let asks = ["0.45", "0.40", "0.35"]; // ΣA = 1.20: never a YES basket
+    let open = ["0.40", "0.35", "0.30"]; // NO asks 0.60/0.65/0.70: Σ 1.95 < 2
+    let msgs = vec![
+        CaptureMsg::Universe(Box::new(UniverseRecord { universe: u.clone(), conn_of, file: ufile.clone() })),
+        line(t0, None, Some(Ctl::Universe { taken_ms: u.taken_ms, file: ufile })),
+        line(t0 + 100, Some(paper_frame(t0, ["0.30", "0.30", "0.30"], asks)), None), // ΣNO 2.10: nothing
+        line(t0 + 1_100, Some(paper_frame(t0 + 1_000, open, asks)), None), // the NO basket opens
+        line(t0 + 2_000, Some(paper_frame(t0 + 1_900, open, asks)), None), // every scenario's t_x has passed
+        line(t0 + 4_000, Some(paper_frame(t0 + 3_900, open, asks)), None), // conversions due (+2 s)
+        line(
+            t0 + 5_000,
+            None,
+            Some(Ctl::Resolved { market_id: "m0".into(), payout_yes: "0.5".into(), payout_no: "0.5".into() }),
+        ),
+        line(t0 + 6_000, None, Some(Ctl::Shutdown)),
+    ];
+    let mut w = Writer::new(dir.clone());
+    for m in &msgs {
+        w.write(m).unwrap();
+    }
+    w.finish();
+
+    let policies: SimConfig = toml::from_str(POLICIES).unwrap();
+    let run = || replay_dir_paper(&dir, ctx(), Some(PaperTrader::new(policies.clone()).unwrap())).unwrap();
+    let (a, b) = (run(), run());
+    assert_eq!(a.outs, b.outs, "same capture, same outputs, paper rows included");
+    let (ra, rb) = (paper_rows(&a), paper_rows(&b));
+    assert_eq!(ra, rb, "same paper ledger rows");
+    assert!(!ra.paper_ledger.is_empty());
+
+    assert!(a.outs.iter().any(|o| matches!(o, Out::Episode(w) if w.row.kind == "no_basket")));
+    assert!(a.outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "non_binary_payout" && i.ts_ms == t0 + 5_000)));
+    let p0 = "P0-converter/colo-idle";
+    assert!(ra.paper_execs.iter().any(|x| x.account_id == p0 && x.q_eff == dec!(51.2)));
+    assert!(ra.paper_ledger.iter().any(|l| l.account_id == p0 && l.kind == "convert"));
+
+    // Ctl::Shutdown closes the trader: one final mark per account, and the identity holds on each
+    let finals: Vec<_> = ra.paper_marks.iter().filter(|m| m.t_ms == t0 + 6_000).collect();
+    assert_eq!(finals.len(), policies.accounts.len());
+    for m in &finals {
+        assert_eq!(m.equity, dec!(1000) + m.realized + m.unrealized, "{}", m.account_id);
+    }
+    let p0_final = finals.iter().find(|m| m.account_id == p0).unwrap();
+    assert_eq!(p0_final.realized, dec!(2.56), "51.2 sets × (2 − 1.95)");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_resolved_line_round_trips_through_the_capture_format() {
+    let l = Line {
+        recv_ts_us: 5,
+        shard: 0,
+        raw: None,
+        ctl: Some(Ctl::Resolved { market_id: "m0".into(), payout_yes: "0.5".into(), payout_no: "0.5".into() }),
+    };
+    let json = serde_json::to_string(&l).unwrap();
+    assert!(json.contains(r#""kind":"resolved""#), "{json}");
+    assert_eq!(serde_json::from_str::<Line>(&json).unwrap(), l);
+}
+```
+
+- [ ] **Step 2: Run them to verify they fail.**
+Run: `cargo test -p scanner --test replay`
+Expected: compile errors: no variant `Ctl::Resolved`, no function `replay_dir_paper`.
+
+- [ ] **Step 3: Implement the control line.** In `bins/scanner/src/capture.rs`, add a variant to `enum Ctl` before `Shutdown`:
+```rust
+    /// A market resolution the live resolver found (S3c), with the recv instant the engine got.
+    /// Payouts are exact decimal strings, like `RestSnapshot` levels.
+    Resolved {
+        market_id: String,
+        payout_yes: String,
+        payout_no: String,
+    },
+```
+Extend the module doc's list of control lines to "(down, universe, rest_snapshot, suspect, resolved, shutdown)".
+
+- [ ] **Step 4: Implement replay.** In `bins/scanner/src/replay.rs`:
+- add the imports `use rust_decimal::Decimal;` and `use sim::trader::PaperTrader;`;
+- rename `pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {` to
+```rust
+/// Replay with the paper trader (S3c). The trader starts FRESH (never from `paper_state`), so two
+/// replays of one capture produce identical paper rows. Resolutions come from `Ctl::Resolved`.
+pub fn replay_dir_paper(
+    dir: &Path,
+    ctx: EngineCtx,
+    paper: Option<PaperTrader>,
+) -> anyhow::Result<ReplayOut> {
+```
+- directly after `let mut engine = Engine::new(ctx);` add
+```rust
+    if let Some(t) = paper {
+        engine.set_paper(t);
+    }
+```
+- add an arm before `Some(Ctl::Shutdown)`:
+```rust
+                Some(Ctl::Resolved {
+                    market_id,
+                    payout_yes,
+                    payout_no,
+                }) => {
+                    let y = Decimal::from_str_exact(&payout_yes)
+                        .with_context(|| format!("bad payout_yes {payout_yes:?}"))?;
+                    let n = Decimal::from_str_exact(&payout_no)
+                        .with_context(|| format!("bad payout_no {payout_no:?}"))?;
+                    out.outs.extend(engine.on_resolution(ms, &market_id, y, n));
+                }
+```
+- in the `Some(Ctl::Shutdown)` arm, add `out.outs.extend(engine.paper_close(ms));` after `out.outs.extend(engine.close_all(ms));`;
+- replace the final crash-close block with
+```rust
+    if !shut_down {
+        // crash: close at the last captured instant
+        out.outs.extend(engine.close_all(last_ms));
+        out.outs.extend(engine.paper_close(last_ms));
+    }
+```
+- add the wrapper above `replay_dir_paper`:
+```rust
+pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
+    replay_dir_paper(dir, ctx, None)
+}
+```
+
+- [ ] **Step 5: Write paper rows from `scanner replay`.** In `bins/scanner/src/run.rs`:
+- change `use crate::replay::replay_dir;` to `use crate::replay::replay_dir_paper;`;
+- add `use crate::paper::{self, Policies};` and `use sim::trader::PaperTrader;`;
+- replace `replay_cmd` with:
+```rust
+pub async fn replay_cmd(
+    cfg: &Config,
+    cfg_hash: &str,
+    dir: &Path,
+    dry_run: bool,
+    policies: Option<&Policies>,
+) -> anyhow::Result<()> {
+    // Every replay starts every account fresh with the SAME policies file (spec §11 replay).
+    let trader = || -> anyhow::Result<Option<PaperTrader>> {
+        policies
+            .map(|p| PaperTrader::new(p.sim.clone()))
+            .transpose()
+            .context("paper trader")
+    };
+    if dry_run {
+        let r = replay_dir_paper(dir, engine_ctx(cfg, cfg_hash, 0, "replay"), trader()?)?;
+        let eps: std::collections::HashSet<&str> = r
+            .outs
+            .iter()
+            .filter_map(|o| match o {
+                Out::Episode(w) => Some(w.row.episode_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let paper_rows = r.outs.iter().filter(|o| matches!(o, Out::Paper(_))).count();
+        println!(
+            "frames {} parse_errors {} episodes {} paper_rows {}",
+            r.frames,
+            r.parse_errors,
+            eps.len(),
+            paper_rows
+        );
+        return Ok(());
+    }
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let store = Store::connect(&url, 2).await?;
+    let run_id = store.start_run(&new_run(cfg_hash, "replay")).await?;
+    let r = replay_dir_paper(dir, engine_ctx(cfg, cfg_hash, run_id, "replay"), trader()?)?;
+    let mut batch = Batch::default();
+    if let Some(p) = policies {
+        batch.paper_accounts = paper::account_rows(run_id, p); // before any row that references them
+    }
+    for o in r.outs {
+        match o {
+            // DEVIATION: unbox, same reason as in Io::route.
+            Out::Episode(w) => batch.episodes.push(*w),
+            Out::Integrity(i) => batch.integrity.push(i),
+            Out::Paper(s) => paper::push_sim(run_id, *s, &mut batch),
+            _ => {}
+        }
+        if batch.rows() >= 2_000 {
+            store.write_batch(&std::mem::take(&mut batch)).await?;
+        }
+    }
+    store.write_batch(&batch).await?;
+    store
+        .end_run(
+            run_id,
+            now_ms(),
+            &format!("replay of {} ({} frames)", dir.display(), r.frames),
+        )
+        .await?;
+    println!(
+        "replay run {run_id}: {} frames, {} parse errors",
+        r.frames, r.parse_errors
+    );
+    Ok(())
+}
+```
+In `bins/scanner/src/main.rs`, replace the `Cmd::Replay` arm with:
+```rust
+        Cmd::Replay { dir, dry_run } => {
+            let (policies, hash) = scanner::paper::with_policies(&cfg.paper, &hash)?;
+            scanner::run::replay_cmd(&cfg, &hash, &dir, dry_run, policies.as_ref()).await
+        }
+```
+
+- [ ] **Step 6: Run the tests to verify they pass.**
+Run: `cargo test -p scanner --test replay`
+Expected: PASS. That includes the two new tests and `replay_reproduces_episodes_and_censoring_byte_for_byte`, which still calls `replay_dir(dir, ctx)`.
+Run: `cargo test -p scanner`
+Expected: PASS.
+
+- [ ] **Step 7: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p scanner --all-targets -- -D warnings`
+Expected: clean.
+```bash
+git add bins/scanner/src/capture.rs bins/scanner/src/replay.rs bins/scanner/src/run.rs bins/scanner/src/main.rs bins/scanner/tests/replay.rs
+git commit -m "scanner/replay: paper trader in replay (fresh accounts, Ctl::Resolved, close at shutdown) + golden test"
+```
+
+---
+
+### Task 6: writer: paper rows through the batching writer (never evicted), quarantine via `into_singles`
+
+**Files:**
+- Modify: `bins/scanner/src/writer.rs`
+- Test: `mod tests` in `writer.rs`
+
+**Interfaces:**
+- Consumes: `Batch::{rows, take_paper, extend_paper, into_singles}` (Task 1). S3a's `Pending`, which keeps `VecDeque` queues and the same public API.
+- Produces: `WriterMsg::Paper(Box<Batch>)`. Only the batch's `paper_*` fields are used. `Pending` keeps paper rows in arrival order, the cap never evicts them, `take()` returns them in the batch, and `restore()` puts the older ones first. The public API is otherwise unchanged.
+
+- [ ] **Step 1: Write the failing tests.** Add to `mod tests` in `writer.rs`:
+```rust
+    fn paper_ledger(seq: i64) -> WriterMsg {
+        WriterMsg::Paper(Box::new(Batch {
+            paper_ledger: vec![store::PaperLedgerRow {
+                run_id: 1,
+                account_id: "a".into(),
+                seq,
+                t_ms: seq,
+                kind: "mark".into(),
+                episode_id: None,
+                market_id: None,
+                yes_token: None,
+                outcome: None,
+                qty: 0.into(),
+                price: None,
+                cash_delta: 0.into(),
+                fees: 0.into(),
+                realized_delta: 0.into(),
+                cash_after: 1000.into(),
+                equity: Some(1000.into()),
+            }],
+            ..Batch::default()
+        }))
+    }
+
+    #[test]
+    fn paper_rows_are_never_evicted_by_the_cap() {
+        let mut p = Pending::new(3);
+        for s in 1..=5 {
+            p.push(paper_ledger(s));
+        }
+        for t in 0..3 {
+            p.push(integ(t));
+        }
+        assert_eq!(p.rows(), 5, "only the integrity rows could go");
+        assert_eq!(p.dropped, 3);
+        let b = p.take();
+        assert_eq!(b.paper_ledger.iter().map(|l| l.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        assert!(b.integrity.is_empty());
+        assert_eq!(p.rows(), 0);
+    }
+
+    #[test]
+    fn restore_keeps_older_paper_rows_first() {
+        let mut p = Pending::new(100);
+        p.push(paper_ledger(1));
+        let failed = p.take();
+        p.push(paper_ledger(2)); // arrived while the write was failing
+        p.restore(failed);
+        assert_eq!(p.take().paper_ledger.iter().map(|l| l.seq).collect::<Vec<_>>(), vec![1, 2]);
+    }
+```
+
+- [ ] **Step 2: Run them to verify they fail.**
+Run: `cargo test -p scanner --lib writer`
+Expected: compile error, no variant `WriterMsg::Paper`.
+
+- [ ] **Step 3: Implement.** In `bins/scanner/src/writer.rs`:
+- extend the module doc's last sentence to "… (episodes and paper rows never are, except a single row Postgres itself rejects)";
+- add a variant to `WriterMsg` before `Flush`:
+```rust
+    /// Paper-trader rows (S3c). Only the batch's `paper_*` fields are used.
+    Paper(Box<Batch>),
+```
+- replace S3a's `struct Pending` and its whole `impl` with:
+```rust
+/// Rows waiting for the next flush. Episodes are deduplicated by id (latest version wins). The
+/// other rows are FIFO queues, so the cap evicts the oldest in O(1). Paper rows are kept in
+/// arrival order and, like episodes, are never evicted: a gap in `paper_ledger` would break the
+/// equity identity.
+#[derive(Debug, Default)]
+pub struct Pending {
+    episodes: Vec<EpisodeWrite>,
+    observations: VecDeque<ObservationRow>,
+    integrity: VecDeque<IntegrityRow>,
+    health: VecDeque<HealthRow>,
+    /// Only the `paper_*` fields are ever filled.
+    paper: Batch,
+    ep_index: HashMap<String, usize>,
+    max_rows: usize,
+    pub dropped: u64,
+}
+
+impl Pending {
+    pub fn new(max_rows: usize) -> Pending {
+        Pending {
+            max_rows,
+            ..Pending::default()
+        }
+    }
+
+    pub fn rows(&self) -> usize {
+        self.episodes.len()
+            + self.observations.len()
+            + self.integrity.len()
+            + self.health.len()
+            + self.paper.paper_rows()
+    }
+
+    fn upsert_episode(&mut self, w: EpisodeWrite, overwrite: bool) {
+        match self.ep_index.get(&w.row.episode_id) {
+            Some(&i) => {
+                if overwrite {
+                    self.episodes[i] = w;
+                }
+            }
+            None => {
+                self.ep_index
+                    .insert(w.row.episode_id.clone(), self.episodes.len());
+                self.episodes.push(w);
+            }
+        }
+    }
+
+    pub fn push(&mut self, m: WriterMsg) {
+        match m {
+            WriterMsg::Episode(w) => self.upsert_episode(w, true),
+            WriterMsg::Observation(o) => self.observations.push_back(o),
+            WriterMsg::Integrity(i) => self.integrity.push_back(i),
+            WriterMsg::Health(h) => self.health.push_back(h),
+            WriterMsg::Paper(b) => self.paper.extend_paper(*b),
+            WriterMsg::Flush(_) => {}
+        }
+        self.enforce_cap();
+    }
+
+    /// Over the cap, drop the oldest health, then integrity, then observation rows (episodes and
+    /// paper rows never), counting each.
+    fn enforce_cap(&mut self) {
+        while self.rows() > self.max_rows {
+            let evicted = self.health.pop_front().is_some()
+                || self.integrity.pop_front().is_some()
+                || self.observations.pop_front().is_some();
+            if !evicted {
+                break; // only episodes and paper rows left: never dropped
+            }
+            self.dropped += 1;
+        }
+    }
+
+    pub fn take(&mut self) -> Batch {
+        self.ep_index.clear();
+        let mut b = std::mem::take(&mut self.paper);
+        b.episodes = std::mem::take(&mut self.episodes);
+        b.observations = std::mem::take(&mut self.observations).into();
+        b.integrity = std::mem::take(&mut self.integrity).into();
+        b.health = std::mem::take(&mut self.health).into();
+        b
+    }
+
+    /// Put back a batch whose write failed. It is OLDER than anything pushed since, so newer
+    /// episode versions already here win, and its other rows go first.
+    pub fn restore(&mut self, mut older: Batch) {
+        let mut newer = self.take();
+        let mut paper = older.take_paper();
+        paper.extend_paper(newer.take_paper());
+        for w in older.episodes {
+            self.upsert_episode(w, false);
+        }
+        for w in newer.episodes {
+            self.upsert_episode(w, true);
+        }
+        self.observations = older
+            .observations
+            .into_iter()
+            .chain(newer.observations)
+            .collect();
+        self.integrity = older.integrity.into_iter().chain(newer.integrity).collect();
+        self.health = older.health.into_iter().chain(newer.health).collect();
+        self.paper = paper;
+        self.enforce_cap();
+    }
+}
+```
+- replace `quarantine` with:
+```rust
+/// Write each row of a data-rejected batch on its own; returns how many rows still failed
+/// (dropped). `Batch::into_singles` puts episodes before their observations and paper accounts
+/// before the paper rows that reference them.
+async fn quarantine(store: &Store, b: Batch) -> u64 {
+    let mut dropped = 0;
+    for single in b.into_singles() {
+        // Same 10 s bound as the main flush: a stalled row must not freeze the writer (it's dropped).
+        let r = match tokio::time::timeout(Duration::from_secs(10), store.write_batch(&single)).await {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err("timed out".to_string()),
+        };
+        if let Err(e) = r {
+            if let Some(w) = single.episodes.first() {
+                eprintln!("writer: dropped episode {}: {e}", w.row.episode_id);
+            } else if let Some(l) = single.paper_ledger.first() {
+                eprintln!("writer: dropped paper ledger row {}#{}: {e}", l.account_id, l.seq);
+            }
+            dropped += 1;
+        }
+    }
+    dropped
+}
+```
+- in `flush`, replace the row sum in the transient-failure log with `b.rows()`:
+```rust
+        Ok(Err(e)) => {
+            eprintln!("writer: batch failed ({} rows): {e}", b.rows());
+            pending.restore(b);
+            *fails += 1;
+            false
+        }
+```
+
+- [ ] **Step 4: Run the tests to verify they pass.**
+Run: `cargo test -p scanner --lib writer`
+Expected: PASS. That includes the two new tests and S3a's `evicting_a_large_backlog_is_fast_and_keeps_the_newest_rows`, `keeps_only_the_latest_version_of_an_episode`, `restore_after_a_failed_write_lets_newer_versions_win` and `over_the_cap_drops_non_episode_rows_first`.
+
+- [ ] **Step 5: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p scanner --all-targets -- -D warnings`
+Expected: clean.
+```bash
+git add bins/scanner/src/writer.rs
+git commit -m "scanner/writer: paper rows ride the batching writer, never evicted; quarantine row by row via into_singles"
+```
+
+---
+
+### Task 7: live wiring (restore, routing, resolver, state saves, shutdown) + the Phase 3 exit runbook
+
+**Files:**
+- Modify: `bins/scanner/src/run.rs`, `bins/scanner/src/main.rs`
+- Create: `docs/superpowers/runbooks/s3-paper.md`
+- Test: `mod tests` in `run.rs`
+
+**Interfaces:**
+- Consumes: everything above. From S3a: `by_deadline`, the `deadline` local and the shutdown block of `run_live`.
+- Produces:
+  - `run::run(cfg: Config, cfg_hash: String, policies: Option<Policies>)`.
+  - `Io` gains `resolve_hint: Arc<Notify>`. `Io::route` sends `Out::Paper` to the writer as `WriterMsg::Paper` (rows stamped with the run id) and turns `Out::ResolvedHint` into a resolver wake-up.
+
+- [ ] **Step 1: Write the failing test.** Add to `mod tests` in `run.rs`:
+```rust
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn paper_rows_go_to_the_writer_and_resolution_hints_wake_the_resolver() {
+        use rust_decimal::Decimal;
+        let (writer, mut wrx) = mpsc::channel(16);
+        let (capture, _crx) = mpsc::channel(16);
+        let (recheck, _rrx) = mpsc::channel(16);
+        let (resnap, _srx) = mpsc::channel(16);
+        let io = Io {
+            writer,
+            capture,
+            recheck,
+            resnap,
+            refresh: Arc::new(tokio::sync::Notify::new()),
+            metrics: Arc::new(Metrics::default()),
+            run_id: 9,
+            l1_window_ms: 1,
+            suspect_window_ms: 1,
+            resolve_hint: Arc::new(tokio::sync::Notify::new()),
+        };
+        let mut engine = Engine::new(EngineCtx {
+            run_id: 9,
+            source: "live".into(),
+            scanner_version: "t".into(),
+            config_hash: "c".into(),
+            gap_ms: 30_000,
+            stale_lag_ms: 500,
+            suspect_window_ms: 60_000,
+            l1_suspect_window_ms: 3_600_000,
+            drift_settle_ms: 2_000,
+        });
+        let mark = sim::rows::AccountRow {
+            account: "P0-converter/sp-idle".into(),
+            t_ms: 60_000,
+            cash: Decimal::from(1000),
+            equity: Decimal::from(1000),
+            realized: Decimal::ZERO,
+            unrealized: Decimal::ZERO,
+            fees_paid: Decimal::ZERO,
+            locked: Decimal::ZERO,
+            max_drawdown: Decimal::ZERO,
+            n_positions: 0,
+        };
+        io.route(
+            &mut engine,
+            vec![Out::Paper(Box::new(sim::rows::SimOut::Account(mark))), Out::ResolvedHint],
+        )
+        .await
+        .unwrap();
+        match wrx.recv().await {
+            Some(WriterMsg::Paper(b)) => {
+                assert_eq!(b.paper_marks.len(), 1);
+                assert_eq!((b.paper_marks[0].run_id, b.paper_marks[0].t_ms), (9, 60_000));
+            }
+            other => panic!("expected paper rows, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(1), io.resolve_hint.notified())
+            .await
+            .expect("the hint is stored as a permit for the resolver");
+    }
+```
+
+- [ ] **Step 2: Run it to verify it fails.**
+Run: `cargo test -p scanner --lib run::tests::paper_rows_go_to_the_writer`
+Expected: compile error, no field `resolve_hint` on `Io`.
+
+- [ ] **Step 3: Implement the routing.** In `bins/scanner/src/run.rs`:
+- add the import `use pm_api::gamma::Resolution;` (`crate::paper::{self, Policies}` came in Task 5);
+- add a field to `struct Io`, after `suspect_window_ms`:
+```rust
+    /// Wakes the resolver soon after a ws `market_resolved` (S3c).
+    resolve_hint: Arc<tokio::sync::Notify>,
+```
+- in `Io::route`, replace Task 4's placeholder arm `Out::Paper(_) | Out::ResolvedHint => {}` with:
+```rust
+                Out::Paper(o) => {
+                    let mut b = Batch::default();
+                    paper::push_sim(self.run_id, *o, &mut b);
+                    self.writer
+                        .send(WriterMsg::Paper(Box::new(b)))
+                        .await
+                        .context("writer gone")?
+                }
+                Out::ResolvedHint => self.resolve_hint.notify_one(),
+```
+
+- [ ] **Step 4: Wire the live run.** Still in `run.rs`:
+- `run`: change the signature to `pub async fn run(cfg: Config, cfg_hash: String, policies: Option<Policies>) -> anyhow::Result<()>` and the call to `let result = run_live(&cfg, &cfg_hash, policies.as_ref(), &store, run_id).await;`.
+- `run_live`: change the signature to
+```rust
+async fn run_live(
+    cfg: &Config,
+    cfg_hash: &str,
+    policies: Option<&Policies>,
+    store: &Store,
+    run_id: i64,
+) -> anyhow::Result<()> {
+```
+- directly after `let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());`, add:
+```rust
+    // Paper trader (S3c): restore the live accounts from paper_state, register this run's
+    // accounts (pre-registration, spec §11) before any other paper row, start the resolver.
+    // Replay never touches paper_state.
+    let trader = match policies {
+        Some(p) => {
+            let saved = store.load_paper_state().await?;
+            let t = paper::restore_trader(p, &saved)?;
+            let accounts = Batch {
+                paper_accounts: paper::account_rows(run_id, p),
+                ..Batch::default()
+            };
+            writer_tx
+                .send(WriterMsg::Paper(Box::new(accounts)))
+                .await
+                .context("writer gone")?;
+            Some(t)
+        }
+        None => None,
+    };
+    let (held_tx, held_rx) = watch::channel(Vec::<String>::new());
+    let (resolved_tx, mut resolved_rx) = mpsc::channel::<Resolution>(1024);
+    let resolve_hint = Arc::new(tokio::sync::Notify::new());
+    let resolver_task = if trader.is_some() {
+        let gamma = Arc::new(GammaClient::new()?);
+        Some(tokio::spawn(paper::run_resolver(
+            move |ids: Vec<String>| {
+                let g = gamma.clone();
+                async move { g.resolutions(&ids).await }
+            },
+            held_rx,
+            resolve_hint.clone(),
+            Duration::from_secs(cfg.paper.resolver_every_secs),
+            paper::RESOLVE_HINT_DELAY,
+            resolved_tx,
+        )))
+    } else {
+        drop(resolved_tx); // resolved_rx then yields None, which disables its select arm
+        None
+    };
+```
+- in the `let io = Io { … }` literal, add `resolve_hint: resolve_hint.clone(),`;
+- directly after `let mut engine = Engine::new(engine_ctx(cfg, cfg_hash, run_id, "live"));`, add:
+```rust
+    if let Some(t) = trader {
+        engine.set_paper(t);
+    }
+```
+- directly after `tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);`, add:
+```rust
+    let mut save_tick =
+        tokio::time::interval(Duration::from_secs(cfg.paper.state_save_every_secs));
+    save_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    save_tick.tick().await; // the first tick is immediate; a just-restored state needs no save
+```
+- in the `tokio::select!` loop, add two arms directly before `_ = tick.tick() => {`, and replace the `tick` arm as shown:
+```rust
+            Some(r) = resolved_rx.recv() => {
+                // One instant for the capture line and the engine, so replay settles identically.
+                let t = now_ms();
+                io.ctl(0, Ctl::Resolved {
+                    market_id: r.market_id.clone(),
+                    payout_yes: r.payout_yes.to_string(),
+                    payout_no: r.payout_no.to_string(),
+                }, t);
+                let outs = engine.on_resolution(t, &r.market_id, r.payout_yes, r.payout_no);
+                if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
+            }
+            _ = save_tick.tick() => {
+                // Queued behind every row already routed, so it lands in the same or a later batch.
+                if let Some(st) = engine.paper_state() {
+                    match paper::state_batch(&st, now_ms()) {
+                        Ok(b) => {
+                            if writer_tx.send(WriterMsg::Paper(Box::new(b))).await.is_err() {
+                                break Err(anyhow::anyhow!("writer gone"));
+                            }
+                        }
+                        Err(e) => eprintln!("paper: state not saved: {e:#}"),
+                    }
+                }
+            }
+            _ = tick.tick() => {
+                let outs = engine.tick(now_ms());
+                if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
+                let held = engine.paper_held_markets();
+                let _ = held_tx.send_if_modified(|h| {
+                    if *h == held {
+                        false
+                    } else {
+                        *h = held;
+                        true
+                    }
+                });
+            }
+```
+- in S3a's shutdown block, directly after `let _ = by_deadline(deadline, "close episodes", io.route(&mut engine, outs)).await;`, add:
+```rust
+    // Paper (S3c): complete pending conversions and mark at `t` (replay does the same on
+    // Ctl::Shutdown), then save the accounts BEFORE the flush so both land in the last batch.
+    let outs = engine.paper_close(t);
+    let _ = by_deadline(deadline, "close paper", io.route(&mut engine, outs)).await;
+    if let Some(st) = engine.paper_state() {
+        match paper::state_batch(&st, t) {
+            Ok(b) => {
+                let _ = by_deadline(
+                    deadline,
+                    "save paper state",
+                    writer_tx.send(WriterMsg::Paper(Box::new(b))),
+                )
+                .await;
+            }
+            Err(e) => eprintln!("paper: state not saved at shutdown: {e:#}"),
+        }
+    }
+```
+  and directly after `samplers_task.abort();`, add:
+```rust
+    if let Some(r) = &resolver_task {
+        r.abort();
+    }
+```
+In `bins/scanner/src/main.rs`, replace the `Cmd::Run` arm with:
+```rust
+        Cmd::Run => {
+            let (policies, hash) = scanner::paper::with_policies(&cfg.paper, &hash)?;
+            scanner::run::run(cfg, hash, policies).await
+        }
+```
+
+- [ ] **Step 5: Run the tests to verify they pass.**
+Run: `cargo test -p scanner --lib run::tests`
+Expected: PASS: the new test plus S3a's `the_whole_stop_fits_the_compose_grace_period`, `shutdown_steps_never_outlive_the_deadline`, `waiting_for_a_busy_thread_stops_at_the_deadline`, `breaker_trips_at_max_starts`, `warm_start_only_when_fresh` and `an_oversize_unit_becomes_an_integrity_row_naming_it`.
+
+- [ ] **Step 6: Write the Phase 3 exit runbook.** Create `docs/superpowers/runbooks/s3-paper.md`:
+````markdown
+# S3 paper trading (Phase 3 exit)
+
+Spec §19 exit: **deterministic replay; equity identity holds.** Everything here is read-only: no
+ports, no credentials beyond the database role passwords in `.env`. It runs on the PC (PowerShell)
+or on the VPS (bash): the `docker compose … psql` commands are the same.
+Project disk budget: **30 GB**. Run `sh scripts/disk-budget.sh` (VPS) or
+`powershell -ExecutionPolicy Bypass -File scripts\disk-budget.ps1` (PC) before step 1 and after
+step 3.
+
+## 0. Image and schema
+
+The image must contain S3c, including `/etc/cute-trading/policies.toml`. Rebuild it once (it costs
+disk: prune the build cache afterwards), then apply migration 0004:
+```bash
+docker compose --profile core build migrate
+docker builder prune -f
+docker compose --profile core run --rm migrate
+docker compose exec postgres psql -U ct_owner -d cute_trading -c "select count(*) from paper_state"
+```
+Note the policies hash; every paper account row must carry it:
+```bash
+sha256sum config/policies.toml                                            # VPS
+Get-FileHash config\policies.toml -Algorithm SHA256 | % { $_.Hash.ToLower() }   # PC
+```
+Write down `POLICIES_SHA`.
+
+## 1. Deterministic replay: the same prefix twice
+
+Use a replay prefix copied as in `s2c-soak.md` §2 / `s2c-soak-vps.md` §3 (two complete hours plus
+every `universe-*` file, under `/data/replay-prefix`). Replay it TWICE:
+```bash
+docker compose run --rm --no-deps scanner replay /data/replay-prefix
+docker compose run --rm --no-deps scanner replay /data/replay-prefix
+docker compose exec postgres psql -U ct_owner -d cute_trading -tAc "select run_id, config_hash from runs where mode='replay' order by run_id desc limit 2"
+```
+Write down the two run ids as `R1` < `R2`. Both `config_hash` values must end in `+<POLICIES_SHA>`.
+
+Episode ids embed the run id (`replay-<run>-<n>`), so strip that prefix before comparing:
+```sql
+with a as (select account_id, seq, t_ms, kind, regexp_replace(coalesce(episode_id, ''), '^replay-[0-9]+-', '') ep,
+                  market_id, outcome, qty, price, cash_delta, fees, realized_delta, cash_after, equity
+           from paper_ledger where run_id = <R1>),
+     b as (select account_id, seq, t_ms, kind, regexp_replace(coalesce(episode_id, ''), '^replay-[0-9]+-', '') ep,
+                  market_id, outcome, qty, price, cash_delta, fees, realized_delta, cash_after, equity
+           from paper_ledger where run_id = <R2>)
+select (select count(*) from a) a_rows, (select count(*) from b) b_rows,
+       (select count(*) from (select * from a except select * from b) x) only_a,
+       (select count(*) from (select * from b except select * from a) x) only_b;
+```
+Pass: `only_a = only_b = 0` and `a_rows = b_rows > 0` (every account marks at least once, at the
+replay's close). The same check on marks:
+```sql
+select (select count(*) from (select account_id, t_ms, cash, equity, realized, unrealized from paper_marks where run_id = <R1>
+                              except select account_id, t_ms, cash, equity, realized, unrealized from paper_marks where run_id = <R2>) x) only_a,
+       (select count(*) from (select account_id, t_ms, cash, equity, realized, unrealized from paper_marks where run_id = <R2>
+                              except select account_id, t_ms, cash, equity, realized, unrealized from paper_marks where run_id = <R1>) x) only_b;
+```
+Pass: `0, 0`.
+
+## 2. The equity identity
+
+`equity = bankroll + realized + unrealized`, written out from the mark's own cash:
+`cash + (equity − cash) = bankroll + realized + unrealized`.
+```sql
+select count(*) marks,
+       count(*) filter (where m.cash + (m.equity - m.cash) <> a.bankroll + m.realized + m.unrealized) broken
+from paper_marks m join paper_accounts a using (run_id, account_id)
+where m.run_id in (<R1>, <R2>);
+select distinct policies_sha256 from paper_accounts where run_id in (<R1>, <R2>);
+```
+Pass: `broken = 0` with `marks > 0`, and the only hash is `POLICIES_SHA`.
+
+Context for the write-up (not a pass/fail):
+```sql
+select a.account_id, count(*) filter (where i.skip_reason is null) taken, count(i.*) decided,
+       max(m.realized) filter (where m.t_ms = (select max(t_ms) from paper_marks where run_id = <R1>)) realized_at_end
+from paper_accounts a left join paper_intents i using (run_id, account_id)
+     left join paper_marks m using (run_id, account_id)
+where a.run_id = <R1> group by 1 order by 1;
+select kind, count(*) from integrity_events where run_id = <R1> and kind = 'non_binary_payout' group by 1;
+```
+Then free the prefix: `docker run --rm -v cute-trading_data:/data alpine rm -rf /data/replay-prefix`.
+
+## 3. Live check (short)
+
+```bash
+docker compose --profile core up -d
+docker compose exec postgres psql -U ct_owner -d cute_trading -tAc "select run_id from runs where mode='live' order by run_id desc limit 1"
+```
+Write down `LIVE`. After about 3 minutes:
+```sql
+select count(*) from paper_accounts where run_id = <LIVE>;                              -- = accounts in policies.toml (15)
+select account_id, count(*) marks, max(t_ms) from paper_marks where run_id = <LIVE> group by 1 order by 1;   -- ≥ 2 each
+select count(*) marks, count(*) filter (where m.cash + (m.equity - m.cash) <> a.bankroll + m.realized + m.unrealized) broken
+from paper_marks m join paper_accounts a using (run_id, account_id) where m.run_id = <LIVE>;                  -- broken = 0
+select count(*), max(updated_ms) from paper_state;                                       -- 15, within the last ~60 s
+select kind, count(*) from paper_ledger where run_id = <LIVE> group by 1;
+```
+Restart and check that the accounts carry over (the restored cash equals the last saved cash):
+```bash
+docker compose --profile core restart scanner
+```
+```sql
+select run_id, account_id, t_ms, cash, realized from paper_marks
+where account_id = 'P0-converter/sp-idle' order by t_ms desc limit 3;
+```
+Pass: the new run's first mark has the same `cash` and `realized` as the old run's final (close)
+mark, unless that account traded in between. Then `docker compose --profile core stop scanner`
+(or keep it running for the soak).
+
+## Results
+(fill in: date, POLICIES_SHA, R1/R2, ledger rows, only_a/only_b, marks/broken, LIVE, restart carry-over)
+````
+
+- [ ] **Step 7: Full verification.**
+Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
+Expected: clean, all PASS (the `live` tests show as ignored).
+Run: `set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" && cargo test -p store`
+Expected: PASS, no `SKIPPED`.
+Run: `grep -rnE "private_key|mnemonic|sign\(|post_order|create_order" bins/scanner/src crates/sim/src || echo "no order or signing code"`
+Expected: `no order or signing code`.
+
+- [ ] **Step 8: Commit.**
+```bash
+git add bins/scanner/src/run.rs bins/scanner/src/main.rs docs/superpowers/runbooks/s3-paper.md
+git commit -m "scanner/run: live paper trading (restore, resolver, state saves, bounded shutdown) + Phase 3 runbook"
+```
+
+---
+
+## Rulings recorded in this plan (owner: check)
+
+1. **`Out::Paper(Box<SimOut>)`**, not `Out::Paper(SimOut)`. It is boxed like `Out::Episode`: `SimOut` is ~250 bytes and would trip clippy's `large_enum_variant` under `-D warnings`.
+2. **The paper history is append-only.** `scanner_rw` gets `SELECT, INSERT` on the seven history tables, and `UPDATE` only on `paper_state`. The brief said SELECT/INSERT/UPDATE, but `ON CONFLICT DO NOTHING` needs no UPDATE, and a writable ledger could be rewritten. There are no sequences: every key is natural.
+3. **`paper_state.state` is `TEXT`**, the exact JSON serde wrote (decimals as strings), not `jsonb`. The upsert also refuses an older `updated_ms`, so a restored failed batch can't roll the state back.
+4. **Natural keys:**
+   - fills: (run, account, episode, market, outcome, side). Each leg has one buy and at most one unwind per episode.
+   - markouts: (…, market, outcome, offset_ms).
+   - marks: (run, account, t_ms). A resolution row at exactly a mark's ms keeps the first.
+
+   Every paper row has an FK to `paper_accounts(run_id, account_id)`, but none to `episodes`, so a quarantined episode can't cascade.
+5. **Payout acceptance is stricter than "closed, in [0,1], sums to 1".** A fractional vector also needs `umaResolutionStatus = "resolved"`, because a closed market still in dispute shows its trading prices, which sum to 1 as well. A binary 1/0 on a closed market is accepted without the status. The field name `umaResolutionStatus` is **unverified**: run the ignored live test and look at one resolved NegRisk market before relying on 50-50 settlement.
+6. **Resolver results are filtered to the ids requested** (the keyset lesson). A ws `market_resolved` triggers a poll 30 s later (`RESOLVE_HINT_DELAY`), because the ws `market` field is a condition id and Gamma's payout lags the event.
+7. **`non_binary_payout` is written for every non-binary resolution received**, held or not. It is stamped with the receive time. `event_id` comes from the current universe, or is NULL if the market has left it.
+8. **`config_hash` becomes `"<scanner sha256>+<policies sha256>"`** when paper trading is on: it is transparent and needs no new column. Every `paper_accounts` row also carries the policies sha256 alone.
+9. **State is saved on a `state_save_every_secs` timer** (60 s, the mark cadence), not hooked to mark rows. The save goes through the writer after every row already routed, so it commits with or after them. A saved account whose spec differs from the policies file starts fresh (logged). A corrupt row is a start-up error, never a silent reset.
+10. **Lock-up:**
+    - `days_to_end` = the max endDate over the group's **live** legs, fixed at open, relative to the opening **server** ts.
+    - `annualized_return` in the episode row uses the **peak** quote; `OpenCtx.annualized` uses the open quote.
+    - `post_end` = `days < 0`.
+    - No parseable end date → all three NULL.
+11. **Paper rows are never evicted by the writer cap** (like episodes). Their volume is bounded: 15 accounts × 2 rows per minute of marks, plus trades.
+12. **Held markets include returned YES** from conversions, since their settlement books a windfall.
+13. **`on_level` is called only for group-leg tokens**, not canaries. A refresh that blanks a disconnected group's books does not call `on_snapshot`: the next ws snapshot for that token does. `on_frame` runs for every parsed frame, before its events, whatever the frame contains.
+
+## Self-review
+
+- **Spec coverage:**
+  - §5.5 lock-up: Task 4.
+  - §5.6 execution model: S3b, driven here by the S3b call contract (Task 4), payout vector (Tasks 2 and 4).
+  - §8.2 paper trader beside the engine; §8.3 same core for live and replay: Tasks 4, 5 and 7.
+  - §10 tables, roles, NUMERIC, zero vs NULL: Task 1.
+  - §11 pre-registration hash (Tasks 3 and 7), replay with the same policies (Task 5).
+  - §15 sim determinism and the equity identity through the scanner (Task 5 golden), store role test (Task 1), route table (Task 2).
+  - §16 route list (Task 2).
+  - Q19 flag (Tasks 1 and 4).
+  - §19 exit runbook (Task 7).
+- **Types across tasks:**
+  - `Batch` paper fields and helpers (T1) → `paper.rs` (T3), writer (T6), replay_cmd (T5).
+  - `Resolution` (T2) → resolver (T3), run (T7).
+  - `push_sim`, `account_rows`, `state_batch`, `restore_trader`, `with_policies`, `run_resolver`, `RESOLVE_HINT_DELAY` (T3) → T5 and T7.
+  - `Out::{Paper, ResolvedHint}`, `Engine::{set_paper, paper_close, paper_state, paper_held_markets, on_resolution}` (T4) → T5 and T7.
+  - `WriterMsg::Paper` (T6) → T7.
+  - `Ctl::Resolved` (T5) → T7.
+- **Build stays green between tasks:**
+  - T1 patches S3a's `Pending::take` literal.
+  - T4 adds a placeholder `Io::route` arm that T7 replaces.
+  - T5 changes `replay_cmd`'s signature together with `main.rs`; T7 does the same for `run`.
