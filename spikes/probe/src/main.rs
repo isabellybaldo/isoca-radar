@@ -1,6 +1,8 @@
 //! Phase 0 measurement probe (throwaway). Read-only; see spikes/probe/RUNBOOK.md.
 #![forbid(unsafe_code)]
 mod capture;
+mod conncap;
+mod mirror;
 mod shards;
 mod universe;
 
@@ -35,6 +37,26 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Measure the per-IP connection cap (≤ 40, ≥ 0.5 s apart, stops at first refusal).
+    Conncap {
+        #[arg(long)]
+        universe: PathBuf,
+        #[arg(long, default_value_t = 40)]
+        max: usize,
+        #[arg(long, default_value_t = 3000)]
+        spacing_ms: u64,
+        #[arg(long, default_value_t = 60)]
+        hold_secs: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// L1 check: compare YES/NO books of the canary pairs level by level.
+    Mirror {
+        #[arg(long)]
+        universe: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -65,6 +87,25 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let u = universe::Universe::load(&universe)?;
             capture::capture(&u, shard_tokens, max_conns.min(16), minutes, &out).await?;
+        }
+        Cmd::Conncap {
+            universe,
+            max,
+            spacing_ms,
+            hold_secs,
+            out,
+        } => {
+            let u = universe::Universe::load(&universe)?;
+            let token = u
+                .canary
+                .first()
+                .map(|c| c.yes.clone())
+                .ok_or_else(|| anyhow::anyhow!("universe has no canary pairs"))?;
+            conncap::conncap(&token, max.min(40), spacing_ms, hold_secs, &out).await?;
+        }
+        Cmd::Mirror { universe, out } => {
+            let u = universe::Universe::load(&universe)?;
+            mirror::mirror(&u, &out).await?;
         }
     }
     Ok(())
