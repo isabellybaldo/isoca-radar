@@ -8,6 +8,7 @@ pub mod rows;
 mod runs;
 mod universe;
 
+pub use batch::{Listener, Table};
 pub use error::StoreError;
 pub use rows::*;
 pub use sqlx::postgres::PgConnectOptions;
