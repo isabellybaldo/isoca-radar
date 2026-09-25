@@ -3,6 +3,7 @@
 //! entries only; there is no code path to an exchange (spec §16 #5).
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod config;
 pub mod consumed;
 pub mod latency;
