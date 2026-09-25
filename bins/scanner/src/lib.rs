@@ -1,9 +1,12 @@
 //! scanner: read-only Polymarket arbitrage scanner (paper only; spec §8).
 #![forbid(unsafe_code)]
 
+pub mod capture;
 pub mod config;
 pub mod engine;
 pub mod guard;
+pub mod metrics;
+pub mod replay;
 pub mod shards;
 pub mod universe;
 
