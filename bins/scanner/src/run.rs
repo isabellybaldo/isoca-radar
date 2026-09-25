@@ -31,6 +31,42 @@ pub fn warm_start_usable(taken_ms: i64, now_ms: i64, max_age_ms: i64) -> bool {
     taken_ms <= now_ms && now_ms - taken_ms < max_age_ms
 }
 
+/// Graceful-stop budget for `run_live` from the shutdown signal (S3a). With END_RUN_TIMEOUT for
+/// the `runs` exit row, the whole stop fits compose's 30 s stop_grace_period.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+pub const END_RUN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run one shutdown step, but never past `deadline` (a ready step still completes). An overrun
+/// is logged and the step abandoned.
+pub async fn by_deadline<F: std::future::Future>(
+    deadline: tokio::time::Instant,
+    step: &str,
+    f: F,
+) -> Option<F::Output> {
+    match tokio::time::timeout_at(deadline, f).await {
+        Ok(v) => Some(v),
+        Err(_) => {
+            eprintln!("shutdown: {step} overran the deadline; skipped");
+            None
+        }
+    }
+}
+
+/// Wait for a std thread to finish without joining it, never past `deadline`. Returns whether it
+/// finished (then `join` returns at once). An unfinished thread doesn't keep the process alive.
+pub async fn wait_thread<T>(
+    h: &std::thread::JoinHandle<T>,
+    deadline: tokio::time::Instant,
+) -> bool {
+    while !h.is_finished() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
 #[derive(Debug)]
 pub enum EngineCmd {
     Apply {
@@ -155,7 +191,7 @@ pub async fn run(cfg: Config, cfg_hash: String) -> anyhow::Result<()> {
         Ok(()) => "shutdown".to_string(),
         Err(e) => format!("error: {e:#}"),
     };
-    let _ = store.end_run(run_id, now_ms(), &reason).await;
+    let _ = tokio::time::timeout(END_RUN_TIMEOUT, store.end_run(run_id, now_ms(), &reason)).await;
     result
 }
 
@@ -628,21 +664,26 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         }
     };
 
-    // Shutdown (bounded well under Docker's stop grace):
-    // 1. stop taking new shards/universes; 2. close every open episode; 3. flush the writer with
-    //    a bounded ack; 4. THEN stop everything still holding a `writer_tx` clone, so step 3's
-    //    flush sees a quiet writer and step 6's join actually returns (it needs every sender gone).
+    // Shutdown: ONE deadline for every step (SHUTDOWN_BUDGET), so the whole stop plus `run`'s
+    // exit row fits compose's 30 s stop_grace_period. Order:
+    // 1. stop taking new shards/universes; 2. close every open episode; 3. flush the writer;
+    // 4. THEN stop everything still holding a `writer_tx` clone (the re-checker owns its tasks),
+    //    so the writer's final join can return; 5. give the capture thread what time is left.
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_BUDGET;
     drop(plan_tx);
     supervisor_task.abort();
     refresher_task.abort();
     let t = now_ms();
     io.ctl(0, Ctl::Shutdown, t);
     let outs = engine.close_all(t);
-    let _ = io.route(&mut engine, outs).await;
+    let _ = by_deadline(deadline, "close episodes", io.route(&mut engine, outs)).await;
     let (done_tx, done_rx) = oneshot::channel();
-    if writer_tx.send(WriterMsg::Flush(done_tx)).await.is_ok() {
-        let _ = tokio::time::timeout(Duration::from_secs(10), done_rx).await;
-    }
+    let flush = async {
+        if writer_tx.send(WriterMsg::Flush(done_tx)).await.is_ok() {
+            let _ = done_rx.await;
+        }
+    };
+    let _ = by_deadline(deadline, "writer flush", flush).await;
     health_task.abort();
     rechecks_task.abort();
     resnapshots_task.abort();
@@ -650,8 +691,12 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
     drop(io);
     drop(capture_tx);
     drop(writer_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(3), writer_task).await;
-    let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+    let _ = by_deadline(deadline, "writer exit", writer_task).await;
+    if wait_thread(&capture_thread, deadline).await {
+        let _ = capture_thread.join();
+    } else {
+        eprintln!("shutdown: capture thread still busy at the deadline; exiting without it");
+    }
     result
 }
 
@@ -805,5 +850,51 @@ mod tests {
                 .as_deref()
                 .is_some_and(|d| d.contains("1234 tokens"))
         );
+    }
+
+    #[test]
+    fn the_whole_stop_fits_the_compose_grace_period() {
+        // compose.yml: stop_grace_period: 30s
+        assert!(SHUTDOWN_BUDGET + END_RUN_TIMEOUT < Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_never_outlive_the_deadline() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(100);
+        assert_eq!(by_deadline(deadline, "ready", async { 1 }).await, Some(1));
+        assert_eq!(
+            by_deadline(deadline, "stuck", std::future::pending::<u8>()).await,
+            None
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        // past the deadline: ready work still completes, stuck work returns at once
+        assert_eq!(
+            by_deadline(deadline, "late ready", async { 2 }).await,
+            Some(2)
+        );
+        let t = tokio::time::Instant::now();
+        assert_eq!(
+            by_deadline(deadline, "late stuck", std::future::pending::<u8>()).await,
+            None
+        );
+        assert!(t.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_busy_thread_stops_at_the_deadline() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let busy = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        assert!(
+            !wait_thread(&busy, deadline).await,
+            "still busy at the deadline"
+        );
+        drop(tx); // lets the thread finish
+        let later = tokio::time::Instant::now() + Duration::from_secs(5);
+        assert!(wait_thread(&busy, later).await);
+        let _ = busy.join();
     }
 }
