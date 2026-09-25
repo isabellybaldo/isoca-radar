@@ -10,7 +10,7 @@ use arb_core::fill::{BasketRule, BuyLeg, walk};
 use arb_core::money::{Price, Shares};
 use pm_api::ws::MarketEvent;
 use rust_decimal::Decimal;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use store::{EpisodeLegRow, EpisodeRow, EpisodeWrite, IntegrityRow};
 
@@ -124,6 +124,19 @@ pub(crate) struct PendingDrift {
     pub due_ms: i64,
 }
 
+/// A deferred top-check expectation for one token: Polymarket splits ONE logical update across
+/// SEVERAL websocket messages sharing ONE server ts, and each item carries the FINAL top, so a
+/// check right after the message that set it is too early (live smoke 2026-09-25: ~550
+/// false top_mismatch/min at that cadence). Resolved once a later message proves the update is
+/// over — see `Engine::resolve_pending`.
+#[derive(Debug, Clone)]
+struct PendingTop {
+    conn: usize,
+    ts: i64,
+    bid: Option<Price>,
+    ask: Option<Price>,
+}
+
 pub struct Engine {
     ctx: EngineCtx,
     universe: Arc<Universe>,
@@ -137,6 +150,9 @@ pub struct Engine {
     suspect_until: Vec<i64>,
     msgs: HashMap<String, u64>,
     pending_drift: Vec<PendingDrift>,
+    /// Keyed by token; iterated in key order so live and replay resolve pending checks
+    /// identically (spec §9.3: no clock, deterministic from inputs alone).
+    pending_tops: BTreeMap<String, PendingTop>,
 }
 
 fn kind_str(k: Kind) -> &'static str {
@@ -199,6 +215,7 @@ impl Engine {
             suspect_until: Vec::new(),
             msgs: HashMap::new(),
             pending_drift: Vec::new(),
+            pending_tops: BTreeMap::new(),
         }
     }
 
@@ -307,6 +324,10 @@ impl Engine {
             }
         }
         self.canary = canary;
+        // Drop deferred top-checks for tokens no longer subscribed at all: there's no book left
+        // to resolve them against.
+        self.pending_tops
+            .retain(|t, _| self.token_ix.contains_key(t) || self.canary.contains_key(t));
         self.group_conn = u
             .groups
             .iter()
@@ -330,11 +351,13 @@ impl Engine {
         let mut out = Vec::new();
         let mut touched: BTreeSet<usize> = BTreeSet::new();
         let mut frame_ts: Option<i64> = None;
-        // Integrity checks run once per token AFTER the whole frame (like evaluation, spec 5.5):
-        // Polymarket's per-item best_bid/best_ask describe the book after the WHOLE message, so a
-        // check after each item flags in-between states that never existed (live smoke 2026-09-25).
+        // A snapshot is complete state, so its crossed check runs immediately, once per token,
+        // after the whole frame (like evaluation, spec 5.5). A delta's top/crossed check is
+        // deferred instead (`pending_tops`): Polymarket splits ONE logical update across SEVERAL
+        // websocket messages sharing ONE server ts, and each item's best_bid/best_ask already
+        // describes the FINAL top, so checking right after one item flags in-between states that
+        // never existed (live smoke 2026-09-25). See `resolve_pending`.
         let mut frame_tokens: Vec<String> = Vec::new();
-        let mut expected: HashMap<String, (Option<Price>, Option<Price>)> = HashMap::new();
         for ev in events {
             match ev {
                 MarketEvent::Snapshot {
@@ -346,10 +369,12 @@ impl Engine {
                 } => {
                     bump(&mut frame_ts, *server_ts_ms);
                     let ts = *server_ts_ms;
-                    self.on_book(token, &mut touched, &mut frame_tokens, |b| {
-                        b.apply_snapshot(bids, asks, ts);
-                    });
-                    expected.remove(token.as_str()); // a snapshot supersedes earlier deltas' tops
+                    if self.on_book(token, &mut touched, |b| b.apply_snapshot(bids, asks, ts)) {
+                        self.pending_tops.remove(token.as_str()); // a snapshot supersedes earlier deltas' tops
+                        if !frame_tokens.iter().any(|t| t == token) {
+                            frame_tokens.push(token.clone());
+                        }
+                    }
                 }
                 MarketEvent::Delta {
                     token,
@@ -370,10 +395,31 @@ impl Engine {
                         best_ask.filter(|x| x.get() != Decimal::ONE),
                     );
                     let (side, price, size) = (*side, *price, *size);
-                    self.on_book(token, &mut touched, &mut frame_tokens, |b| {
+                    // A pending entry from an EARLIER server ts is for a DIFFERENT logical update
+                    // (messages of the SAME update all share one ts): it's now definitely
+                    // complete, so resolve it against our book as it stood before this delta.
+                    if self
+                        .pending_tops
+                        .get(token.as_str())
+                        .is_some_and(|p| p.ts < ts)
+                    {
+                        self.resolve_pending(token, &mut out);
+                    }
+                    let found = self.on_book(token, &mut touched, |b| {
                         let _ = b.apply_delta(side, price, size, ts);
                     });
-                    expected.insert(token.clone(), (bb, ba)); // last item for this token wins
+                    if found {
+                        // A same-ts delta for this token just replaces the pending entry: last wins.
+                        self.pending_tops.insert(
+                            token.clone(),
+                            PendingTop {
+                                conn,
+                                ts,
+                                bid: bb,
+                                ask: ba,
+                            },
+                        );
+                    }
                 }
                 MarketEvent::LastTrade { server_ts_ms, .. }
                 | MarketEvent::TickSize { server_ts_ms, .. } => {
@@ -388,14 +434,19 @@ impl Engine {
         let Some(ts) = frame_ts else {
             return out;
         };
+        // Pending entries old enough that this frame can't be a further split of the same
+        // logical update settle now (same shard, ts stale by more than 1 s).
+        let due: Vec<String> = self
+            .pending_tops
+            .iter()
+            .filter(|(_, p)| p.conn == conn && p.ts + 1_000 < ts)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for token in due {
+            self.resolve_pending(&token, &mut out);
+        }
         for token in &frame_tokens {
-            self.check_book(
-                conn,
-                token,
-                ts,
-                expected.get(token.as_str()).copied(),
-                &mut out,
-            );
+            self.check_book(conn, token, ts, None, &mut out);
         }
         out.push(Out::Lag(recv_ms - ts));
         for g in touched {
@@ -404,14 +455,10 @@ impl Engine {
         out
     }
 
-    /// Apply one book change; remember the token (once, in frame order) for end-of-frame checks.
-    fn on_book<F>(
-        &mut self,
-        token: &str,
-        touched: &mut BTreeSet<usize>,
-        frame_tokens: &mut Vec<String>,
-        f: F,
-    ) where
+    /// Apply one book change. Returns whether `token` was actually known (a group leg or a
+    /// canary), so callers can decide whether to track it for a deferred/immediate check.
+    fn on_book<F>(&mut self, token: &str, touched: &mut BTreeSet<usize>, f: F) -> bool
+    where
         F: FnOnce(&mut Book),
     {
         if let Some(&(g, l)) = self.token_ix.get(token) {
@@ -421,13 +468,21 @@ impl Engine {
                 .msgs
                 .entry(self.universe.groups[g].event_id.clone())
                 .or_insert(0) += 1;
+            true
         } else if let Some(b) = self.canary.get_mut(token) {
             f(b);
+            true
         } else {
-            return;
+            false
         }
-        if !frame_tokens.iter().any(|t| t == token) {
-            frame_tokens.push(token.to_string());
+    }
+
+    /// Settle one deferred top-check: compare the pending expectation (and the crossed check)
+    /// against our book now, stamped with the pending entry's own connection and ts — not the
+    /// caller's — since it may be resolved from a later frame.
+    fn resolve_pending(&mut self, token: &str, out: &mut Vec<Out>) {
+        if let Some(p) = self.pending_tops.remove(token) {
+            self.check_book(p.conn, token, p.ts, Some((p.bid, p.ask)), out);
         }
     }
 
@@ -765,6 +820,8 @@ impl Engine {
     }
 
     pub fn disconnect(&mut self, conn: usize, ts_ms: i64) -> Vec<Out> {
+        // The feed died: drop this conn's deferred top-checks unresolved, no check.
+        self.pending_tops.retain(|_, p| p.conn != conn);
         let mut out = vec![self.integrity(
             ts_ms,
             Issue {
@@ -788,6 +845,7 @@ impl Engine {
     }
 
     pub fn close_all(&mut self, ts_ms: i64) -> Vec<Out> {
+        self.pending_tops.clear();
         let mut out = Vec::new();
         for e in self.tracker.close_all(ts_ms) {
             self.close_episode(e, &mut out);

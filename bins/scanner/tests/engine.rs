@@ -97,6 +97,14 @@ fn server_top_that_disagrees_with_ours_is_an_integrity_event_and_a_resnapshot() 
             best_ask: Some(p("0.29")), // ours is 0.30
         }],
     );
+    // the check is deferred (spec 2026-09-25): not yet reported in this same frame
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+    // a later frame on the same conn, > 1 s past, resolves it
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y1", 3_001, "0.20", "10")]);
     assert!(outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch" && i.token.as_deref() == Some("e1-y2"))));
     assert!(
         outs.iter()
@@ -270,7 +278,8 @@ fn the_top_check_uses_the_servers_top_after_the_whole_frame() {
             .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
         "{outs:?}"
     );
-    // a real disagreement at the end of the frame is still flagged
+    // a real disagreement: deferred (spec 2026-09-25) until a later update of the SAME token
+    // proves the ts=3_000 update is over, at which point it's reported.
     let outs = e.on_frame(
         0,
         3_100,
@@ -284,6 +293,129 @@ fn the_top_check_uses_the_servers_top_after_the_whole_frame() {
             Some("0.41"),
         )],
     );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "not yet resolved: {outs:?}"
+    );
+    let outs = e.on_frame(
+        0,
+        3_600,
+        &[delta(
+            "e1-y0",
+            3_500,
+            Side::Ask,
+            "0.45",
+            "0",
+            None,
+            Some("0.42"),
+        )],
+    );
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+}
+
+#[test]
+fn split_ws_messages_sharing_one_server_ts_do_not_false_mismatch() {
+    let mut e = engine();
+    // e1-y0: a bid at 0.30 plus two ask levels, 0.40 and 0.42
+    e.on_frame(
+        0,
+        1_100,
+        &[snap(
+            "e1-y0",
+            1_000,
+            &[("0.30", "10")],
+            &[("0.40", "5"), ("0.42", "5")],
+        )],
+    );
+    // two SEPARATE websocket frames sharing ONE server ts: each carries the FINAL top (bb None,
+    // ba 0.42), even though right after frame1 alone our book still shows the stale ask top
+    // (0.40) — the false-positive pattern from the live smoke test.
+    let outs1 = e.on_frame(
+        0,
+        2_100,
+        &[delta(
+            "e1-y0",
+            2_000,
+            Side::Bid,
+            "0.30",
+            "0",
+            None,
+            Some("0.42"),
+        )],
+    );
+    assert!(
+        !outs1
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "{outs1:?}"
+    );
+    let outs2 = e.on_frame(
+        0,
+        2_101,
+        &[delta(
+            "e1-y0",
+            2_000,
+            Side::Ask,
+            "0.40",
+            "0",
+            None,
+            Some("0.42"),
+        )],
+    );
+    assert!(
+        !outs2
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "{outs2:?}"
+    );
+    // a later frame on the same conn, > 1 s past, resolves cleanly: still none
+    let outs3 = e.on_frame(0, 4_200, &[ask("e1-y1", 4_000, "0.20", "10")]);
+    assert!(
+        !outs3
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "{outs3:?}"
+    );
+}
+
+#[test]
+fn a_real_top_mismatch_is_reported_once_a_later_frame_resolves_it() {
+    let mut e = engine();
+    seed(&mut e); // e1-y0 ask 0.40
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[delta(
+            "e1-y0",
+            2_000,
+            Side::Ask,
+            "0.45",
+            "5",
+            None,
+            Some("0.41"), // wrong: our top ask stays 0.40
+        )],
+    );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "deferred: {outs:?}"
+    );
+    // not yet 1 s past the pending entry's ts (2_000): still not reported
+    let outs = e.on_frame(0, 2_600, &[ask("e1-y1", 2_500, "0.20", "10")]);
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "{outs:?}"
+    );
+    // now > 1 s past: resolves and reports the real disagreement
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y1", 3_001, "0.20", "10")]);
     assert!(
         outs.iter()
             .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
