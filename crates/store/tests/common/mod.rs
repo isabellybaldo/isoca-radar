@@ -38,7 +38,7 @@ async fn sweep_stale_test_dbs(admin: &PgConnectOptions) {
         .await
         .expect("connect admin");
     let names = s
-        .database_names_like("ct_test_%")
+        .database_names_like(r"ct\_test\_%") // `_` is a LIKE wildcard: escape it
         .await
         .expect("list ct_test_% databases");
     let now = nanos();

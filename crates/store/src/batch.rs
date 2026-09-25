@@ -212,7 +212,7 @@ impl Store {
         }
 
         if !episodes.is_empty() {
-            let ids: Vec<String> = episodes.iter().map(|w| w.row.episode_id.clone()).collect();
+            let ids: Vec<String> = episodes.iter().map(|w| clean(&w.row.episode_id)).collect();
             sqlx::query("DELETE FROM episode_legs WHERE episode_id = ANY($1)")
                 .bind(ids)
                 .execute(&mut *tx)
