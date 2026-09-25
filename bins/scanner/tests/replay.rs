@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use scanner::capture::{
     CaptureMsg, Ctl, DiskGuard, Line, UniverseRecord, Writer, civil, expired_hours, hour_path,
-    over_budget_hours,
+    over_budget_hours, stale_universe_files, universe_file_name, universe_path,
 };
 use scanner::engine::{EngineCtx, Out};
 use scanner::replay::replay_dir;
@@ -124,16 +124,19 @@ fn replay_reproduces_episodes_and_censoring_byte_for_byte() {
     let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
     let mut w = Writer::new(dir.clone());
     let t0 = 1_790_121_600_000_i64;
+    let ufile = universe_file_name(u.taken_ms, 1);
     let msgs = vec![
         CaptureMsg::Universe(Box::new(UniverseRecord {
             universe: u.clone(),
             conn_of,
+            file: ufile.clone(),
         })),
         line(
             t0,
             None,
             Some(Ctl::Universe {
                 taken_ms: u.taken_ms,
+                file: ufile.clone(),
             }),
         ),
         line(
@@ -204,7 +207,7 @@ fn capture_budget_deletes_the_oldest_hours_but_never_the_open_one() {
         dir.join("2026-09-23").join("universe-1.json"),
         vec![0u8; 1000],
     )
-    .unwrap(); // not an hour file
+    .unwrap(); // an old-style name (no seq/.zst): matches neither an hour file nor a universe record
     // 400 bytes of hour files, budget 250: delete the two oldest
     assert_eq!(
         over_budget_hours(&dir, 250, None),
@@ -216,5 +219,49 @@ fn capture_budget_deletes_the_oldest_hours_but_never_the_open_one() {
         vec![paths[1].clone(), paths[2].clone()]
     );
     assert!(over_budget_hours(&dir, 1_000, None).is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_universe_record_counts_toward_the_budget_but_is_never_returned_by_it() {
+    let dir = tmp("budget-universe");
+    let t = 1_790_121_600_000_i64;
+    let hour = hour_path(&dir, t);
+    std::fs::create_dir_all(hour.parent().unwrap()).unwrap();
+    std::fs::write(&hour, vec![0u8; 100]).unwrap();
+    // 300 bytes of universe records, matching the real naming: not returned for deletion here,
+    // but counted, so the (otherwise under-budget) hour file above is now evicted too.
+    let up = universe_path(&dir, t, &universe_file_name(t, 1));
+    std::fs::create_dir_all(up.parent().unwrap()).unwrap();
+    std::fs::write(&up, vec![0u8; 300]).unwrap();
+    assert!(
+        over_budget_hours(&dir, 1_000, None).is_empty(),
+        "under budget without the universe file"
+    );
+    assert_eq!(
+        over_budget_hours(&dir, 350, None),
+        vec![hour],
+        "the universe bytes push the total over budget, but only the hour file is evicted"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn stale_universe_files_are_deleted_once_older_than_every_remaining_hour_file() {
+    let dir = tmp("stale-universe");
+    let t = 1_790_121_600_000_i64;
+    // no hour files at all yet: nothing to compare against, nothing deleted
+    let old = universe_path(&dir, t, &universe_file_name(t, 1));
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, vec![0u8; 10]).unwrap();
+    assert!(stale_universe_files(&dir).is_empty());
+
+    let hour = hour_path(&dir, t + 3_600_000); // one hour later
+    std::fs::create_dir_all(hour.parent().unwrap()).unwrap();
+    std::fs::write(&hour, vec![0u8; 10]).unwrap();
+    let fresh = universe_path(&dir, t + 3_600_000, &universe_file_name(t + 3_600_000, 2));
+    std::fs::write(&fresh, vec![0u8; 10]).unwrap();
+    // `old` predates the oldest (only) hour file; `fresh` does not
+    assert_eq!(stale_universe_files(&dir), vec![old]);
     std::fs::remove_dir_all(&dir).ok();
 }

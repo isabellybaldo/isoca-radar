@@ -4,7 +4,10 @@
 //! is quarantined row by row so one poison row can't stall every later flush. Above `max_rows`, the
 //! oldest health, then integrity, then observation rows are dropped and counted (episodes never are,
 //! except a single episode row Postgres itself rejects).
+use crate::metrics::Metrics;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use store::{Batch, EpisodeWrite, HealthRow, IntegrityRow, ObservationRow, Store};
 use tokio::sync::{mpsc, oneshot};
@@ -115,8 +118,10 @@ pub async fn run_writer(
     mut rx: mpsc::Receiver<WriterMsg>,
     flush_ms: u64,
     max_rows: usize,
+    metrics: Arc<Metrics>,
 ) {
     let mut pending = Pending::new(max_rows);
+    let mut last_dropped: u64 = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(flush_ms.max(10)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut fails: u32 = 0;
@@ -145,6 +150,14 @@ pub async fn run_writer(
                     retry_at = tokio::time::Instant::now() + backoff;
                 }
             }
+        }
+        // `pending.dropped` is a running total (cap evictions + quarantine failures): forward
+        // only the delta since the last time round, so a restarted count is never double-counted.
+        if pending.dropped > last_dropped {
+            metrics
+                .writer_drops
+                .fetch_add(pending.dropped - last_dropped, Ordering::Relaxed);
+            last_dropped = pending.dropped;
         }
     }
 }

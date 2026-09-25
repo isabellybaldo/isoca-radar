@@ -1,8 +1,10 @@
 //! Raw capture (spec §7): <dir>/YYYY-MM-DD/HH.jsonl.zst, one JSON line per engine input:
 //! frames {recv_ts_us, shard, raw} and control lines {recv_ts_us, shard, ctl} (down, universe,
 //! rest_snapshot, suspect, shutdown), so replay reproduces the live engine exactly. Universe
-//! records live next to them as universe-<taken_ms>.json. Capture never blocks the scanner: it
-//! pauses on low disk (hysteresis) and deletes hour files older than the retention window.
+//! records live next to them, zstd-compressed, as universe-<taken_ms>-<seq>.json.zst (`<seq>` is
+//! a per-run counter so a warm start reusing `taken_ms` can never overwrite an earlier record).
+//! Capture never blocks the scanner: it pauses on low disk (hysteresis) and deletes hour files
+//! older than the retention window, and universe files older than the oldest remaining hour file.
 use crate::config::CaptureCfg;
 use crate::metrics::Metrics;
 use crate::universe::{ConnMap, Universe};
@@ -31,6 +33,8 @@ pub enum Ctl {
     Down,
     Universe {
         taken_ms: i64,
+        /// The exact universe record file name (no directory), e.g. `universe-<taken_ms>-<seq>.json.zst`.
+        file: String,
     },
     RestSnapshot {
         token: String,
@@ -49,6 +53,8 @@ pub enum Ctl {
 pub struct UniverseRecord {
     pub universe: Universe,
     pub conn_of: ConnMap,
+    /// The exact file name this record is (or will be) written as; matches `Ctl::Universe.file`.
+    pub file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,8 +90,21 @@ pub fn hour_path(dir: &Path, ms: i64) -> PathBuf {
     day_dir(dir, ms).join(format!("{h:02}.jsonl.zst"))
 }
 
-pub fn universe_path(dir: &Path, taken_ms: i64) -> PathBuf {
-    day_dir(dir, taken_ms).join(format!("universe-{taken_ms}.json"))
+/// `<dir>/<day>/<file>`, where `file` is the exact name from `Ctl::Universe`/`UniverseRecord`
+/// (e.g. `universe-<taken_ms>-<seq>.json.zst`); the day is derived from `taken_ms` alone.
+pub fn universe_path(dir: &Path, taken_ms: i64, file: &str) -> PathBuf {
+    day_dir(dir, taken_ms).join(file)
+}
+
+pub fn universe_file_name(taken_ms: i64, seq: u64) -> String {
+    format!("universe-{taken_ms}-{seq}.json.zst")
+}
+
+/// Parse `<taken_ms>` out of a `universe-<taken_ms>-<seq>.json.zst` file name.
+fn universe_taken_ms(name: &str) -> Option<i64> {
+    let rest = name.strip_prefix("universe-")?.strip_suffix(".json.zst")?;
+    let (taken, _seq) = rest.rsplit_once('-')?;
+    taken.parse().ok()
 }
 
 pub fn book_ctl(token: &str, book: &Book) -> Ctl {
@@ -122,24 +141,36 @@ pub fn ctl_book(
 pub struct Writer {
     dir: PathBuf,
     cur: Option<(PathBuf, zstd::stream::AutoFinishEncoder<'static, File>)>,
+    /// Running maximum of every line's ms-truncated timestamp seen so far: the hour file to
+    /// write into is chosen from THIS, never from a single line's own ts, so a control line
+    /// captured slightly out of order near an hour boundary can never file into an EARLIER hour
+    /// than one already open.
+    last_ms: i64,
 }
 
 impl Writer {
     pub fn new(dir: PathBuf) -> Writer {
-        Writer { dir, cur: None }
+        Writer {
+            dir,
+            cur: None,
+            last_ms: i64::MIN,
+        }
     }
 
     pub fn write(&mut self, msg: &CaptureMsg) -> std::io::Result<()> {
         match msg {
             CaptureMsg::Universe(rec) => {
-                let p = universe_path(&self.dir, rec.universe.taken_ms);
+                let p = universe_path(&self.dir, rec.universe.taken_ms, &rec.file);
                 if let Some(parent) = p.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&p, serde_json::to_vec(rec.as_ref())?)
+                let mut enc = zstd::Encoder::new(Vec::new(), 3)?;
+                enc.write_all(&serde_json::to_vec(rec.as_ref())?)?;
+                std::fs::write(&p, enc.finish()?)
             }
             CaptureMsg::Line(line) => {
-                let path = hour_path(&self.dir, line.recv_ts_us.div_euclid(1000));
+                self.last_ms = self.last_ms.max(line.recv_ts_us.div_euclid(1000));
+                let path = hour_path(&self.dir, self.last_ms);
                 if self.cur.as_ref().map(|(p, _)| p != &path).unwrap_or(true) {
                     self.cur = None; // finishes the previous hour's zstd frame
                     if let Some(parent) = path.parent() {
@@ -243,9 +274,12 @@ pub fn expired_hours(dir: &Path, now_ms: i64, retention_hours: i64) -> Vec<PathB
 }
 
 /// Oldest hour files to delete so the capture directory fits `max_bytes` (chronological by
-/// name). `keep` (the file being written) is never returned.
+/// name). `keep` (the file being written) is never returned. Universe record bytes count toward
+/// the budget total (so a large backlog of them evicts hour files sooner), but universe files
+/// themselves are never returned here — they're evicted separately by `stale_universe_files`.
 pub fn over_budget_hours(dir: &Path, max_bytes: u64, keep: Option<&Path>) -> Vec<PathBuf> {
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let mut universe_bytes: u64 = 0;
     let Ok(days) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -259,11 +293,13 @@ pub fn over_budget_hours(dir: &Path, max_bytes: u64, keep: Option<&Path>) -> Vec
             if hour_start_ms(&day_name, &name).is_some() {
                 let size = f.metadata().map(|m| m.len()).unwrap_or(0);
                 files.push((f.path(), size));
+            } else if universe_taken_ms(&name).is_some() {
+                universe_bytes += f.metadata().map(|m| m.len()).unwrap_or(0);
             }
         }
     }
     files.sort();
-    let mut total: u64 = files.iter().map(|(_, s)| *s).sum();
+    let mut total: u64 = files.iter().map(|(_, s)| *s).sum::<u64>() + universe_bytes;
     let mut out = Vec::new();
     for (p, size) in files {
         if total <= max_bytes {
@@ -275,6 +311,39 @@ pub fn over_budget_hours(dir: &Path, max_bytes: u64, keep: Option<&Path>) -> Vec
         total = total.saturating_sub(size);
         out.push(p);
     }
+    out
+}
+
+/// Universe record files older than the oldest hour file still on disk. Once the retention/
+/// budget housekeeping has decided which hour files survive, any universe record whose
+/// `taken_ms` predates all of them documents a universe no replay can reach anymore.
+/// `None` (no hour files at all) deletes nothing: there is nothing yet to be "older than".
+pub fn stale_universe_files(dir: &Path) -> Vec<PathBuf> {
+    let mut hour_starts: Vec<i64> = Vec::new();
+    let mut universes: Vec<(PathBuf, i64)> = Vec::new();
+    let Ok(days) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for day in days.flatten() {
+        let day_name = day.file_name().to_string_lossy().to_string();
+        let Ok(entries) = std::fs::read_dir(day.path()) else {
+            continue;
+        };
+        for f in entries.flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            if let Some(start) = hour_start_ms(&day_name, &name) {
+                hour_starts.push(start);
+            } else if let Some(taken_ms) = universe_taken_ms(&name) {
+                universes.push((f.path(), taken_ms));
+            }
+        }
+    }
+    let Some(oldest_hour) = hour_starts.into_iter().min() else {
+        return Vec::new();
+    };
+    universes.retain(|(_, taken_ms)| *taken_ms < oldest_hour);
+    let mut out: Vec<PathBuf> = universes.into_iter().map(|(p, _)| p).collect();
+    out.sort();
     out
 }
 
@@ -301,11 +370,20 @@ pub fn spawn(
                     metrics.capture_paused.store(paused, Ordering::Relaxed);
                 }
                 for p in expired_hours(&dir, now, cfg.retention_hours) {
-                    let _ = std::fs::remove_file(p);
+                    if std::fs::remove_file(p).is_ok() {
+                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 let budget = cfg.max_capture_gb.saturating_mul(1_000_000_000);
                 for p in over_budget_hours(&dir, budget, writer.current_path()) {
-                    let _ = std::fs::remove_file(p);
+                    if std::fs::remove_file(p).is_ok() {
+                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                for p in stale_universe_files(&dir) {
+                    if std::fs::remove_file(p).is_ok() {
+                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             if metrics.capture_paused.load(Ordering::Relaxed) {

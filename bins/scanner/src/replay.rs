@@ -1,10 +1,10 @@
 //! Replay a capture directory through the engine (spec §8.3). Same engine, same inputs, same outputs.
-use crate::capture::{Ctl, Line, UniverseRecord, ctl_book};
+use crate::capture::{Ctl, Line, UniverseRecord, ctl_book, universe_path};
 use crate::engine::{Engine, EngineCtx, Out};
 use anyhow::Context;
 use pm_api::ws::parse_frame;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,11 +15,11 @@ pub struct ReplayOut {
     pub parse_errors: u64,
 }
 
-fn walk(dir: &Path, hours: &mut Vec<PathBuf>, universes: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+fn walk(dir: &Path, hours: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let p = entry?.path();
         if p.is_dir() {
-            walk(&p, hours, universes)?;
+            walk(&p, hours)?;
         } else {
             let name = p
                 .file_name()
@@ -27,24 +27,29 @@ fn walk(dir: &Path, hours: &mut Vec<PathBuf>, universes: &mut Vec<PathBuf>) -> a
                 .unwrap_or_default();
             if name.ends_with(".jsonl.zst") {
                 hours.push(p);
-            } else if name.starts_with("universe-") && name.ends_with(".json") {
-                universes.push(p);
             }
         }
     }
     Ok(())
 }
 
+/// Load and decompress the universe record `Ctl::Universe` names, at its exact path (F3: the
+/// ctl line carries the file name, so replay never has to search for it by `taken_ms`).
+fn load_universe(dir: &Path, taken_ms: i64, file: &str) -> anyhow::Result<UniverseRecord> {
+    let p = universe_path(dir, taken_ms, file);
+    let bytes = std::fs::read(&p).with_context(|| format!("read {}", p.display()))?;
+    let mut dec = zstd::Decoder::new(bytes.as_slice())
+        .with_context(|| format!("decompress {}", p.display()))?;
+    let mut json = Vec::new();
+    dec.read_to_end(&mut json)
+        .with_context(|| format!("decompress {}", p.display()))?;
+    serde_json::from_slice(&json).with_context(|| format!("parse {}", p.display()))
+}
+
 pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
-    let (mut hours, mut ufiles) = (Vec::new(), Vec::new());
-    walk(dir, &mut hours, &mut ufiles)?;
+    let mut hours = Vec::new();
+    walk(dir, &mut hours)?;
     hours.sort();
-    let mut universes: HashMap<i64, UniverseRecord> = HashMap::new();
-    for f in ufiles {
-        let rec: UniverseRecord = serde_json::from_slice(&std::fs::read(&f)?)
-            .with_context(|| format!("parse {}", f.display()))?;
-        universes.insert(rec.universe.taken_ms, rec);
-    }
     let mut engine = Engine::new(ctx);
     let mut out = ReplayOut {
         outs: Vec::new(),
@@ -77,17 +82,12 @@ pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
             match line.ctl {
                 None => {}
                 Some(Ctl::Down) => out.outs.extend(engine.disconnect(line.shard, ms)),
-                Some(Ctl::Universe { taken_ms }) => {
-                    let rec = universes
-                        .get(&taken_ms)
-                        .with_context(|| format!("missing universe-{taken_ms}.json"))?;
+                Some(Ctl::Universe { taken_ms, file }) => {
+                    let rec = load_universe(dir, taken_ms, &file)?;
                     let conn: HashMap<String, usize> =
                         rec.conn_of.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    out.outs.extend(engine.apply_universe(
-                        Arc::new(rec.universe.clone()),
-                        &conn,
-                        ms,
-                    ));
+                    out.outs
+                        .extend(engine.apply_universe(Arc::new(rec.universe), &conn, ms));
                 }
                 Some(Ctl::RestSnapshot {
                     token,

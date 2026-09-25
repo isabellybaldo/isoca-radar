@@ -297,6 +297,7 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         writer_rx,
         cfg.store.flush_ms,
         cfg.store.max_pending_rows,
+        metrics.clone(),
     ));
     let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
     let clob = Arc::new(ClobClient::new()?);
@@ -338,6 +339,31 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                     .is_err()
                 {
                     return;
+                }
+                // Drop/delete counters otherwise never reach Postgres (F2): drain each to 0 and
+                // surface a non-zero count as an integrity row.
+                let now = now_ms();
+                for (kind, counter) in [
+                    ("capture_drop", &metrics.capture_drops),
+                    ("writer_drop", &metrics.writer_drops),
+                    ("capture_budget_delete", &metrics.capture_deletes),
+                ] {
+                    let n = counter.swap(0, Ordering::Relaxed);
+                    if n == 0 {
+                        continue;
+                    }
+                    let row = IntegrityRow {
+                        run_id,
+                        ts_ms: now,
+                        kind: kind.to_string(),
+                        shard: None,
+                        token: None,
+                        event_id: None,
+                        detail: Some(n.to_string()),
+                    };
+                    if writer_tx.send(WriterMsg::Integrity(row)).await.is_err() {
+                        return;
+                    }
                 }
             }
         })
@@ -433,14 +459,20 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         suspect_window_ms: cfg.engine.suspect_window_ms,
     };
     let mut engine = Engine::new(engine_ctx(cfg, cfg_hash, run_id, "live"));
-    let apply =
+    // Per-run counter (F3): the file name is always unique even if a warm start reuses an
+    // earlier `taken_ms`, so a later universe record can never overwrite an earlier one.
+    let mut universe_seq: u64 = 0;
+    let mut apply =
         |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| {
+            universe_seq += 1;
+            let file = capture::universe_file_name(u.taken_ms, universe_seq);
             let rec = UniverseRecord {
                 universe: (*u).clone(),
                 conn_of: conn_of
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect::<ConnMap>(),
+                file: file.clone(),
             };
             if io
                 .capture
@@ -454,6 +486,7 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                 0,
                 Ctl::Universe {
                     taken_ms: u.taken_ms,
+                    file,
                 },
                 t,
             );

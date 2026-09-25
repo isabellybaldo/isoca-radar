@@ -11,6 +11,11 @@ pub struct Metrics {
     pub drops: AtomicU64,
     pub reconnects: AtomicU64,
     pub capture_drops: AtomicU64,
+    /// Rows the writer dropped: over-cap evictions plus quarantine failures (spec §10, F2).
+    pub writer_drops: AtomicU64,
+    /// Hour/universe files the capture thread deleted (retention, budget, or stale universe
+    /// housekeeping — spec §10, F2).
+    pub capture_deletes: AtomicU64,
     pub parked: AtomicU64,
     pub tokens: AtomicU64,
     pub shards: AtomicU64,
