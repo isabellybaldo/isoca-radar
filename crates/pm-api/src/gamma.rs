@@ -1,11 +1,14 @@
 //! Gamma (market discovery): wire types and normalization (spec §3, §7).
 use crate::ApiError;
+use crate::routes::{GAMMA_BASE, GAMMA_EVENTS_KEYSET};
 use crate::wire::{decimal, string_array, string_or_number};
 use arb_core::detect::LegStatus;
 use arb_core::fee::FeeSchedule;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
+use std::future::Future;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,5 +159,78 @@ pub fn leg_status(m: &GammaMarket, augmented: bool) -> LegStatus {
         LegStatus::Placeholder
     } else {
         LegStatus::Halted
+    }
+}
+
+/// Page through Gamma's keyset endpoint. Stops when no cursor is returned.
+/// A page that brings no new ids while a cursor is still offered, or hitting `max_pages`,
+/// is an error: a silently truncated universe is worse than a failed refresh (spec §7).
+pub async fn fetch_all<F, Fut>(mut fetch: F, max_pages: usize) -> Result<Vec<GammaEvent>, ApiError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<KeysetPage, ApiError>>,
+{
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for pages in 1..=max_pages {
+        let page = fetch(cursor.clone()).await?;
+        let mut new_ids = 0usize;
+        for e in page.events {
+            if seen.insert(e.id.clone()) {
+                new_ids += 1;
+                out.push(e);
+            }
+        }
+        match page.next_cursor {
+            Some(c) if !c.is_empty() => {
+                if new_ids == 0 {
+                    return Err(ApiError::Stuck(pages));
+                }
+                cursor = Some(c);
+            }
+            _ => return Ok(out),
+        }
+    }
+    Err(ApiError::Stuck(max_pages))
+}
+
+pub struct GammaClient {
+    http: reqwest::Client,
+    base: String,
+}
+
+impl GammaClient {
+    pub fn new(http: reqwest::Client) -> Self {
+        Self {
+            http,
+            base: GAMMA_BASE.to_string(),
+        }
+    }
+
+    /// One page of active, open events (≤ 100). The cursor parameter is exactly `after_cursor`.
+    pub async fn page(&self, cursor: Option<String>) -> Result<KeysetPage, ApiError> {
+        let mut query: Vec<(&str, String)> = vec![
+            ("closed", "false".to_string()),
+            ("active", "true".to_string()),
+            ("limit", "100".to_string()),
+        ];
+        if let Some(c) = cursor {
+            query.push(("after_cursor", c));
+        }
+        let text = self
+            .http
+            .get(format!("{}{}", self.base, GAMMA_EVENTS_KEYSET))
+            .query(&query)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        parse_page(&text)
+    }
+
+    pub async fn all_active_events(&self) -> Result<Vec<GammaEvent>, ApiError> {
+        fetch_all(|c| self.page(c), 1_000).await
     }
 }

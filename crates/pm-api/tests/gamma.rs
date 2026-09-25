@@ -110,3 +110,84 @@ fn malformed_token_ids_is_an_error_not_a_panic() {
     m.clob_token_ids = Some(serde_json::json!("not json"));
     assert!(token_ids(&m).is_err());
 }
+
+fn ev(id: &str) -> String {
+    format!(r#"{{"id": "{id}", "markets": []}}"#)
+}
+fn page_json(ids: &[&str], cursor: Option<&str>) -> String {
+    let events: Vec<String> = ids.iter().map(|i| ev(i)).collect();
+    let cur = cursor.map_or("null".to_string(), |c| format!("\"{c}\""));
+    format!(
+        r#"{{"events": [{}], "next_cursor": {cur}}}"#,
+        events.join(",")
+    )
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
+#[test]
+fn pager_follows_after_cursor_until_exhausted() {
+    let pages = [
+        page_json(&["1", "2"], Some("c1")),
+        page_json(&["3"], Some("c2")),
+        page_json(&["4"], None),
+    ];
+    let mut seen_cursors = Vec::new();
+    let out = block_on(fetch_all(
+        |c| {
+            let i = match c.as_deref() {
+                None => 0,
+                Some("c1") => 1,
+                _ => 2,
+            };
+            seen_cursors.push(c.clone());
+            let text = pages[i].clone();
+            async move { parse_page(&text) }
+        },
+        100,
+    ))
+    .unwrap();
+    let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["1", "2", "3", "4"]);
+    assert_eq!(
+        seen_cursors,
+        vec![None, Some("c1".to_string()), Some("c2".to_string())]
+    );
+}
+
+#[test]
+fn pager_errors_when_the_cursor_is_ignored() {
+    // A server that ignores the cursor returns page 1 forever (polybots: 104,800 rows, 100 unique ids).
+    let text = page_json(&["1", "2"], Some("c1"));
+    let r = block_on(fetch_all(
+        |_| {
+            let t = text.clone();
+            async move { parse_page(&t) }
+        },
+        100,
+    ));
+    assert!(matches!(r, Err(pm_api::ApiError::Stuck(2))));
+}
+
+#[test]
+fn pager_errors_at_max_pages() {
+    let mut n = 0u32;
+    let r = block_on(fetch_all(
+        |_| {
+            n += 1;
+            let t = page_json(&[&n.to_string()], Some("c"));
+            async move { parse_page(&t) }
+        },
+        3,
+    ));
+    assert!(
+        matches!(r, Err(pm_api::ApiError::Stuck(3))),
+        "max_pages reached is an error, not a silent stop"
+    );
+}
