@@ -842,6 +842,36 @@ git commit -m "scanner: ignored engine bench (gate off vs on); record zstd level
 
 ---
 
+### Task 4: engine: no O(pending) scans per frame (added from the Task 3 bench)
+
+**Why (bench evidence, Task 3, release build).** The gate cut detector calls to 6.6%, but engine time went only from 372 to 365 µs/frame (2,000 groups, 100k frames), above the VPS's ~232 µs/frame budget. So the detectors were not the main per-frame cost. What remains is two full scans of `pending_tops` (one deferred top-check per token with an unresolved update, i.e. tens of thousands of entries across a full universe):
+- **every frame** in `on_frame`: `self.pending_tops.iter().filter(|(_, p)| p.conn == conn && p.ts + 1_000 < ts)` to find stale entries, which is O(pending) per frame;
+- **`pending_in_group(g, ts)`**: `pending_tops.iter().any(|(t, p)| p.ts <= ts && token_ix[t].0 == g)`, which is O(pending) per call, called from `close_episode` and from `prune_held` for every held episode (O(held × pending)).
+
+**Files:**
+- Modify: `bins/scanner/src/engine.rs` (the `Engine` struct, `Engine::new`, every site that inserts or removes from `pending_tops`, the stale sweep in `on_frame`, `pending_in_group`, `disconnect`, `close_all`, `apply_universe` where group indices are remapped)
+- Test: `bins/scanner/tests/engine.rs` (append), `bins/scanner/tests/bench_engine.rs` (re-run only)
+
+**Interfaces:** no public API change. `pending_tops` stays the source of truth (BTreeMap keyed by token). Two private secondary indexes are added and kept consistent with it at EVERY mutation.
+
+**Requirements.**
+1. **Stale-sweep index:** `pending_by_conn: HashMap<usize, BTreeSet<(i64, String)>>` (conn → set of (ts, token)), or equivalent. The per-frame sweep collects the tokens whose `ts + 1_000 < frame ts` for this conn with a range query: O(log n + due), not O(pending).
+   - **Output order must be IDENTICAL to today:** today's sweep resolves due tokens in `pending_tops`' key order (token-sorted BTreeMap). So collect the due tokens from the index, **sort them by token**, then resolve. Replay stays byte-identical, and every existing test passes unchanged.
+2. **Group index:** `pending_by_group: Vec<BTreeMap<i64, u32>>` (group → multiset of pending ts), or equivalent, so `pending_in_group(g, ts)` is `min_ts(g) <= ts`, i.e. O(log n). Canary tokens (not in `token_ix`) are in no group.
+3. **Consistency at every mutation site:** insert/replace in the delta path (a same-token replace must remove the old (ts, token) entry first), remove on snapshot, `resolve_pending`, `rest_snapshot` (both the group-leg and canary paths), `disconnect` (`retain(|_, p| p.conn != conn)` must also drop that conn's index entries), `close_all` (clear all), and `apply_universe`. Group indices change on a refresh, so rebuild `pending_by_group` from `pending_tops` there, once per refresh, which is fine. Tokens removed from the universe must disappear from all three structures.
+   - Add a `#[cfg(test)]`-only (or `debug_assertions`-only, if cheap enough to leave on) private `fn check_pending_indexes(&self)` that asserts both indexes equal what a full scan of `pending_tops` would give.
+   - Call it from the new tests after each operation. Do NOT call it on every frame in normal debug runs, so the existing equivalence test doesn't become O(n²).
+4. **Tests (append to tests/engine.rs):**
+   - A randomized sequence (a deterministic LCG, like Task 2's script) of deltas across several conns and tokens, snapshots, REST snapshots, disconnects, universe refreshes and close_all. After each step call a test hook that runs `check_pending_indexes`; expose it as `#[doc(hidden)] pub fn debug_check_pending_indexes(&self)` behind `#[cfg(any(test, feature = "..."))]` if integration tests need it. The simplest option is a `pub fn` whose doc says it's for tests, and that's acceptable.
+   - Every existing test in tests/{engine,engine_checks,replay}.rs passes UNCHANGED, which proves output order and content are unchanged.
+5. **Bench:** re-run the debug bench (`BENCH_GROUPS=500 BENCH_FRAMES=20000 cargo test -p scanner --test bench_engine -- --ignored --nocapture`) and put the numbers in the report.
+   - **Only if the debug ratio shows a clear improvement,** run the owner-allowed release bench once: `df -h . && cargo test --release -p scanner --test bench_engine -- --ignored --nocapture && du -sh target/release && cargo clean --release`. Report µs/frame with the gate on, before (365) and after.
+   - If the per-frame time is still well above 232 µs, profile with a simple split of timers inside the bench (not in engine.rs) to name the next hotspot in the report. Candidates: `parse_frame` is NOT in the engine bench, `Self::key` format!, the tracker's `seen` insert, `rates()` map. Do not optimize further in this task.
+
+- [ ] Steps: write the index-consistency test first (RED: the hook doesn't exist), implement the indexes and the hook (GREEN), run the full `cargo test -p scanner` (all existing tests unchanged), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`, then the benches. Commit: `git commit -m "scanner/engine: index pending top-checks by conn and group (no O(pending) scans per frame)"` (no trailer).
+
+---
+
 ## Rulings
 
 1. **The gate is the detectors' own gross threshold.** YES: every live leg has an ask and ΣA < 1. NO: ≥ 2 live legs with a bid and ΣB > 1. Spec §5.4 says "fee-adjusted". But D2a/D2b deliberately return gross-positive signals even when fees make them net-negative (`Signal.gross`, test `m3_…`), so a fee-adjusted gate would be exact only for the engine's net filter, not for the detector contract. A future consumer of gross signals (paper P3-naive, gross-only episodes) would silently lose states. The gross gate is exact in both directions (Task 1 proof and proptest), and the CPU difference is nil: nearly every state fails both thresholds.
