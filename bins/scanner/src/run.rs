@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use store::{Batch, IntegrityRow, NewRun, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -200,6 +200,98 @@ pub async fn run(cfg: Config, cfg_hash: String) -> anyhow::Result<()> {
     };
     let _ = tokio::time::timeout(END_RUN_TIMEOUT, store.end_run(run_id, now_ms(), &reason)).await;
     result
+}
+
+/// Bounded per-minute samples for the frame-timing log (S3a-2 final review item 1). Keeps at
+/// most `CAP` values; once full, the stride doubles so later samples are thinned instead of
+/// growing the vector, keeping memory bounded over a whole busy minute.
+struct SampleBuf {
+    buf: Vec<u32>,
+    stride: u32,
+    skip: u32,
+}
+
+impl SampleBuf {
+    const CAP: usize = 200_000;
+
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            stride: 1,
+            skip: 0,
+        }
+    }
+
+    fn push(&mut self, v: u32) {
+        if self.skip == 0 {
+            self.buf.push(v);
+            if self.buf.len() >= Self::CAP {
+                self.stride *= 2;
+            }
+        }
+        self.skip = (self.skip + 1) % self.stride;
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.stride = 1;
+        self.skip = 0;
+    }
+}
+
+/// p50/p99/max of `xs` (µs), by integer index after a sort; no floats. Empty input → all zero.
+/// A pure function over a slice, per the S3a-2 final review brief (item 1).
+fn percentiles_us(xs: &[u32]) -> (u32, u32, u32) {
+    if xs.is_empty() {
+        return (0, 0, 0);
+    }
+    let mut v = xs.to_vec();
+    v.sort_unstable();
+    let at = |p: usize| v[(v.len() - 1) * p / 100];
+    (at(50), at(99), v[v.len() - 1])
+}
+
+/// Per-frame `parse_frame`/`engine.on_frame` timing (`Instant`, live loop only; the engine stays
+/// pure). Accumulates in integer µs, and once a minute has passed since the last log, prints one
+/// summary line and resets.
+struct FrameTiming {
+    parse: SampleBuf,
+    on_frame: SampleBuf,
+    frames: u64,
+    last_log_ms: i64,
+}
+
+impl FrameTiming {
+    fn new(now: i64) -> Self {
+        Self {
+            parse: SampleBuf::new(),
+            on_frame: SampleBuf::new(),
+            frames: 0,
+            last_log_ms: now,
+        }
+    }
+
+    /// Record one frame's parse time and, if parsing succeeded, its `on_frame` time.
+    fn record(&mut self, parse_us: u32, on_frame_us: Option<u32>, now: i64) {
+        self.parse.push(parse_us);
+        if let Some(v) = on_frame_us {
+            self.on_frame.push(v);
+        }
+        self.frames += 1;
+        if now - self.last_log_ms < 60_000 {
+            return;
+        }
+        let (p50p, p99p, maxp) = percentiles_us(&self.parse.buf);
+        let (p50o, p99o, maxo) = percentiles_us(&self.on_frame.buf);
+        eprintln!(
+            "engine: frames={} parse_us p50={p50p} p99={p99p} max={maxp} on_frame_us p50={p50o} p99={p99o} max={maxo}",
+            self.frames
+        );
+        self.parse.clear();
+        self.on_frame.clear();
+        self.frames = 0;
+        self.last_log_ms = now;
+    }
 }
 
 struct Io {
@@ -595,6 +687,7 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
+    let mut timing = FrameTiming::new(now_ms());
     let result: anyhow::Result<()> = loop {
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
@@ -605,17 +698,23 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                         let ms = f.recv_us.div_euclid(1000);
                         metrics.msgs.fetch_add(1, Ordering::Relaxed);
                         metrics.bytes.fetch_add(f.text.len() as u64, Ordering::Relaxed);
-                        let outs = match parse_frame(&f.text) {
+                        let t0 = Instant::now();
+                        let parsed = parse_frame(&f.text);
+                        let parse_us = u32::try_from(t0.elapsed().as_micros()).unwrap_or(u32::MAX);
+                        let (outs, on_frame_us) = match parsed {
                             Ok(evs) => {
+                                let t1 = Instant::now();
                                 let outs = engine.on_frame(f.conn, ms, &evs);
+                                let on_frame_us = u32::try_from(t1.elapsed().as_micros()).unwrap_or(u32::MAX);
                                 engine.alive(f.conn, ms);
-                                outs
+                                (outs, Some(on_frame_us))
                             }
-                            Err(e) => vec![Out::Integrity(IntegrityRow {
+                            Err(e) => (vec![Out::Integrity(IntegrityRow {
                                 run_id, ts_ms: ms, kind: "parse_error".into(), shard: i32::try_from(f.conn).ok(),
                                 token: None, event_id: None, detail: Some(e.to_string()),
-                            })],
+                            })], None),
                         };
+                        timing.record(parse_us, on_frame_us, now_ms());
                         io.capture(Line { recv_ts_us: f.recv_us, shard: f.conn, raw: Some(f.text), ctl: None });
                         if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
                     }
@@ -827,6 +926,18 @@ pub async fn replay_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentiles_us_sorts_then_indexes_with_integer_math() {
+        assert_eq!(percentiles_us(&[]), (0, 0, 0));
+        assert_eq!(percentiles_us(&[5]), (5, 5, 5));
+        let xs: Vec<u32> = (1..=100).collect();
+        assert_eq!(percentiles_us(&xs), (50, 99, 100));
+        // unsorted input: same result
+        let mut shuffled = xs;
+        shuffled.reverse();
+        assert_eq!(percentiles_us(&shuffled), (50, 99, 100));
+    }
 
     #[test]
     fn breaker_trips_at_max_starts() {

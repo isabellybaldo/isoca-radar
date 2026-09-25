@@ -190,7 +190,7 @@ walk_basket(legs, payoff P, fee schedules, limits):
   return {Q* = q, Π, Π_gross, cost, fees, per-leg VWAP, levels used, bottleneck leg}
 ```
 
-Complexity is O(total levels touched), with k ≤ 100 legs. It's only run when the running top-of-book sums cross a fee-adjusted threshold (§8.2).
+Complexity is O(total levels touched), with k ≤ 100 legs. It's only run when the running top-of-book sums cross a fee-adjusted threshold (§8.2). Implemented (S3a-2) as the detectors' own GROSS first-segment test (ΣA < 1, ΣB > 1), recomputed per touched group in O(legs). That is exact (gate false ⇒ no signal), whereas a fee-adjusted or O(1) cached version could hide gross-only signals or drift; see plan 2026-09-25-s3a2 rulings 1–2.
 
 ### 5.5 Statistics (exact definitions used by the analyzer and replication)
 

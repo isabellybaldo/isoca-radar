@@ -21,7 +21,7 @@ fn engine_us_per_frame_with_and_without_the_threshold_gate() {
     let groups = env_usize("BENCH_GROUPS", 2_000);
     let n = env_usize("BENCH_FRAMES", 100_000);
     let mut s = Synth::new(groups, 7);
-    let frames = s.script(n);
+    let frames = s.script(n, 0); // 0: the bench's own script never carries a wrong top
     let mut digests: Vec<Vec<u8>> = Vec::new();
     for gate in [false, true] {
         let mut e = synth_engine(&s, gate);

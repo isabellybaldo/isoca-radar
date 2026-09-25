@@ -140,15 +140,23 @@ fn ladder(cs: impl Iterator<Item = i64>) -> Vec<(Price, Shares)> {
         .collect()
 }
 
-fn level(token: &str, ts: i64, side: Side, c: i64, size: Shares) -> MarketEvent {
+fn level(
+    token: &str,
+    ts: i64,
+    side: Side,
+    c: i64,
+    size: Shares,
+    best_bid: Option<Price>,
+    best_ask: Option<Price>,
+) -> MarketEvent {
     MarketEvent::Delta {
         token: token.into(),
         server_ts_ms: ts,
         side,
         price: cents(c),
         size,
-        best_bid: None,
-        best_ask: None,
+        best_bid,
+        best_ask,
     }
 }
 
@@ -238,7 +246,12 @@ impl Synth {
     /// One snapshot frame per event at ts 1 000, then `n` delta frames. Each delta frame moves
     /// 1–3 legs of one event (top ask and top bid: add the new level, remove the old one), all
     /// at one server ts. The ts advances 1–3 ms per frame; recv = ts + 150 (under stale_lag_ms).
-    pub fn script(&mut self, n: usize) -> Vec<SynthFrame> {
+    ///
+    /// `wrong_top_every`: 0 = never; otherwise about 1 in that many deltas carry a deliberately
+    /// WRONG server `best_bid`/`best_ask` (offset from the leg's true new top), so the
+    /// top-mismatch path (trim, repair, throttle, suspect, Resnapshot) runs too. Bench passes 0
+    /// to keep its script's own invariant that no top check ever fires.
+    pub fn script(&mut self, n: usize, wrong_top_every: usize) -> Vec<SynthFrame> {
         let mut out: Vec<SynthFrame> = Vec::with_capacity(self.legs.len() + n);
         for (g, ls) in self.legs.iter().enumerate() {
             let events = ls
@@ -258,12 +271,12 @@ impl Synth {
             });
         }
         for _ in 0..n {
-            out.push(self.next_frame());
+            out.push(self.next_frame(wrong_top_every));
         }
         out
     }
 
-    fn next_frame(&mut self) -> SynthFrame {
+    fn next_frame(&mut self, wrong_top_every: usize) -> SynthFrame {
         self.ts += 1 + i64::try_from(self.rng.below(3)).unwrap();
         let ts = self.ts;
         let g = self.rng.below(self.legs.len());
@@ -277,10 +290,25 @@ impl Synth {
             let gone = Shares::new(Decimal::ZERO).unwrap();
             let leg = &mut self.legs[g][l];
             let (na, nb) = (leg.a0 - 2 + da, leg.b0 - 1 + db);
+            // About 1 in `wrong_top_every` deltas (0 = never) report a server top that is
+            // deliberately WRONG (offset from the leg's true new top on both sides), so the
+            // top-mismatch resolution path runs for both the on and off gate engines.
+            let wrong = wrong_top_every > 0 && self.rng.below(wrong_top_every) == 0;
+            let off = 1 + i64::try_from(self.rng.below(3)).unwrap();
+            // Clamped to the script's own 1..=99 cent range (see `ladder`), so the wrong top is
+            // always a valid `Price`.
+            let (bb, ba) = if wrong {
+                (
+                    Some(cents((nb - off).clamp(1, 99))),
+                    Some(cents((na + off).clamp(1, 99))),
+                )
+            } else {
+                (None, None)
+            };
             for (side, old, new) in [(Side::Ask, leg.ask, na), (Side::Bid, leg.bid, nb)] {
-                events.push(level(&leg.token, ts, side, new, size));
+                events.push(level(&leg.token, ts, side, new, size, bb, ba));
                 if old != new {
-                    events.push(level(&leg.token, ts, side, old, gone));
+                    events.push(level(&leg.token, ts, side, old, gone, bb, ba));
                 }
             }
             leg.ask = na;

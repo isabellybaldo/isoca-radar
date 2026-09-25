@@ -170,7 +170,7 @@ pub fn detect_no_basket(g: &Group) -> Option<Signal> {
     })
 }
 
-/// Spec §5.4/§8.2 threshold for D2a: can `detect_yes_basket(g)` return `Some`? O(live legs),
+/// Spec §5.4/§8.2 threshold for D2a: can `detect_yes_basket(g)` return `Some`? O(legs),
 /// reads only each live leg's top of book, allocates nothing.
 ///
 /// Contract: `false` ⇒ `detect_yes_basket(g)` is `None`, so a caller may skip the depth walk.
@@ -198,7 +198,7 @@ pub fn yes_basket_may_signal(g: &Group) -> bool {
     any_live && sum_ask < Decimal::ONE
 }
 
-/// Spec §5.4/§8.2 threshold for D2b: can `detect_no_basket(g)` return `Some`? O(live legs).
+/// Spec §5.4/§8.2 threshold for D2b: can `detect_no_basket(g)` return `Some`? O(legs).
 ///
 /// Contract: as `yes_basket_may_signal`. Proof: the detector's zero-fee `NestedNo` walk starts
 /// with the k ≥ 2 live legs that have a YES bid, each at its best NO ask 1 − b_i

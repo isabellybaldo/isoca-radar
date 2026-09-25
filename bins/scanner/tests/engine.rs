@@ -1000,7 +1000,9 @@ fn the_threshold_gate_skips_detectors_until_the_top_sums_cross() {
 #[test]
 fn the_threshold_gate_never_changes_a_single_output() {
     let mut s = Synth::new(200, 42);
-    let frames = s.script(20_000);
+    // wrong_top_every = 50: about 1 in 50 synthetic deltas carries a deliberately wrong server
+    // top, so the top-mismatch path (trim, repair, throttle, suspect, Resnapshot) runs too.
+    let frames = s.script(20_000, 50);
     let run = |gate: bool| {
         let mut e = synth_engine(&s, gate);
         let mut outs: Vec<Out> = Vec::new();
@@ -1030,6 +1032,16 @@ fn the_threshold_gate_never_changes_a_single_output() {
     assert!(
         rows.iter().any(|r| r.censor_right),
         "no right-censored close"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.closed_server_ms.is_some() && !r.censor_right),
+        "no normal close"
+    );
+    assert!(
+        on.iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "no top_mismatch row: the wrong-top path never ran"
     );
     assert!(
         calls_on < calls_off / 2,
