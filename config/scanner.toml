@@ -27,7 +27,7 @@ stale_lag_ms = 500              # Phase 0: healthy p99 lag 290 ms at 500/conn
 suspect_window_ms = 60000
 l1_suspect_window_ms = 3600000  # Phase 0: 6/346 NegRisk legs failed the mirror check
 drift_settle_ms = 2000
-channel_capacity = 50000
+channel_capacity = 50000        # S3a-2: leave it. At ~4.3k frames/s this is ~12 s of queue. A bigger buffer only turns drops into lag (soak 2: p99 20–36 s), a smaller one turns lag into drops; the fix is engine throughput
 issue_throttle_ms = 5000         # one top_mismatch/crossed_book row per token per 5 s (VPS soak 2026-09-25: 20k rows/35 min from one book)
 
 [recheck]

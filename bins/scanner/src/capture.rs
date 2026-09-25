@@ -138,6 +138,13 @@ pub fn ctl_book(
     Ok(b)
 }
 
+/// zstd level for hour files and universe records. Ruling S3a-2 (2026-09-25): it stays 3. Phase 0
+/// measured ~123 GB/day raw → ~33 GB/day at level 3 (spikes/probe/RESULTS.md Q7c). That is
+/// ~1.4 MB/s of input on the capture thread, around 1 % of one core at level 3 (hundreds of MB/s).
+/// Level 1 would save a fraction of that 1 % for bigger files, and it would drop the measured basis
+/// behind the retention/disk budget. The CPU pressure is in the engine loop, not here.
+const ZSTD_LEVEL: i32 = 3;
+
 pub struct Writer {
     dir: PathBuf,
     cur: Option<(PathBuf, zstd::stream::AutoFinishEncoder<'static, File>)>,
@@ -164,7 +171,7 @@ impl Writer {
                 if let Some(parent) = p.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let mut enc = zstd::Encoder::new(Vec::new(), 3)?;
+                let mut enc = zstd::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
                 enc.write_all(&serde_json::to_vec(rec.as_ref())?)?;
                 std::fs::write(&p, enc.finish()?)
             }
@@ -178,7 +185,7 @@ impl Writer {
                     }
                     // Appending after a restart adds a new zstd frame; multi-frame files decode fine.
                     let f = OpenOptions::new().create(true).append(true).open(&path)?;
-                    let enc = zstd::Encoder::new(f, 3)?.auto_finish();
+                    let enc = zstd::Encoder::new(f, ZSTD_LEVEL)?.auto_finish();
                     self.cur = Some((path, enc));
                 }
                 if let Some((_, enc)) = self.cur.as_mut() {
