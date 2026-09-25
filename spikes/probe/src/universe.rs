@@ -2,6 +2,7 @@
 use arb_core::detect::LegStatus;
 use pm_api::gamma::{GammaEvent, leg_status, token_ids};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Group {
@@ -75,6 +76,10 @@ impl Universe {
                 .map(|c| vec![c.yes.clone(), c.no.clone()]),
         );
         out
+    }
+
+    pub fn load(path: &Path) -> anyhow::Result<Universe> {
+        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
 }
 

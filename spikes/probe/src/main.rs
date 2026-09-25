@@ -1,5 +1,7 @@
 //! Phase 0 measurement probe (throwaway). Read-only; see spikes/probe/RUNBOOK.md.
 #![forbid(unsafe_code)]
+mod capture;
+mod shards;
 mod universe;
 
 use clap::{Parser, Subcommand};
@@ -19,6 +21,19 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, default_value_t = 100)]
         canary: usize,
+    },
+    /// Capture live frames for N minutes with event-affine shards of ≤ shard_tokens.
+    Capture {
+        #[arg(long)]
+        universe: PathBuf,
+        #[arg(long)]
+        shard_tokens: usize,
+        #[arg(long, default_value_t = 16)]
+        max_conns: usize,
+        #[arg(long, default_value_t = 20)]
+        minutes: u64,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -40,6 +55,16 @@ async fn main() -> anyhow::Result<()> {
                 tokens,
                 out.display()
             );
+        }
+        Cmd::Capture {
+            universe,
+            shard_tokens,
+            max_conns,
+            minutes,
+            out,
+        } => {
+            let u = universe::Universe::load(&universe)?;
+            capture::capture(&u, shard_tokens, max_conns.min(16), minutes, &out).await?;
         }
     }
     Ok(())
