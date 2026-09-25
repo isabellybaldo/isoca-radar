@@ -38,7 +38,11 @@ pub struct RestBudget {
 }
 
 impl RestBudget {
-    /// `reserved` is clamped to `per_sec − 1`: shared work always keeps at least 1/s.
+    /// `reserved` is clamped to `per_sec − 1`, so shared work's own cap (`per_sec − reserved`) is
+    /// never zero by configuration. That is a cap on shared, not a floor: `try_take` shares the
+    /// same 1 s window with `Integrity`, which may take the whole `per_sec` budget when shared is
+    /// idle, leaving shared nothing until the window rolls over (see
+    /// `integrity_may_use_the_whole_budget_when_shared_is_idle`).
     pub fn new(per_sec: usize, reserved: usize) -> RestBudget {
         let per_sec = per_sec.max(1);
         RestBudget {

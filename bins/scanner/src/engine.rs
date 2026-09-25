@@ -168,8 +168,11 @@ pub struct Engine {
     group_last_ts: Vec<i64>,
     /// See `HeldClosed`. Emptied by `prune_held` once no unresolved check can flag them.
     held_closed: Vec<HeldClosed>,
-    /// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time.
-    issue_throttle: HashMap<(&'static str, String), IssueThrottle>,
+    /// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time. Nested by kind
+    /// (only ever a handful of `&'static str` constants) so a lookup by token borrows `&str`
+    /// (`String: Borrow<str>`) instead of allocating one on every call; only a miss allocates,
+    /// to insert the token's own key.
+    issue_throttle: HashMap<&'static str, HashMap<String, IssueThrottle>>,
 }
 
 /// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time.
@@ -572,7 +575,7 @@ impl Engine {
                         .get(token.as_str())
                         .is_some_and(|p| p.ts < ts)
                     {
-                        self.resolve_pending(token, &mut out);
+                        self.resolve_pending(token, recv_ms, &mut out);
                     }
                     let found = self.on_book(token, &mut touched, |b| {
                         let _ = b.apply_delta(side, price, size, ts);
@@ -612,10 +615,10 @@ impl Engine {
             .map(|(k, _)| k.clone())
             .collect();
         for token in due {
-            self.resolve_pending(&token, &mut out);
+            self.resolve_pending(&token, recv_ms, &mut out);
         }
         for token in &frame_tokens {
-            self.check_book(conn, token, ts, None, &mut out);
+            self.check_book(conn, token, ts, recv_ms, None, &mut out);
         }
         out.push(Out::Lag(recv_ms - ts));
         for g in touched {
@@ -648,10 +651,14 @@ impl Engine {
 
     /// Settle one deferred top-check: compare the pending expectation (and the crossed check)
     /// against our book now, stamped with the pending entry's own connection and ts — not the
-    /// caller's — since it may be resolved from a later frame.
-    fn resolve_pending(&mut self, token: &str, out: &mut Vec<Out>) {
+    /// caller's — since it may be resolved from a later frame. `recv_ms` is the RESOLVING frame's
+    /// own receipt time (an engine input, captured in replay): if this resolution repairs a
+    /// phantom and re-evaluates its group, the episode that opens must get this real recv_ms,
+    /// never the event ts (S3a final review: a fabricated recv_ms == ts gave a false
+    /// open_lag_ms of 0 / stale = false).
+    fn resolve_pending(&mut self, token: &str, recv_ms: i64, out: &mut Vec<Out>) {
         if let Some(p) = self.pending_tops.remove(token) {
-            self.check_book(p.conn, token, p.ts, Some((p.bid, p.ask)), out);
+            self.check_book(p.conn, token, p.ts, recv_ms, Some((p.bid, p.ask)), out);
             self.prune_held();
         }
     }
@@ -671,13 +678,16 @@ impl Engine {
     /// still inside `issue_throttle_ms` of the last one. Pure: time is the event's ts.
     fn throttle(&mut self, kind: &'static str, token: &str, ts: i64) -> Option<u32> {
         let window = self.ctx.issue_throttle_ms;
-        let e = self
-            .issue_throttle
-            .entry((kind, token.to_string()))
-            .or_insert(IssueThrottle {
+        let by_token = self.issue_throttle.entry(kind).or_default();
+        // `get_mut` borrows `token` as-is (no allocation): only a miss allocates, to insert.
+        let e = if let Some(e) = by_token.get_mut(token) {
+            e
+        } else {
+            by_token.entry(token.to_string()).or_insert(IssueThrottle {
                 last_ms: i64::MIN,
                 suppressed: 0,
-            });
+            })
+        };
         if e.last_ms != i64::MIN && ts.saturating_sub(e.last_ms) < window {
             e.suppressed = e.suppressed.saturating_add(1);
             return None;
@@ -690,11 +700,13 @@ impl Engine {
 
     /// End-of-frame integrity for one token: the server's final top vs ours (repaired from the
     /// stream when possible), then the crossed-book check on the (possibly trimmed) book.
+    /// `recv_ms` is the resolving frame's own receipt time; see `resolve_pending`.
     fn check_book(
         &mut self,
         conn: usize,
         token: &str,
         ts: i64,
+        recv_ms: i64,
         server: Option<(Option<Price>, Option<Price>)>,
         out: &mut Vec<Out>,
     ) {
@@ -762,7 +774,7 @@ impl Engine {
             // never on whether some OTHER traffic happens to share this frame.
             if changed && let Some(g) = group {
                 let eval_ts = ts.max(self.group_last_ts.get(g).copied().unwrap_or(i64::MIN));
-                self.evaluate(g, eval_ts, eval_ts, out);
+                self.evaluate(g, eval_ts, recv_ms, out);
             }
         }
         // Rule 3: evaluated after the trim, so a phantom that crossed the book and was repaired
@@ -1116,10 +1128,12 @@ impl Engine {
         // 2026-09-25): flush every (kind, token) still holding one as its own integrity row, in
         // a deterministic order, then reset it.
         let mut suppressed: Vec<(&'static str, String, u32)> = Vec::new();
-        for ((kind, token), t) in self.issue_throttle.iter_mut() {
-            if t.suppressed > 0 {
-                suppressed.push((*kind, token.clone(), t.suppressed));
-                t.suppressed = 0;
+        for (kind, by_token) in self.issue_throttle.iter_mut() {
+            for (token, t) in by_token.iter_mut() {
+                if t.suppressed > 0 {
+                    suppressed.push((*kind, token.clone(), t.suppressed));
+                    t.suppressed = 0;
+                }
             }
         }
         suppressed.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(&b.1)));

@@ -46,6 +46,12 @@ impl Store {
         body: &str,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
+        // Background work: the scanner role's 5 s default (01-roles.sh) is for the hot path. This
+        // single INSERT carries the whole universe as JSON (multi-MB) and can outrun 5 s under
+        // load. This transaction only.
+        sqlx::query("SET LOCAL statement_timeout = '60s'")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "INSERT INTO universe_snapshots (taken_ms, n_events, body) VALUES ($1, $2, $3)",
         )

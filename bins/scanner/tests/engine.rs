@@ -870,3 +870,86 @@ fn close_all_flushes_suppressed_throttle_counts_in_sorted_order_then_resets_them
             .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
     );
 }
+
+#[test]
+fn a_repair_that_uncrosses_the_book_opens_with_the_resolving_frames_recv_ms() {
+    let mut e = engine();
+    seed(&mut e); // e1: ΣA = 1.05, unrelated to this test
+    // a second, independent group with only 2 legs, so its own ΣA is easy to reason about.
+    let u = Arc::new(Universe {
+        taken_ms: 1,
+        groups: vec![meta("e1", 3), meta("e2", 2)],
+        canary: vec![],
+    });
+    let conn: HashMap<String, usize> = [("e1".to_string(), 0), ("e2".to_string(), 0)]
+        .into_iter()
+        .collect();
+    assert!(e.apply_universe(u, &conn, 0).is_empty());
+    e.on_frame(
+        0,
+        1_100,
+        &[
+            snap("e2-y0", 1_000, &[], &[("0.40", "10")]),
+            snap("e2-y1", 1_000, &[], &[("0.65", "10")]),
+        ],
+    ); // ΣA = 1.05, no basket
+    // ts 2_000: e2-y0 gets a real bid at 0.10, then a phantom bid at 0.50 that crosses its own
+    // 0.40 ask; the exchange's own final top for this burst is bid 0.10 / ask 0.40 (server-final,
+    // per every item), so 0.50 is a level we must not have. e2-y1's ask also drops to 0.45 in the
+    // same frame: ΣA = 0.40 + 0.45 = 0.85 < 1, a real opportunity — but e2-y0 is crossed right
+    // now, so `detect_yes_basket` (D1) refuses to open anything.
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[
+            delta("e2-y0", 2_000, Side::Bid, "0.10", "10", None, None),
+            delta(
+                "e2-y0",
+                2_000,
+                Side::Bid,
+                "0.50",
+                "10",
+                Some("0.10"),
+                Some("0.40"),
+            ),
+            ask("e2-y1", 2_000, "0.45", "10"),
+            ask("e2-y1", 2_000, "0.65", "0"),
+        ],
+    );
+    assert!(
+        episodes(&outs).is_empty(),
+        "e2-y0 is crossed: nothing opens yet, {outs:?}"
+    );
+    // > 1 s later, an UNRELATED e1 frame resolves e2-y0's deferred check (same conn): our top
+    // (bid 0.50 / ask 0.40) disagrees with the server's (bid 0.10 / ask 0.40); trimming the
+    // phantom 0.50 leaves bid 0.10 / ask 0.40, which matches the server exactly — repaired — and
+    // uncrosses the book. The group is re-evaluated right there, opening the basket the phantom
+    // had been hiding. `recv_ms` here (9_999) is THIS resolving frame's own receipt time, wholly
+    // unrelated to the mismatch's ts (2_000, still == group_last_ts): a fabricated recv_ms == ts
+    // would give a false open_lag_ms of 0 / stale = false (S3a final review item 2).
+    let outs = e.on_frame(0, 9_999, &[ask("e1-y2", 9_500, "0.29", "1")]);
+    assert!(
+        outs.iter().any(
+            |o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch" && i.token.as_deref() == Some("e2-y0")
+                && i.detail.as_deref().unwrap_or("").contains("repaired from stream"))
+        ),
+        "{outs:?}"
+    );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Resnapshot { token } if token == "e2-y0")),
+        "repaired, so no resnapshot: {outs:?}"
+    );
+    let rows = episodes(&outs);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let opened = &rows[0];
+    assert_eq!(opened.opened_server_ms, 2_000, "{opened:?}");
+    assert_eq!(opened.closed_server_ms, None, "{opened:?}");
+    assert_eq!(
+        opened.open_lag_ms,
+        Some(9_999 - 2_000),
+        "open_lag_ms must come from the resolving frame's own recv_ms, not its ts: {opened:?}"
+    );
+    assert!(opened.stale_transport, "{opened:?}");
+}

@@ -8,7 +8,7 @@ use crate::now_ms;
 use crate::shards::{Plan, Shard};
 use pm_api::backoff::{Backoff, ConnectBudget};
 use pm_api::ws::{Frame, run_connection};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -307,17 +307,29 @@ impl Supervisor {
         //    connects: live connections never exceed the budget, and a unit that moved between
         //    shards is never subscribed on two connections at once.
         let mut stopping = JoinSet::new();
+        let mut stopping_ids: HashMap<tokio::task::Id, usize> = HashMap::new();
         for &i in &changes.stop {
             if let Some(slot) = self.handles.get_mut(i).and_then(Option::take) {
-                stopping.spawn(stop_slot(
+                let handle = stopping.spawn(stop_slot(
                     i,
                     slot,
                     self.shared.clone(),
                     self.metrics.clone(),
                 ));
+                stopping_ids.insert(handle.id(), i);
             }
         }
-        while stopping.join_next().await.is_some() {}
+        while let Some(res) = stopping.join_next().await {
+            if let Err(e) = res {
+                // A panicking stop_slot must not be silently swallowed: it means that shard's
+                // cleanup (parked-count decrement, its own Down on the abort fallback) may not
+                // have happened.
+                eprintln!(
+                    "feed: stop_slot panicked for shard {:?}: {e}",
+                    stopping_ids.get(&e.id())
+                );
+            }
+        }
         // 2. Only now start the replacements (released trailing slots are simply dropped).
         self.handles.resize_with(plan.shards.len(), || None);
         for &i in &changes.start {

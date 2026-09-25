@@ -132,10 +132,16 @@ async fn fetch_universe(cfg: &Config) -> anyhow::Result<Universe> {
 
 async fn persist_universe(store: &Store, u: &Universe) -> anyhow::Result<()> {
     let n = i32::try_from(u.groups.len()).unwrap_or(i32::MAX);
-    store.save_universe(u.taken_ms, n, &u.to_json()?).await?;
+    store
+        .save_universe(u.taken_ms, n, &u.to_json()?)
+        .await
+        .context("save_universe")?;
     let (events, legs) = u.store_rows();
-    store.upsert_universe(&events, &legs, u.taken_ms).await?;
-    store.mark_gone(u.taken_ms).await?;
+    store
+        .upsert_universe(&events, &legs, u.taken_ms)
+        .await
+        .context("upsert_universe")?;
+    store.mark_gone(u.taken_ms).await.context("mark_gone")?;
     Ok(())
 }
 
