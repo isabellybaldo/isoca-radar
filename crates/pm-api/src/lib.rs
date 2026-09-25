@@ -7,6 +7,7 @@ pub mod error;
 pub mod gamma;
 pub mod routes;
 pub mod wire;
+pub mod ws;
 
 pub use error::ApiError;
 

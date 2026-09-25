@@ -28,7 +28,9 @@ impl Backoff {
     /// Delay before the next attempt. Resets to `base_ms` only if the session that just ended
     /// lived longer than `healthy_ms` (a flapping link must not pull the delay down).
     pub fn on_disconnected(&mut self, now_ms: i64) -> u64 {
-        if let Some(t) = self.connected_at.take() && now_ms - t > self.healthy_ms {
+        if let Some(t) = self.connected_at.take()
+            && now_ms - t > self.healthy_ms
+        {
             self.attempt = 0;
         }
         let shift = self.attempt.min(20);
