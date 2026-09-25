@@ -58,8 +58,11 @@ impl Metrics {
     pub fn minute_row(&self, run_id: i64, minute_ms: i64) -> HealthRow {
         let lags = take_sorted(&self.lags);
         let rest = take_sorted(&self.rest_ms);
-        let p =
-            |v: &[i64], q: usize| percentile(v, q).map(|x| i32::try_from(x).unwrap_or(i32::MAX));
+        let p = |v: &[i64], q: usize| {
+            percentile(v, q).map(|x| {
+                i32::try_from(x.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
+            })
+        };
         HealthRow {
             run_id,
             minute_ms,

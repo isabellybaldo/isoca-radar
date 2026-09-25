@@ -153,7 +153,13 @@ pub async fn run_writer(
 /// Episodes go first so observations referencing them can still land.
 async fn quarantine(store: &Store, b: Batch) -> u64 {
     let mut dropped = 0;
-    let one = |batch: Batch| async move { store.write_batch(&batch).await };
+    // Same 10 s bound as the main flush: a stalled row must not freeze the writer (it's dropped).
+    let one = |batch: Batch| async move {
+        match tokio::time::timeout(Duration::from_secs(10), store.write_batch(&batch)).await {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err("timed out".to_string()),
+        }
+    };
     for w in b.episodes {
         let id = w.row.episode_id.clone();
         if let Err(e) = one(Batch {
