@@ -115,13 +115,21 @@ pub async fn run(cfg: Config, cfg_hash: String) -> anyhow::Result<()> {
         .starts_since("scanner", now_ms() - cfg.breaker.window_secs * 1000)
         .await?;
     if breaker_trips(starts, cfg.breaker.max_starts) {
-        let id = store.start_run(&new_run(&cfg_hash, "safe")).await?;
+        // Safe mode must always exit 0 (compose `on-failure` must not restart a clean exit), so
+        // nothing after this point may use `?`: a failure recording the run is logged, not raised.
         let reason = format!(
             "safe mode: {starts} starts in the last {} s (crash-loop breaker); no connections made. \
              Fix the cause, then `scanner breaker reset`",
             cfg.breaker.window_secs
         );
-        store.end_run(id, now_ms(), &reason).await?;
+        match store.start_run(&new_run(&cfg_hash, "safe")).await {
+            Ok(id) => {
+                if let Err(e) = store.end_run(id, now_ms(), &reason).await {
+                    eprintln!("scanner: failed to record safe-mode run exit: {e:#}");
+                }
+            }
+            Err(e) => eprintln!("scanner: failed to record safe-mode run start: {e:#}"),
+        }
         eprintln!("scanner: {reason}");
         return Ok(()); // exit 0: compose `on-failure` does not restart a clean exit
     }
@@ -293,7 +301,7 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
     let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
     let clob = Arc::new(ClobClient::new()?);
     let limiter = Arc::new(Limiter::new(cfg.recheck.rest_per_sec));
-    tokio::spawn(checks::run_rechecks(
+    let rechecks_task = tokio::spawn(checks::run_rechecks(
         recheck_rx,
         u_rx.clone(),
         clob.clone(),
@@ -301,13 +309,13 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         cfg.recheck.offsets_ms.clone(),
         writer_tx.clone(),
     ));
-    tokio::spawn(checks::run_resnapshots(
+    let resnapshots_task = tokio::spawn(checks::run_resnapshots(
         resnap_rx,
         clob.clone(),
         limiter.clone(),
         check_tx.clone(),
     ));
-    tokio::spawn(checks::run_samplers(
+    let samplers_task = tokio::spawn(checks::run_samplers(
         u_rx.clone(),
         clob.clone(),
         limiter.clone(),
@@ -315,7 +323,7 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         check_tx.clone(),
         metrics.clone(),
     ));
-    {
+    let health_task = {
         // health: one row per minute
         let (metrics, writer_tx) = (metrics.clone(), writer_tx.clone());
         tokio::spawn(async move {
@@ -332,8 +340,8 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                     return;
                 }
             }
-        });
-    }
+        })
+    };
     let budget = Arc::new(Mutex::new(ConnectBudget::new(
         cfg.connect.per_sec,
         cfg.connect.per_min,
@@ -353,7 +361,7 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
             sup.abort_all();
         })
     };
-    {
+    let refresher_task = {
         // refresher (spec §7: every 5 min, and on new_market / market_resolved)
         let (cfg, store, cmd_tx, plan_tx, u_tx, refresh) = (
             cfg.clone(),
@@ -409,8 +417,8 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                     return;
                 }
             }
-        });
-    }
+        })
+    };
 
     // Engine loop (this future)
     let io = Io {
@@ -534,9 +542,13 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         }
     };
 
-    // Shutdown: stop shards, close episodes, flush, finish capture
+    // Shutdown (bounded well under Docker's stop grace):
+    // 1. stop taking new shards/universes; 2. close every open episode; 3. flush the writer with
+    //    a bounded ack; 4. THEN stop everything still holding a `writer_tx` clone, so step 3's
+    //    flush sees a quiet writer and step 6's join actually returns (it needs every sender gone).
     drop(plan_tx);
     supervisor_task.abort();
+    refresher_task.abort();
     let t = now_ms();
     io.ctl(0, Ctl::Shutdown, t);
     let outs = engine.close_all(t);
@@ -545,10 +557,14 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
     if writer_tx.send(WriterMsg::Flush(done_tx)).await.is_ok() {
         let _ = tokio::time::timeout(Duration::from_secs(10), done_rx).await;
     }
+    health_task.abort();
+    rechecks_task.abort();
+    resnapshots_task.abort();
+    samplers_task.abort();
     drop(io);
     drop(capture_tx);
     drop(writer_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(15), writer_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(3), writer_task).await;
     let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
     result
 }
