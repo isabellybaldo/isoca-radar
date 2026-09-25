@@ -9,6 +9,10 @@ pub struct Group {
     pub event_id: String,
     pub title: String,
     pub yes_tokens: Vec<String>,
+    /// Same order as `yes_tokens`. `#[serde(default)]` so universe files written before this
+    /// field existed still load.
+    #[serde(default)]
+    pub no_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,17 +34,20 @@ pub fn select(events: &[GammaEvent], canary_n: usize) -> Universe {
     for e in events {
         if e.is_neg_risk() {
             let aug = e.is_augmented();
-            let yes: Vec<String> = e
+            let pairs: Vec<(String, String)> = e
                 .markets()
                 .iter()
                 .filter(|m| leg_status(m, aug) == LegStatus::Live)
-                .filter_map(|m| token_ids(m).ok().flatten().map(|(y, _)| y))
+                .filter_map(|m| token_ids(m).ok().flatten())
                 .collect();
-            if yes.len() >= 2 {
+            if pairs.len() >= 2 {
+                let yes: Vec<String> = pairs.iter().map(|(y, _)| y.clone()).collect();
+                let no: Vec<String> = pairs.iter().map(|(_, n)| n.clone()).collect();
                 groups.push(Group {
                     event_id: e.id.clone(),
                     title: e.title.clone().unwrap_or_default(),
                     yes_tokens: yes,
+                    no_tokens: no,
                 });
             }
         } else {
@@ -108,6 +115,7 @@ mod tests {
         assert_eq!(u.groups.len(), 1);
         assert_eq!(u.groups[0].event_id, "2");
         assert_eq!(u.groups[0].yes_tokens, vec!["b1y", "b2y"]);
+        assert_eq!(u.groups[0].no_tokens, vec!["b1n", "b2n"]);
         // canaries sorted by market id, truncated to 1
         assert_eq!(
             u.canary,
@@ -124,5 +132,14 @@ mod tests {
                 vec!["c1y".to_string(), "c1n".to_string()]
             ]
         );
+    }
+
+    #[test]
+    fn older_universe_json_without_no_tokens_still_loads() {
+        let old =
+            r#"{"groups":[{"event_id":"1","title":"A","yes_tokens":["a1y","a2y"]}],"canary":[]}"#;
+        let u: Universe = serde_json::from_str(old).unwrap();
+        assert_eq!(u.groups[0].yes_tokens, vec!["a1y", "a2y"]);
+        assert!(u.groups[0].no_tokens.is_empty());
     }
 }
