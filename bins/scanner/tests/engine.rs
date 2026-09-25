@@ -1036,3 +1036,121 @@ fn the_threshold_gate_never_changes_a_single_output() {
         "gate skipped too little: {calls_on} calls vs {calls_off}"
     );
 }
+
+// ---- S3a-2 Task 4: pending top-check indexes stay consistent with `pending_tops` ----
+
+#[test]
+fn pending_top_indexes_stay_consistent_through_every_mutation() {
+    use arb_core::money::Price;
+    use scanner::engine::Engine;
+    use scanner::universe::CanaryPair;
+    // Deterministic LCG (MMIX constants), as in common::Lcg, local so the seed is visible.
+    let mut state: u64 = 0x5eed_0004;
+    let mut below = |n: usize| -> usize {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(state >> 33).unwrap() % n
+    };
+    let canary = vec![CanaryPair {
+        market_id: "cm".into(),
+        event_id: "ce".into(),
+        yes_token: "c-y".into(),
+        no_token: "c-n".into(),
+    }];
+    // u1: a (3 legs) on conn 0, b (2 legs) on conn 1, plus a canary pair. u2 reorders the groups
+    // (group indices change), drops a's third leg and the canary, and adds d on conn 2.
+    let u1 = Arc::new(Universe {
+        taken_ms: 1,
+        groups: vec![meta("a", 3), meta("b", 2)],
+        canary: canary.clone(),
+    });
+    let mut a2 = meta("a", 3);
+    a2.legs.truncate(2);
+    let u2 = Arc::new(Universe {
+        taken_ms: 2,
+        groups: vec![meta("d", 2), meta("b", 2), a2],
+        canary: vec![],
+    });
+    let conn_of: HashMap<String, usize> = [("a", 0), ("b", 1), ("d", 2)]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    let tokens = [
+        "a-y0", "a-y1", "a-y2", "b-y0", "b-y1", "d-y0", "d-y1", "c-y", "c-n", "zz",
+    ];
+    let mut e = Engine::new(ctx());
+    let _ = e.apply_universe(u1.clone(), &conn_of, 0);
+    let mut ts: i64 = 1_000;
+    let mut on_u1 = true;
+    let mut max_pending = 0;
+    let mut kinds_seen = [0usize; 6];
+    for step in 0..20_000 {
+        let tok = tokens[below(tokens.len())];
+        let roll = below(100);
+        // ts advances 0..=1 500 ms: same-ts replaces, earlier-ts resolves and stale sweeps all occur
+        ts += i64::try_from(below(4)).unwrap() * 500;
+        let kind = match roll {
+            0..=69 => {
+                let conn = below(3);
+                let c = 10 + i64::try_from(below(80)).unwrap();
+                let top = if below(2) == 0 {
+                    Some(Price::new(rust_decimal::Decimal::new(c, 2)).unwrap())
+                } else {
+                    None
+                };
+                let size = if below(4) == 0 { "0" } else { "10" };
+                let ev = MarketEvent::Delta {
+                    token: tok.into(),
+                    server_ts_ms: ts,
+                    side: Side::Ask,
+                    price: Price::new(rust_decimal::Decimal::new(c, 2)).unwrap(),
+                    size: sh(size),
+                    best_bid: None,
+                    best_ask: top,
+                };
+                let _ = e.on_frame(conn, ts + 100, &[ev]);
+                0
+            }
+            70..=79 => {
+                let _ = e.on_frame(
+                    below(3),
+                    ts + 100,
+                    &[snap(tok, ts, &[("0.10", "5")], &[("0.90", "5")])],
+                );
+                1
+            }
+            80..=89 => {
+                let mut b = Book::default();
+                let bts = ts - i64::try_from(below(3)).unwrap() * 700;
+                b.apply_snapshot(&[(p("0.10"), sh("5"))], &[(p("0.90"), sh("5"))], bts);
+                let _ = e.rest_snapshot(tok, b);
+                2
+            }
+            90..=95 => {
+                let _ = e.disconnect(below(3), ts);
+                3
+            }
+            96..=98 => {
+                let u = if on_u1 { u2.clone() } else { u1.clone() };
+                on_u1 = !on_u1;
+                let _ = e.apply_universe(u, &conn_of, ts);
+                4
+            }
+            _ => {
+                let _ = e.close_all(ts);
+                5
+            }
+        };
+        kinds_seen[kind] += 1;
+        match e.debug_check_pending_indexes() {
+            Ok(n) => max_pending = max_pending.max(n),
+            Err(m) => panic!("step {step} (op {kind}): {m}"),
+        }
+    }
+    assert!(
+        max_pending >= 4,
+        "fixture kept too few pending checks: {max_pending}"
+    );
+    assert!(kinds_seen.iter().all(|&n| n > 0), "{kinds_seen:?}");
+}

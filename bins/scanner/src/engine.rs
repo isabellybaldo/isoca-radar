@@ -163,6 +163,15 @@ pub struct Engine {
     /// Keyed by token; iterated in key order so live and replay resolve pending checks
     /// identically (spec §9.3: no clock, deterministic from inputs alone).
     pending_tops: BTreeMap<String, PendingTop>,
+    /// Secondary index of `pending_tops` (S3a-2 Task 4): conn → {(ts, token)}. The per-frame stale
+    /// sweep is a range query on it, O(log n + due) instead of a scan of every pending check.
+    /// Kept equal to `pending_tops` by `pending_insert`/`pending_remove`, plus the bulk resets
+    /// in `apply_universe` (rebuild) and `close_all` (clear).
+    pending_by_conn: HashMap<usize, BTreeSet<(i64, String)>>,
+    /// Secondary index of `pending_tops`: group → multiset of pending ts (ts → count), so
+    /// `pending_in_group` reads the group's minimum ts. Canary tokens are in no group. Indexed by
+    /// the CURRENT `token_ix`, so `apply_universe` rebuilds it after remapping groups.
+    pending_by_group: Vec<BTreeMap<i64, u32>>,
     /// Highest `ts` ever passed to `evaluate` for each group, carried across refreshes by
     /// event id. Lets `rest_snapshot` evaluate at a ts that never goes backwards even when the
     /// REST snapshot is older than a ws frame already evaluated for this group.
@@ -250,6 +259,8 @@ impl Engine {
             msgs: HashMap::new(),
             pending_drift: Vec::new(),
             pending_tops: BTreeMap::new(),
+            pending_by_conn: HashMap::new(),
+            pending_by_group: Vec::new(),
             group_last_ts: Vec::new(),
             held_closed: Vec::new(),
             issue_throttle: HashMap::new(),
@@ -332,9 +343,106 @@ impl Engine {
 
     /// Is a deferred top-check on a leg of group `g` still unresolved with ts ≤ `ts_ms`?
     fn pending_in_group(&self, g: usize, ts_ms: i64) -> bool {
-        self.pending_tops
-            .iter()
-            .any(|(t, p)| p.ts <= ts_ms && self.token_ix.get(t).is_some_and(|&(pg, _)| pg == g))
+        self.pending_by_group
+            .get(g)
+            .and_then(|m| m.keys().next())
+            .is_some_and(|&min| min <= ts_ms)
+    }
+
+    // ---- `pending_tops` and its two indexes, mutated together (bulk resets aside) ----
+
+    fn index_add(&mut self, token: &str, p: &PendingTop) {
+        self.pending_by_conn
+            .entry(p.conn)
+            .or_default()
+            .insert((p.ts, token.to_string()));
+        if let Some(&(g, _)) = self.token_ix.get(token)
+            && let Some(m) = self.pending_by_group.get_mut(g)
+        {
+            *m.entry(p.ts).or_insert(0) += 1;
+        }
+    }
+
+    fn index_drop(&mut self, token: &str, p: &PendingTop) {
+        if let Some(set) = self.pending_by_conn.get_mut(&p.conn) {
+            set.remove(&(p.ts, token.to_string()));
+            if set.is_empty() {
+                self.pending_by_conn.remove(&p.conn);
+            }
+        }
+        if let Some(&(g, _)) = self.token_ix.get(token)
+            && let Some(m) = self.pending_by_group.get_mut(g)
+            && let Some(n) = m.get_mut(&p.ts)
+        {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&p.ts);
+            }
+        }
+    }
+
+    /// Insert or replace `token`'s pending check; a replace drops the old entry's index keys.
+    /// The old keys go first: a same-(conn, ts) replace has identical (ts, token) keys.
+    fn pending_insert(&mut self, token: &str, p: PendingTop) {
+        self.pending_remove(token);
+        self.index_add(token, &p);
+        self.pending_tops.insert(token.to_string(), p);
+    }
+
+    fn pending_remove(&mut self, token: &str) -> Option<PendingTop> {
+        let p = self.pending_tops.remove(token)?;
+        self.index_drop(token, &p);
+        Some(p)
+    }
+
+    /// Rebuild `pending_by_group` from `pending_tops` and the current `token_ix` (group indices
+    /// change on a universe refresh).
+    fn rebuild_pending_by_group(&mut self) {
+        let mut by_group: Vec<BTreeMap<i64, u32>> = vec![BTreeMap::new(); self.groups.len()];
+        for (t, p) in &self.pending_tops {
+            if let Some(&(g, _)) = self.token_ix.get(t)
+                && let Some(m) = by_group.get_mut(g)
+            {
+                *m.entry(p.ts).or_insert(0) += 1;
+            }
+        }
+        self.pending_by_group = by_group;
+    }
+
+    /// Both indexes must equal what a full scan of `pending_tops` gives: Ok(number of pending
+    /// checks), or a description of the difference.
+    fn check_pending_indexes(&self) -> Result<usize, String> {
+        let mut by_conn: HashMap<usize, BTreeSet<(i64, String)>> = HashMap::new();
+        let mut by_group: Vec<BTreeMap<i64, u32>> = vec![BTreeMap::new(); self.groups.len()];
+        for (t, p) in &self.pending_tops {
+            by_conn.entry(p.conn).or_default().insert((p.ts, t.clone()));
+            if let Some(&(g, _)) = self.token_ix.get(t) {
+                match by_group.get_mut(g) {
+                    Some(m) => *m.entry(p.ts).or_insert(0) += 1,
+                    None => return Err(format!("{t}: group {g} out of range")),
+                }
+            }
+        }
+        if by_conn != self.pending_by_conn {
+            return Err(format!(
+                "pending_by_conn {:?} != scan {by_conn:?}",
+                self.pending_by_conn
+            ));
+        }
+        if by_group != self.pending_by_group {
+            return Err(format!(
+                "pending_by_group {:?} != scan {by_group:?}",
+                self.pending_by_group
+            ));
+        }
+        Ok(self.pending_tops.len())
+    }
+
+    /// For tests only: checks the pending top-check indexes against a full scan of
+    /// `pending_tops`. O(pending); the engine never calls it.
+    #[doc(hidden)]
+    pub fn debug_check_pending_indexes(&self) -> Result<usize, String> {
+        self.check_pending_indexes()
     }
 
     /// Forget held closed episodes that no unresolved check can flag any more.
@@ -500,8 +608,18 @@ impl Engine {
         self.canary = canary;
         // Drop deferred top-checks for tokens no longer subscribed at all: there's no book left
         // to resolve them against.
+        // `token_ix` is already the new universe's, so drop from `pending_tops` directly and
+        // rebuild both indexes from it (once per refresh).
         self.pending_tops
             .retain(|t, _| self.token_ix.contains_key(t) || self.canary.contains_key(t));
+        self.pending_by_conn.clear();
+        for (t, p) in &self.pending_tops {
+            self.pending_by_conn
+                .entry(p.conn)
+                .or_default()
+                .insert((p.ts, t.clone()));
+        }
+        self.rebuild_pending_by_group();
         self.group_conn = u
             .groups
             .iter()
@@ -562,7 +680,7 @@ impl Engine {
                     bump(&mut frame_ts, *server_ts_ms);
                     let ts = *server_ts_ms;
                     if self.on_book(token, &mut touched, |b| b.apply_snapshot(bids, asks, ts)) {
-                        self.pending_tops.remove(token.as_str()); // a snapshot supersedes earlier deltas' tops
+                        self.pending_remove(token); // a snapshot supersedes earlier deltas' tops
                         if !frame_tokens.iter().any(|t| t == token) {
                             frame_tokens.push(token.clone());
                         }
@@ -602,8 +720,8 @@ impl Engine {
                     });
                     if found {
                         // A same-ts delta for this token just replaces the pending entry: last wins.
-                        self.pending_tops.insert(
-                            token.clone(),
+                        self.pending_insert(
+                            token,
                             PendingTop {
                                 conn,
                                 ts,
@@ -627,13 +745,19 @@ impl Engine {
             return out;
         };
         // Pending entries old enough that this frame can't be a further split of the same
-        // logical update settle now (same shard, ts stale by more than 1 s).
-        let due: Vec<String> = self
-            .pending_tops
-            .iter()
-            .filter(|(_, p)| p.conn == conn && p.ts + 1_000 < ts)
-            .map(|(k, _)| k.clone())
-            .collect();
+        // logical update settle now (same shard, ts stale by more than 1 s). A range query on the
+        // conn index finds them (p.ts + 1 000 < ts ⇔ p.ts < ts − 1 000), and they resolve in
+        // TOKEN order, the order of the old full scan of `pending_tops`: outputs are unchanged.
+        let mut due: Vec<String> = self
+            .pending_by_conn
+            .get(&conn)
+            .map(|set| {
+                set.range(..(ts.saturating_sub(1_000), String::new()))
+                    .map(|(_, t)| t.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        due.sort_unstable();
         for token in due {
             self.resolve_pending(&token, recv_ms, &mut out);
         }
@@ -677,7 +801,7 @@ impl Engine {
     /// never the event ts (S3a final review: a fabricated recv_ms == ts gave a false
     /// open_lag_ms of 0 / stale = false).
     fn resolve_pending(&mut self, token: &str, recv_ms: i64, out: &mut Vec<Out>) {
-        if let Some(p) = self.pending_tops.remove(token) {
+        if let Some(p) = self.pending_remove(token) {
             self.check_book(p.conn, token, p.ts, recv_ms, Some((p.bid, p.ask)), out);
             self.prune_held();
         }
@@ -1130,7 +1254,14 @@ impl Engine {
 
     pub fn disconnect(&mut self, conn: usize, ts_ms: i64) -> Vec<Out> {
         // The feed died: drop this conn's deferred top-checks unresolved, no check.
-        self.pending_tops.retain(|_, p| p.conn != conn);
+        let gone: Vec<String> = self
+            .pending_by_conn
+            .get(&conn)
+            .map(|set| set.iter().map(|(_, t)| t.clone()).collect())
+            .unwrap_or_default();
+        for t in gone {
+            self.pending_remove(&t);
+        }
         let mut out = vec![self.integrity(
             ts_ms,
             Issue {
@@ -1156,6 +1287,10 @@ impl Engine {
 
     pub fn close_all(&mut self, ts_ms: i64) -> Vec<Out> {
         self.pending_tops.clear();
+        self.pending_by_conn.clear();
+        for m in &mut self.pending_by_group {
+            m.clear();
+        }
         self.held_closed.clear();
         let mut out = Vec::new();
         for e in self.tracker.close_all(ts_ms) {
@@ -1221,7 +1356,7 @@ impl Engine {
             }
             self.groups[g].legs[l].book = book;
             // A REST snapshot is complete state, superseding any deferred delta top-check.
-            self.pending_tops.remove(token);
+            self.pending_remove(token);
             // Never move the tracker's clock backwards: a REST snapshot can be older than a ws
             // frame this group already evaluated.
             let eval_ts = ts.max(self.group_last_ts.get(g).copied().unwrap_or(i64::MIN));
@@ -1229,8 +1364,8 @@ impl Engine {
         } else if let Some(b) = self.canary.get_mut(token)
             && ts >= b.server_ts_ms()
         {
-            self.pending_tops.remove(token);
             *b = book;
+            self.pending_remove(token);
         }
         out
     }
