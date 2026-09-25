@@ -232,7 +232,7 @@ impl Io {
                     if let Some(ev) = event_id {
                         let t = now_ms();
                         let until = t + self.suspect_window_ms;
-                        engine.mark_suspect(&ev, until);
+                        let flagged = engine.mark_suspect(&ev, until, t);
                         self.ctl(
                             0,
                             Ctl::Suspect {
@@ -241,6 +241,15 @@ impl Io {
                             },
                             t,
                         );
+                        // `mark_suspect` returns only re-flagged episode rows
+                        for f in flagged {
+                            if let Out::Episode(w) = f {
+                                self.writer
+                                    .send(WriterMsg::Episode(*w))
+                                    .await
+                                    .context("writer gone")?;
+                            }
+                        }
                     }
                 }
             }
@@ -561,9 +570,10 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                     CheckCmd::L1Mismatch { event_id, detail } => {
                         let t = now_ms();
                         let until = t + io.l1_window_ms;
-                        engine.mark_suspect(&event_id, until);
+                        let mut outs = engine.mark_suspect(&event_id, until, t);
                         io.ctl(0, Ctl::Suspect { event_id: event_id.clone(), until_ms: until }, t);
-                        vec![Out::Integrity(io.integrity("mirror_mismatch", None, Some(event_id), detail))]
+                        outs.push(Out::Integrity(io.integrity("mirror_mismatch", None, Some(event_id), detail)));
+                        outs
                     }
                 };
                 if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }

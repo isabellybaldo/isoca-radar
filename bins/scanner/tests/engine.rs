@@ -558,3 +558,90 @@ fn a_leg_removed_from_an_open_episodes_event_closes_it_right_censored_without_pa
     assert_eq!(closed[0].closed_server_ms, Some(2_600));
     assert_eq!(e.open_episodes(), 0);
 }
+
+/// y0 ask 0.40 → 0.30 opens a basket (ΣA = 0.95) at 2_000, but the server says the final top
+/// ask is 0.31: our book is wrong, and the deferred check only finds out a frame later.
+fn open_on_a_wrong_book(e: &mut scanner::engine::Engine) -> Vec<Out> {
+    seed(e);
+    e.on_frame(
+        0,
+        2_100,
+        &[
+            delta("e1-y0", 2_000, Side::Ask, "0.30", "10", None, Some("0.31")),
+            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.31")),
+        ],
+    )
+}
+
+#[test]
+fn a_late_top_mismatch_flags_the_episode_already_open_in_its_group() {
+    let mut e = engine();
+    let open = episodes(&open_on_a_wrong_book(&mut e));
+    assert_eq!(open.len(), 1);
+    assert!(!open[0].engine_suspect, "nothing is known to be wrong yet");
+    // a later frame on the same conn (> 1 s past 2_000) resolves the check as a real mismatch
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y2", 3_001, "0.30", "10")]);
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+    let rows = episodes(&outs);
+    let last = rows
+        .iter()
+        .rev()
+        .find(|r| r.episode_id == "live-7-00000001")
+        .expect("the open episode is re-emitted");
+    assert!(last.engine_suspect);
+    assert_eq!(last.closed_server_ms, None, "still open");
+    let outs = e.close_all(4_000);
+    assert!(episodes(&outs)[0].engine_suspect, "and it stays flagged");
+}
+
+#[test]
+fn a_late_top_mismatch_also_flags_an_episode_that_closed_before_the_check_resolved() {
+    let mut e = engine();
+    open_on_a_wrong_book(&mut e);
+    // y1 ask 0.35 → 0.40 at 2_500: ΣA = 1.00, the episode closes before y0's check is due
+    let outs = e.on_frame(
+        0,
+        2_600,
+        &[
+            ask("e1-y1", 2_500, "0.40", "10"),
+            ask("e1-y1", 2_500, "0.35", "0"),
+        ],
+    );
+    let closed = episodes(&outs);
+    assert_eq!(closed[0].closed_server_ms, Some(2_500));
+    assert!(!closed[0].engine_suspect);
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y2", 3_001, "0.30", "10")]);
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+    let r = episodes(&outs)
+        .into_iter()
+        .rev()
+        .find(|r| r.episode_id == "live-7-00000001")
+        .expect("the closed row is re-emitted with the flag");
+    assert!(r.engine_suspect);
+    assert_eq!(
+        (r.closed_server_ms, r.duration_ms),
+        (Some(2_500), Some(500))
+    );
+}
+
+#[test]
+fn a_clean_resolution_re_emits_nothing() {
+    let mut e = engine();
+    seed(&mut e);
+    e.on_frame(
+        0,
+        2_100,
+        &[
+            delta("e1-y0", 2_000, Side::Ask, "0.30", "10", None, Some("0.30")),
+            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.30")),
+        ],
+    );
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y2", 3_001, "0.30", "10")]);
+    assert!(episodes(&outs).is_empty(), "{outs:?}");
+}

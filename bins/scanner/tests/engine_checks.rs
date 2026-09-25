@@ -90,12 +90,30 @@ fn drift_is_reported_only_after_settling_and_only_if_we_did_not_move() {
 #[test]
 fn suspect_mark_flags_the_next_episode() {
     let mut e = engine();
-    e.mark_suspect("e1", 10_000);
+    assert!(
+        e.mark_suspect("e1", 10_000, 0).is_empty(),
+        "nothing open yet"
+    );
     open(&mut e);
     let outs = e.close_all(3_000);
     let r = &episodes(&outs)[0];
     assert!(r.engine_suspect);
     assert!(r.censor_right, "close_all right-censors");
+}
+
+#[test]
+fn a_suspect_mark_flags_an_episode_that_is_already_open() {
+    let mut e = engine();
+    open(&mut e); // opened at 2_000, not suspect
+    let outs = e.mark_suspect("e1", 70_000, 10_000);
+    let rows = episodes(&outs);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].engine_suspect && rows[0].closed_server_ms.is_none());
+    assert!(
+        e.mark_suspect("e1", 80_000, 11_000).is_empty(),
+        "already flagged: no duplicate row"
+    );
+    assert!(e.mark_suspect("nope", 80_000, 11_000).is_empty());
 }
 
 #[test]

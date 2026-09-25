@@ -98,9 +98,9 @@ pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
                     let b = ctl_book(&bids, &asks, server_ts_ms)?;
                     out.outs.extend(engine.rest_snapshot(&token, b));
                 }
-                Some(Ctl::Suspect { event_id, until_ms }) => {
-                    engine.mark_suspect(&event_id, until_ms)
-                }
+                Some(Ctl::Suspect { event_id, until_ms }) => out
+                    .outs
+                    .extend(engine.mark_suspect(&event_id, until_ms, ms)),
                 Some(Ctl::Shutdown) => {
                     out.outs.extend(engine.close_all(ms));
                     shut_down = true;

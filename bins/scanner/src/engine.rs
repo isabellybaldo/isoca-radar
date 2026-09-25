@@ -137,6 +137,14 @@ struct PendingTop {
     ask: Option<Price>,
 }
 
+/// An episode that CLOSED while a deferred top-check on its group (ts ≤ its close) was still
+/// unresolved: if that check later resolves as a mismatch, the closed row is re-flagged too.
+#[derive(Debug, Clone)]
+struct HeldClosed {
+    ep: OpenEp,
+    closed: (i64, i64, Censor),
+}
+
 pub struct Engine {
     ctx: EngineCtx,
     universe: Arc<Universe>,
@@ -157,6 +165,8 @@ pub struct Engine {
     /// event id. Lets `rest_snapshot` evaluate at a ts that never goes backwards even when the
     /// REST snapshot is older than a ws frame already evaluated for this group.
     group_last_ts: Vec<i64>,
+    /// See `HeldClosed`. Emptied by `prune_held` once no unresolved check can flag them.
+    held_closed: Vec<HeldClosed>,
 }
 
 fn kind_str(k: Kind) -> &'static str {
@@ -221,6 +231,7 @@ impl Engine {
             pending_drift: Vec::new(),
             pending_tops: BTreeMap::new(),
             group_last_ts: Vec::new(),
+            held_closed: Vec::new(),
         }
     }
 
@@ -244,10 +255,64 @@ impl Engine {
         })
     }
 
-    pub(crate) fn suspect(&mut self, g: usize, until_ms: i64) {
+    /// Mark group `g` suspect until `until_ms`, AND flag right now every episode the bad book
+    /// may already have touched: each open episode of `g`, and each held closed one that
+    /// closed at or after `since_ms`. Each flag that flips re-emits that episode's row (the
+    /// writer and `write_batch` keep the latest version). Sorted ids keep the output order
+    /// deterministic (spec §9.3).
+    pub(crate) fn suspect(&mut self, g: usize, until_ms: i64, since_ms: i64, out: &mut Vec<Out>) {
         if let Some(t) = self.suspect_until.get_mut(g) {
             *t = (*t).max(until_ms);
         }
+        let mut open_ids: Vec<u64> = self
+            .open
+            .iter()
+            .filter(|(_, ep)| ep.group == g && !ep.suspect)
+            .map(|(id, _)| *id)
+            .collect();
+        open_ids.sort_unstable();
+        for id in open_ids {
+            if let Some(ep) = self.open.get_mut(&id) {
+                ep.suspect = true;
+            }
+            if let Some(ep) = self.open.get(&id) {
+                out.push(Out::Episode(Box::new(self.row(ep, None))));
+            }
+        }
+        let held: Vec<usize> = self
+            .held_closed
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.ep.group == g && !h.ep.suspect && h.closed.0 >= since_ms)
+            .map(|(i, _)| i)
+            .collect();
+        for i in held {
+            if let Some(h) = self.held_closed.get_mut(i) {
+                h.ep.suspect = true;
+            }
+            if let Some(h) = self.held_closed.get(i) {
+                out.push(Out::Episode(Box::new(self.row(&h.ep, Some(h.closed)))));
+            }
+        }
+    }
+
+    /// Is a deferred top-check on a leg of group `g` still unresolved with ts ≤ `ts_ms`?
+    fn pending_in_group(&self, g: usize, ts_ms: i64) -> bool {
+        self.pending_tops
+            .iter()
+            .any(|(t, p)| p.ts <= ts_ms && self.token_ix.get(t).is_some_and(|&(pg, _)| pg == g))
+    }
+
+    /// Forget held closed episodes that no unresolved check can flag any more.
+    fn prune_held(&mut self) {
+        if self.held_closed.is_empty() {
+            return;
+        }
+        let held = std::mem::take(&mut self.held_closed);
+        self.held_closed = held
+            .into_iter()
+            .filter(|h| self.pending_in_group(h.ep.group, h.closed.0))
+            .collect();
     }
 
     pub fn apply_universe(
@@ -423,6 +488,19 @@ impl Engine {
                 ep.group = g;
             }
         }
+        // Held closed episodes follow their event to its new index; an event that left the
+        // universe drops them (its deferred checks were dropped with its tokens above).
+        let held = std::mem::take(&mut self.held_closed);
+        self.held_closed = held
+            .into_iter()
+            .filter_map(|mut h| {
+                let ev = &self.universe.groups[h.ep.group].event_id;
+                index.get(ev).map(|&g| {
+                    h.ep.group = g;
+                    h
+                })
+            })
+            .collect();
         self.universe = u;
         out
     }
@@ -563,6 +641,7 @@ impl Engine {
     fn resolve_pending(&mut self, token: &str, out: &mut Vec<Out>) {
         if let Some(p) = self.pending_tops.remove(token) {
             self.check_book(p.conn, token, p.ts, Some((p.bid, p.ask)), out);
+            self.prune_held();
         }
     }
 
@@ -610,7 +689,7 @@ impl Engine {
                 token: token.to_string(),
             });
             if let Some(g) = group {
-                self.suspect(g, ts + self.ctx.suspect_window_ms);
+                self.suspect(g, ts + self.ctx.suspect_window_ms, ts, out);
             }
         }
         if crossed {
@@ -625,7 +704,7 @@ impl Engine {
                 },
             ));
             if let Some(g) = group {
-                self.suspect(g, ts + self.ctx.suspect_window_ms);
+                self.suspect(g, ts + self.ctx.suspect_window_ms, ts, out);
             }
         }
     }
@@ -782,9 +861,11 @@ impl Engine {
             && let Some(ep) = self.open.remove(&id)
         {
             self.open_by_key.remove(&ep.key);
-            out.push(Out::Episode(Box::new(
-                self.row(&ep, Some((ts_ms, duration_ms, censor))),
-            )));
+            let closed = (ts_ms, duration_ms, censor);
+            out.push(Out::Episode(Box::new(self.row(&ep, Some(closed)))));
+            if !ep.suspect && self.pending_in_group(ep.group, ts_ms) {
+                self.held_closed.push(HeldClosed { ep, closed });
+            }
         }
     }
 
@@ -942,11 +1023,13 @@ impl Engine {
                 }
             }
         }
+        self.prune_held();
         out
     }
 
     pub fn close_all(&mut self, ts_ms: i64) -> Vec<Out> {
         self.pending_tops.clear();
+        self.held_closed.clear();
         let mut out = Vec::new();
         for e in self.tracker.close_all(ts_ms) {
             self.close_episode(e, &mut out);
@@ -1054,15 +1137,19 @@ impl Engine {
         out
     }
 
-    pub fn mark_suspect(&mut self, event_id: &str, until_ms: i64) {
+    /// A REST check (drift, L1 mirror) found this event's book wrong at `now_ms`: suspect until
+    /// `until_ms`, and flag its open episodes now. Returns their re-emitted rows.
+    pub fn mark_suspect(&mut self, event_id: &str, until_ms: i64, now_ms: i64) -> Vec<Out> {
+        let mut out = Vec::new();
         if let Some(g) = self
             .universe
             .groups
             .iter()
             .position(|m| m.event_id == event_id)
         {
-            self.suspect(g, until_ms);
+            self.suspect(g, until_ms, now_ms, &mut out);
         }
+        out
     }
 
     pub fn rates(&mut self) -> HashMap<String, u64> {
