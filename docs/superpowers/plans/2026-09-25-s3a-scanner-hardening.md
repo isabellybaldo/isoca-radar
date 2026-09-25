@@ -1910,6 +1910,226 @@ git commit -m "scanner/run: one deadline bounds the whole graceful stop"
 
 ---
 
+### Task 8: stream repair of phantom levels, integrity throttle, universe-save timeout (added from the VPS soak)
+
+**Why (soak evidence, 2026-09-25, VPS run 1).** From 13:31 UTC, a single token (Bitcoin price on September 25?, market 4689155, shard 1) produced **20,240 `top_mismatch` rows in 35 min**, and every one of them requested a REST resnapshot. Each row has the same shape: our best bid is ABOVE the server's (`server bid 0.47 … ours bid 0.48`, and later `0.74` vs `0.76`), while the asks agree. That is a **phantom level**, a removal we never applied.
+
+The REST repair can never land on such a busy market. By the time `/book` answers, websocket deltas have advanced our book's `server_ts` past the snapshot's, so `Engine::rest_snapshot` discards it as older (a correct rule). The loop never ends:
+- the phantom creates fake NO-basket state;
+- the group stays suspect;
+- the resnapshot flood starves the 10/s REST budget for every other token.
+
+There was also one `refresh persist: … canceling statement due to statement timeout`. `scanner_rw` has `statement_timeout = 5s` (`docker/postgres/init/01-roles.sh`), and the background universe upsert of about 89k legs (plus `mark_gone`'s full scan) hit it under CPU load.
+
+**Files:**
+- Modify: `crates/arb-core/src/book.rs` (add `Book::trim_to_top`), test `crates/arb-core/tests/book.rs`
+- Modify: `bins/scanner/src/engine.rs` (`EngineCtx.issue_throttle_ms`, `Engine.issue_throttle`, `book_mut`, `throttle`, `check_book`)
+- Modify: `bins/scanner/src/config.rs` (`EngineCfg.issue_throttle_ms`, validation ≥ 0), `config/scanner.toml`, `bins/scanner/src/run.rs` (`engine_ctx`), `bins/scanner/tests/common/mod.rs` (`ctx()` gets `issue_throttle_ms: 5_000`)
+- Modify: `crates/store/src/universe.rs` (`upsert_universe`, `mark_gone`)
+- Test: `bins/scanner/tests/engine.rs`
+
+**Interfaces:**
+- Produces:
+  - `arb_core::book::Book::trim_to_top(&mut self, best_bid: Option<Price>, best_ask: Option<Price>) -> bool`;
+  - `EngineCtx.issue_throttle_ms: i64`;
+  - `EngineCfg.issue_throttle_ms: i64`, with `issue_throttle_ms = 5000` in `[engine]`.
+- Consumes: `Engine::suspect(g, until, since, out)` (Task 2), `Engine::evaluate`.
+
+**Rules.**
+1. **The stream's top is authoritative (Polymarket sends the final best bid and ask with every `price_change` item).** At resolution, when our top disagrees, drop every bid of ours strictly above the server's best bid and every ask strictly below its best ask. A `None` side (empty `"0"`/`"1"`, or not reported) is not proof and is left alone.
+   - If our top now equals the server's, the book is **repaired**: the row still records the mismatch (the book *was* wrong, so the group is still marked suspect), with `→ repaired from stream` appended to `detail`, and **no** resnapshot is sent. The group is then re-evaluated at `max(ts, group_last_ts)`, so a fake opportunity the phantom created closes now rather than at the group's next update.
+   - Only a **missing** level (our bid below the server's, or our ask above it) still asks for a REST resnapshot.
+2. **Throttle integrity rows**, per `(kind, token)` for `top_mismatch` and `crossed_book`: at most one row per `issue_throttle_ms` of event time (ts). Suppressed occurrences are counted, and the next emitted row appends ` (+N suppressed)` to its `detail` (for `crossed_book`, `detail` becomes `+N suppressed`). A `top_mismatch` row that is suppressed also suppresses its resnapshot. Suspect marking always happens. The engine stays pure (the window is ts arithmetic), so replay reproduces it.
+3. `crossed_book` is evaluated **after** the trim, so a phantom bid that crossed the book and was repaired is not also reported as crossed.
+4. **Universe persistence is background work.** `upsert_universe` and `mark_gone` start their transaction with `SET LOCAL statement_timeout = '60s'`. It applies only to that transaction; the scanner's role default stays 5 s for everything else.
+
+- [ ] **Step 1: Write the failing tests.**
+
+Append to `crates/arb-core/tests/book.rs` (reuse its existing price/share helpers if it has them; otherwise use the inline closures below):
+```rust
+#[test]
+fn trim_to_top_drops_only_levels_the_servers_top_disproves() {
+    let lv = |p: &str, s: &str| (arb_core::money::Price::parse(p).unwrap(), arb_core::money::Shares::parse(s).unwrap());
+    let px = |p: &str| arb_core::money::Price::parse(p).unwrap();
+    let mut b = arb_core::book::Book::default();
+    b.apply_snapshot(&[lv("0.48", "5"), lv("0.47", "9")], &[lv("0.49", "3"), lv("0.50", "7")], 0);
+    // server: best bid 0.47, best ask 0.50 → our 0.48 bid and 0.49 ask are phantoms
+    assert!(b.trim_to_top(Some(px("0.47")), Some(px("0.50"))));
+    let t = b.top();
+    assert_eq!((t.best_bid.map(|x| x.0), t.best_ask.map(|x| x.0)), (Some(px("0.47")), Some(px("0.50"))));
+    // nothing left to trim; None sides are never proof
+    assert!(!b.trim_to_top(Some(px("0.47")), Some(px("0.50"))));
+    assert!(!b.trim_to_top(None, None));
+    // a missing level (server best bid 0.49 > ours) cannot be repaired by trimming
+    assert!(!b.trim_to_top(Some(px("0.49")), None));
+}
+```
+
+Append to `bins/scanner/tests/engine.rs`:
+```rust
+#[test]
+fn a_phantom_level_is_trimmed_from_the_streams_top_without_a_resnapshot() {
+    let mut e = engine();
+    seed(&mut e); // e1-y0 ask 0.40
+    // the server removed our 0.40 ask without us seeing it; its final top ask is now 0.45
+    e.on_frame(0, 2_100, &[delta("e1-y0", 2_000, Side::Ask, "0.45", "5", None, Some("0.45"))]);
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y1", 3_001, "0.20", "10")]); // > 1 s later: resolves
+    let rows: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            Out::Integrity(i) if i.kind == "top_mismatch" => Some(i.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "{outs:?}");
+    assert!(rows[0].detail.as_deref().unwrap_or("").contains("repaired from stream"), "{rows:?}");
+    assert!(!outs.iter().any(|o| matches!(o, Out::Resnapshot { .. })), "{outs:?}");
+    assert_eq!(e.book_of("e1-y0").unwrap().top().best_ask.map(|(x, _)| x), Some(p("0.45")));
+}
+
+#[test]
+fn a_persistent_mismatch_is_reported_at_most_once_per_throttle_window() {
+    let mut e = engine(); // common::ctx(): issue_throttle_ms = 5_000
+    seed(&mut e); // e1-y2 ask 0.30
+    // the server keeps saying 0.29: a level we LACK, so only a resnapshot could fix it
+    let mut details = Vec::new();
+    let mut resnaps = 0;
+    for k in 0..10_i64 {
+        let t = 2_000 + k * 1_100; // each later delta resolves the previous pending check
+        let outs = e.on_frame(
+            0,
+            t + 100,
+            &[MarketEvent::Delta {
+                token: "e1-y2".into(),
+                server_ts_ms: t,
+                side: Side::Ask,
+                price: p("0.50"),
+                size: sh("5"),
+                best_bid: None,
+                best_ask: Some(p("0.29")),
+            }],
+        );
+        for o in &outs {
+            match o {
+                Out::Integrity(i) if i.kind == "top_mismatch" => details.push(i.detail.clone().unwrap_or_default()),
+                Out::Resnapshot { token } if token == "e1-y2" => resnaps += 1,
+                _ => {}
+            }
+        }
+    }
+    // resolutions at ts 2000, 3100, …, 10800: emitted at 2000 and 7500 only (window 5000)
+    assert_eq!(details.len(), 2, "{details:?}");
+    assert_eq!(resnaps, 2);
+    assert!(details[1].ends_with("(+4 suppressed)"), "{details:?}");
+    assert!(!details[0].contains("repaired"));
+}
+```
+
+- [ ] **Step 2: Run to verify they fail.**
+Run: `cargo test -p arb-core --test book trim_to_top && cargo test -p scanner --test engine -- phantom persistent_mismatch`
+Expected: compile errors (`trim_to_top` missing; `issue_throttle_ms` missing from `EngineCtx` once `common::ctx()` is updated) or assertion failures (a resnapshot is emitted; 9 rows instead of 2).
+
+- [ ] **Step 3: Implement.**
+
+`crates/arb-core/src/book.rs`, inside `impl Book`:
+```rust
+    /// Drop levels the server's authoritative top proves are gone: bids strictly above
+    /// `best_bid`, asks strictly below `best_ask` (a removal we never applied). `None` leaves that
+    /// side alone: an empty or unreported side is not proof. Returns true if anything was removed.
+    pub fn trim_to_top(&mut self, best_bid: Option<Price>, best_ask: Option<Price>) -> bool {
+        let before = self.bids.len() + self.asks.len();
+        if let Some(b) = best_bid {
+            self.bids.retain(|p, _| *p <= b);
+        }
+        if let Some(a) = best_ask {
+            self.asks.retain(|p, _| *p >= a);
+        }
+        self.bids.len() + self.asks.len() != before
+    }
+```
+
+`bins/scanner/src/engine.rs`:
+- `EngineCtx` gets `pub issue_throttle_ms: i64,` after `drift_settle_ms`.
+- New private struct and field:
+```rust
+/// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time.
+#[derive(Debug, Clone, Copy)]
+struct IssueThrottle {
+    last_ms: i64,
+    suppressed: u32,
+}
+```
+  Add `issue_throttle: HashMap<(&'static str, String), IssueThrottle>,` to `Engine`, initialized empty in `Engine::new`.
+- New methods in `impl Engine`:
+```rust
+    fn book_mut(&mut self, token: &str) -> Option<&mut Book> {
+        if let Some((g, l)) = self.token_ix.get(token).copied() {
+            return self.groups.get_mut(g).and_then(|gr| gr.legs.get_mut(l)).map(|leg| &mut leg.book);
+        }
+        self.canary.get_mut(token)
+    }
+
+    /// Some(suppressed since the last emitted row) when a row may be emitted at `ts`; None while
+    /// still inside `issue_throttle_ms` of the last one. Pure: time is the event's ts.
+    fn throttle(&mut self, kind: &'static str, token: &str, ts: i64) -> Option<u32> {
+        let window = self.ctx.issue_throttle_ms;
+        let e = self
+            .issue_throttle
+            .entry((kind, token.to_string()))
+            .or_insert(IssueThrottle { last_ms: i64::MIN, suppressed: 0 });
+        if e.last_ms != i64::MIN && ts.saturating_sub(e.last_ms) < window {
+            e.suppressed = e.suppressed.saturating_add(1);
+            return None;
+        }
+        let n = e.suppressed;
+        e.last_ms = ts;
+        e.suppressed = 0;
+        Some(n)
+    }
+```
+- In `check_book`, keep the early returns, then restructure the body to this order. Compute `mismatch` from the untouched book as today. If it is `Some`:
+  1. Trim, and decide whether the book is now repaired:
+     ```rust
+     let (sb, sa) = server.unwrap_or((None, None));
+     let repaired = self.book_mut(token).is_some_and(|b| {
+         b.trim_to_top(sb, sa);
+         let t = b.top();
+         (sb.is_none() || sb == t.best_bid.map(|(x, _)| x)) && (sa.is_none() || sa == t.best_ask.map(|(x, _)| x))
+     });
+     ```
+  2. If `repaired`, append `" → repaired from stream"` to `detail`.
+  3. `if let Some(n) = self.throttle("top_mismatch", token, ts)`: append `format!(" (+{n} suppressed)")` when `n > 0`, push the integrity row (same fields as today), and push `Out::Resnapshot` only when `!repaired`.
+  4. Always: `if let Some(g) = group { self.suspect(g, ts + self.ctx.suspect_window_ms, ts, out); }`.
+  5. If `repaired` and `group` is `Some(g)`: `let eval_ts = ts.max(self.group_last_ts.get(g).copied().unwrap_or(i64::MIN)); self.evaluate(g, eval_ts, eval_ts, out);`.
+
+  THEN compute `crossed` from the (possibly trimmed) book: `self.book_of(token).is_some_and(|b| b.is_crossed())`. If crossed, then `if let Some(n) = self.throttle("crossed_book", token, ts)`: push the row with `detail: (n > 0).then(|| format!("+{n} suppressed"))`. Suspect marking stays unconditional, as today.
+
+`bins/scanner/src/config.rs`: `EngineCfg` gets `pub issue_throttle_ms: i64,`; `validate` rejects a negative value (follow the existing `anyhow::ensure!` style). `config/scanner.toml` `[engine]` gets
+```toml
+issue_throttle_ms = 5000         # one top_mismatch/crossed_book row per token per 5 s (VPS soak 2026-09-25: 20k rows/35 min from one book)
+```
+`bins/scanner/src/run.rs` `engine_ctx`: add `issue_throttle_ms: cfg.engine.issue_throttle_ms,`. `bins/scanner/tests/common/mod.rs` `ctx()`: add `issue_throttle_ms: 5_000,`. Fix any other `EngineCtx { .. }` literal the compiler points at (tests), with the same value.
+
+`crates/store/src/universe.rs`: in `upsert_universe` and `mark_gone`, right after `let mut tx = self.pool().begin().await?;`, add
+```rust
+        // Background work: the scanner role's 5 s default (01-roles.sh) is for the hot path. The
+        // ~89k-leg upsert hit it under load on the VPS soak (2026-09-25). This transaction only.
+        sqlx::query("SET LOCAL statement_timeout = '60s'").execute(&mut *tx).await?;
+```
+
+- [ ] **Step 4: Run to verify they pass, then the full suites.**
+Run: `cargo test -p arb-core && cargo test -p scanner && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
+Then run the store suite against Postgres (it must not print SKIPPED): `set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" && cargo test -p store`
+Expected: all pass. The existing tests `server_top_that_disagrees_with_ours_is_an_integrity_event_and_a_resnapshot` (a missing level: still resnapshots) and `a_real_top_mismatch_is_reported_once_a_later_frame_resolves_it` (still reported) must keep passing unchanged. If one of them fails, re-read Rule 1 before changing the test.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add crates/arb-core/src/book.rs crates/arb-core/tests/book.rs bins/scanner/src/engine.rs bins/scanner/src/config.rs config/scanner.toml bins/scanner/src/run.rs bins/scanner/tests/common/mod.rs bins/scanner/tests/engine.rs crates/store/src/universe.rs
+git commit -m "scanner: repair phantom levels from the stream's top, throttle integrity rows; universe save gets 60 s"
+```
+
+---
+
 ## Self-review notes (for the reviewer)
 
 - **Coverage of the 8 deferred items:**
