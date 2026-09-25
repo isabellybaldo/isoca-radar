@@ -1,8 +1,42 @@
 //! Universe cache (warm start, §8.1.2) and the current events/legs tables (§10).
+use crate::text::{clean, clean_opt};
 use crate::{EventRow, LegRow, Store, StoreError, UniverseSnapshot};
 use sqlx::{Postgres, QueryBuilder};
+use std::collections::HashMap;
 
 const CHUNK: usize = 1000;
+
+/// Keep only the last of each event, by `event_id` (a scan may see the same event twice in one pass).
+fn dedupe_last_events(es: &[EventRow]) -> Vec<&EventRow> {
+    let mut idx: HashMap<&str, usize> = HashMap::new();
+    let mut out: Vec<&EventRow> = Vec::new();
+    for e in es {
+        match idx.get(e.event_id.as_str()) {
+            Some(&i) => out[i] = e,
+            None => {
+                idx.insert(e.event_id.as_str(), out.len());
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// Keep only the last of each leg, by `market_id` (a scan may see the same market twice in one pass).
+fn dedupe_last_legs(ls: &[LegRow]) -> Vec<&LegRow> {
+    let mut idx: HashMap<&str, usize> = HashMap::new();
+    let mut out: Vec<&LegRow> = Vec::new();
+    for l in ls {
+        match idx.get(l.market_id.as_str()) {
+            Some(&i) => out[i] = l,
+            None => {
+                idx.insert(l.market_id.as_str(), out.len());
+                out.push(l);
+            }
+        }
+    }
+    out
+}
 
 impl Store {
     pub async fn save_universe(
@@ -17,7 +51,7 @@ impl Store {
         )
         .bind(taken_ms)
         .bind(n_events)
-        .bind(body)
+        .bind(clean(body))
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -54,15 +88,16 @@ impl Store {
         seen_ms: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
+        let events = dedupe_last_events(events);
         for chunk in events.chunks(CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(
                 "INSERT INTO events (event_id, slug, title, neg_risk_market_id, augmented, n_legs, first_seen_ms, last_seen_ms) ",
             );
             qb.push_values(chunk, |mut b, e| {
-                b.push_bind(e.event_id.clone())
-                    .push_bind(e.slug.clone())
-                    .push_bind(e.title.clone())
-                    .push_bind(e.neg_risk_market_id.clone())
+                b.push_bind(clean(&e.event_id))
+                    .push_bind(clean_opt(&e.slug))
+                    .push_bind(clean_opt(&e.title))
+                    .push_bind(clean_opt(&e.neg_risk_market_id))
                     .push_bind(e.augmented)
                     .push_bind(e.n_legs)
                     .push_bind(seen_ms)
@@ -75,23 +110,24 @@ impl Store {
             );
             qb.build().execute(&mut *tx).await?;
         }
+        let legs = dedupe_last_legs(legs);
         for chunk in legs.chunks(CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(
                 "INSERT INTO legs (market_id, event_id, yes_token, no_token, status, fee_rate, fee_exponent, \
                  tick, min_size, seconds_delay, end_date, first_seen_ms, last_seen_ms) ",
             );
             qb.push_values(chunk, |mut b, l| {
-                b.push_bind(l.market_id.clone())
-                    .push_bind(l.event_id.clone())
-                    .push_bind(l.yes_token.clone())
-                    .push_bind(l.no_token.clone())
-                    .push_bind(l.status.clone())
+                b.push_bind(clean(&l.market_id))
+                    .push_bind(clean(&l.event_id))
+                    .push_bind(clean(&l.yes_token))
+                    .push_bind(clean(&l.no_token))
+                    .push_bind(clean(&l.status))
                     .push_bind(l.fee_rate)
                     .push_bind(l.fee_exponent)
                     .push_bind(l.tick)
                     .push_bind(l.min_size)
                     .push_bind(l.seconds_delay)
-                    .push_bind(l.end_date.clone())
+                    .push_bind(clean_opt(&l.end_date))
                     .push_bind(seen_ms)
                     .push_bind(seen_ms);
             });

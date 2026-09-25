@@ -125,7 +125,7 @@ pub struct EpisodeWrite {
     pub legs: Vec<EpisodeLegRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ObservationRow {
     pub episode_id: String,
     pub offset_ms: i32,

@@ -1,4 +1,5 @@
 //! `runs`: every start/exit of a long-running service. Feeds the crash-loop breaker (§8.1.2).
+use crate::text::clean;
 use crate::{NewRun, Store, StoreError};
 
 impl Store {
@@ -7,11 +8,11 @@ impl Store {
             "INSERT INTO runs (service, started_ms, version, config_hash, mode) \
              VALUES ($1, $2, $3, $4, $5) RETURNING run_id",
         )
-        .bind(&r.service)
+        .bind(clean(&r.service))
         .bind(r.started_ms)
-        .bind(&r.version)
-        .bind(&r.config_hash)
-        .bind(&r.mode)
+        .bind(clean(&r.version))
+        .bind(clean(&r.config_hash))
+        .bind(clean(&r.mode))
         .fetch_one(self.pool())
         .await?)
     }
@@ -25,7 +26,7 @@ impl Store {
         sqlx::query("UPDATE runs SET ended_ms = $2, exit_reason = $3 WHERE run_id = $1")
             .bind(run_id)
             .bind(ended_ms)
-            .bind(reason)
+            .bind(clean(reason))
             .execute(self.pool())
             .await?;
         Ok(())
@@ -51,7 +52,7 @@ impl Store {
             "INSERT INTO runs (service, started_ms, ended_ms, version, config_hash, mode, exit_reason) \
              VALUES ($1, $2, $2, '', '', 'breaker_reset', 'manual reset')",
         )
-        .bind(service)
+        .bind(clean(service))
         .bind(now_ms)
         .execute(self.pool())
         .await?;

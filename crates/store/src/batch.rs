@@ -1,5 +1,8 @@
 //! One write transaction per batch (spec §10: ~100 ms batches from the scanner's store writer).
-use crate::{Batch, EpisodeLegRow, EpisodeRow, EpisodeWrite, Store, StoreError};
+use crate::text::{clean, clean_opt};
+use crate::{
+    Batch, EpisodeLegRow, EpisodeRow, EpisodeWrite, HealthRow, ObservationRow, Store, StoreError,
+};
 use sqlx::postgres::PgListener;
 use sqlx::{Postgres, QueryBuilder};
 use std::collections::HashMap;
@@ -68,17 +71,17 @@ fn push_episode(
     b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &'static str>,
     r: &EpisodeRow,
 ) {
-    b.push_bind(r.episode_id.clone())
+    b.push_bind(clean(&r.episode_id))
         .push_bind(r.run_id)
-        .push_bind(r.source.clone())
-        .push_bind(r.kind.clone())
-        .push_bind(r.realization.clone())
-        .push_bind(r.event_id.clone())
-        .push_bind(r.event_slug.clone())
-        .push_bind(r.event_title.clone())
-        .push_bind(r.neg_risk_market_id.clone())
-        .push_bind(r.pair_id.clone())
-        .push_bind(r.category.clone())
+        .push_bind(clean(&r.source))
+        .push_bind(clean(&r.kind))
+        .push_bind(clean(&r.realization))
+        .push_bind(clean(&r.event_id))
+        .push_bind(clean_opt(&r.event_slug))
+        .push_bind(clean_opt(&r.event_title))
+        .push_bind(clean_opt(&r.neg_risk_market_id))
+        .push_bind(clean_opt(&r.pair_id))
+        .push_bind(clean_opt(&r.category))
         .push_bind(r.n_outcomes)
         .push_bind(r.n_legs)
         .push_bind(r.legs_dropped)
@@ -115,8 +118,8 @@ fn push_episode(
         .push_bind(r.stale_transport)
         .push_bind(r.open_lag_ms)
         .push_bind(r.oracle_downgraded)
-        .push_bind(r.scanner_version.clone())
-        .push_bind(r.config_hash.clone());
+        .push_bind(clean(&r.scanner_version))
+        .push_bind(clean(&r.config_hash));
 }
 
 /// Keep only the last write of each episode, in first-seen order (the scanner may upsert the same
@@ -130,6 +133,23 @@ fn dedupe_last(ws: &[EpisodeWrite]) -> Vec<&EpisodeWrite> {
             None => {
                 idx.insert(w.row.episode_id.as_str(), out.len());
                 out.push(w);
+            }
+        }
+    }
+    out
+}
+
+/// Keep only the last write of each (run_id, minute_ms), in first-seen order (the scanner may
+/// upsert the same health minute twice within one batch, which would otherwise fail ON CONFLICT).
+fn dedupe_last_health(hs: &[HealthRow]) -> Vec<&HealthRow> {
+    let mut idx: HashMap<(i64, i64), usize> = HashMap::new();
+    let mut out: Vec<&HealthRow> = Vec::new();
+    for h in hs {
+        match idx.get(&(h.run_id, h.minute_ms)) {
+            Some(&i) => out[i] = h,
+            None => {
+                idx.insert((h.run_id, h.minute_ms), out.len());
+                out.push(h);
             }
         }
     }
@@ -204,11 +224,11 @@ impl Store {
                     "INSERT INTO episode_legs ({LEG_COLS}) "
                 ));
                 qb.push_values(chunk, |mut s, l| {
-                    s.push_bind(l.episode_id.clone())
+                    s.push_bind(clean(&l.episode_id))
                         .push_bind(l.leg_idx)
-                        .push_bind(l.market_id.clone())
-                        .push_bind(l.token.clone())
-                        .push_bind(l.action.clone())
+                        .push_bind(clean(&l.market_id))
+                        .push_bind(clean(&l.token))
+                        .push_bind(clean(&l.action))
                         .push_bind(l.best_price)
                         .push_bind(l.vwap)
                         .push_bind(l.levels)
@@ -230,12 +250,12 @@ impl Store {
                  q_max, pnl, still_profitable, fill_at_original_size) ",
             );
             qb.push_values(chunk, |mut s, o| {
-                s.push_bind(o.episode_id.clone())
+                s.push_bind(clean(&o.episode_id))
                     .push_bind(o.offset_ms)
-                    .push_bind(o.source.clone())
+                    .push_bind(clean(&o.source))
                     .push_bind(o.observed_ms)
                     .push_bind(o.skipped)
-                    .push_bind(o.skip_reason.clone())
+                    .push_bind(clean_opt(&o.skip_reason))
                     .push_bind(o.edge)
                     .push_bind(o.q_max)
                     .push_bind(o.pnl)
@@ -252,16 +272,17 @@ impl Store {
             qb.push_values(chunk, |mut s, i| {
                 s.push_bind(i.run_id)
                     .push_bind(i.ts_ms)
-                    .push_bind(i.kind.clone())
+                    .push_bind(clean(&i.kind))
                     .push_bind(i.shard)
-                    .push_bind(i.token.clone())
-                    .push_bind(i.event_id.clone())
-                    .push_bind(i.detail.clone());
+                    .push_bind(clean_opt(&i.token))
+                    .push_bind(clean_opt(&i.event_id))
+                    .push_bind(clean_opt(&i.detail));
             });
             qb.build().execute(&mut *tx).await?;
         }
 
-        for chunk in b.health.chunks(CHUNK) {
+        let health = dedupe_last_health(&b.health);
+        for chunk in health.chunks(CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(
                 "INSERT INTO health (run_id, minute_ms, tokens, shards, msgs, bytes, drops, reconnects, rest_p50_ms, \
                  rest_p99_ms, lag_p50_ms, lag_p99_ms, clock_offset_ms, ok, capture_paused, parked_shards, dropped_groups) ",
@@ -318,6 +339,21 @@ impl Store {
             .bind(episode_id)
             .fetch_all(self.pool())
             .await?)
+    }
+
+    /// All observations for one episode, in write order.
+    pub async fn observations_for(
+        &self,
+        episode_id: &str,
+    ) -> Result<Vec<ObservationRow>, StoreError> {
+        Ok(sqlx::query_as::<_, ObservationRow>(
+            "SELECT episode_id, offset_ms, source, observed_ms, skipped, skip_reason, edge, \
+             q_max, pnl, still_profitable, fill_at_original_size FROM observations \
+             WHERE episode_id = $1 ORDER BY id",
+        )
+        .bind(episode_id)
+        .fetch_all(self.pool())
+        .await?)
     }
 
     pub async fn count(&self, table: Table) -> Result<i64, StoreError> {

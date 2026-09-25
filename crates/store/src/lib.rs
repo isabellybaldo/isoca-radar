@@ -6,6 +6,7 @@ mod batch;
 pub mod error;
 pub mod rows;
 mod runs;
+mod text;
 mod universe;
 
 pub use batch::{Listener, Table};
@@ -105,6 +106,16 @@ impl Store {
             "SELECT table_name::text FROM information_schema.tables \
              WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY 1",
         )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Admin/test tooling: database names in `pg_database` matching a `LIKE` pattern, sorted.
+    pub async fn database_names_like(&self, pattern: &str) -> Result<Vec<String>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT datname::text FROM pg_database WHERE datname LIKE $1 ORDER BY 1",
+        )
+        .bind(pattern)
         .fetch_all(&self.pool)
         .await?)
     }
