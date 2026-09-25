@@ -58,6 +58,8 @@ pub struct EngineCfg {
     pub l1_suspect_window_ms: i64,
     pub drift_settle_ms: i64,
     pub channel_capacity: usize,
+    /// Per-(kind, token) rate limit on top_mismatch/crossed_book integrity rows (S3a).
+    pub issue_throttle_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -193,6 +195,10 @@ impl Config {
         anyhow::ensure!(
             self.engine.channel_capacity >= 1024,
             "engine.channel_capacity must be ≥ 1024"
+        );
+        anyhow::ensure!(
+            self.engine.issue_throttle_ms >= 0,
+            "engine.issue_throttle_ms must be ≥ 0"
         );
         Ok(())
     }

@@ -25,6 +25,7 @@ pub struct EngineCtx {
     pub suspect_window_ms: i64,
     pub l1_suspect_window_ms: i64,
     pub drift_settle_ms: i64,
+    pub issue_throttle_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -167,6 +168,15 @@ pub struct Engine {
     group_last_ts: Vec<i64>,
     /// See `HeldClosed`. Emptied by `prune_held` once no unresolved check can flag them.
     held_closed: Vec<HeldClosed>,
+    /// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time.
+    issue_throttle: HashMap<(&'static str, String), IssueThrottle>,
+}
+
+/// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time.
+#[derive(Debug, Clone, Copy)]
+struct IssueThrottle {
+    last_ms: i64,
+    suppressed: u32,
 }
 
 fn kind_str(k: Kind) -> &'static str {
@@ -232,6 +242,7 @@ impl Engine {
             pending_tops: BTreeMap::new(),
             group_last_ts: Vec::new(),
             held_closed: Vec::new(),
+            issue_throttle: HashMap::new(),
         }
     }
 
@@ -645,7 +656,40 @@ impl Engine {
         }
     }
 
-    /// End-of-frame integrity for one token: crossed book, and the server's final top vs ours.
+    fn book_mut(&mut self, token: &str) -> Option<&mut Book> {
+        if let Some((g, l)) = self.token_ix.get(token).copied() {
+            return self
+                .groups
+                .get_mut(g)
+                .and_then(|gr| gr.legs.get_mut(l))
+                .map(|leg| &mut leg.book);
+        }
+        self.canary.get_mut(token)
+    }
+
+    /// Some(suppressed since the last emitted row) when a row may be emitted at `ts`; None while
+    /// still inside `issue_throttle_ms` of the last one. Pure: time is the event's ts.
+    fn throttle(&mut self, kind: &'static str, token: &str, ts: i64) -> Option<u32> {
+        let window = self.ctx.issue_throttle_ms;
+        let e = self
+            .issue_throttle
+            .entry((kind, token.to_string()))
+            .or_insert(IssueThrottle {
+                last_ms: i64::MIN,
+                suppressed: 0,
+            });
+        if e.last_ms != i64::MIN && ts.saturating_sub(e.last_ms) < window {
+            e.suppressed = e.suppressed.saturating_add(1);
+            return None;
+        }
+        let n = e.suppressed;
+        e.last_ms = ts;
+        e.suppressed = 0;
+        Some(n)
+    }
+
+    /// End-of-frame integrity for one token: the server's final top vs ours (repaired from the
+    /// stream when possible), then the crossed-book check on the (possibly trimmed) book.
     fn check_book(
         &mut self,
         conn: usize,
@@ -663,7 +707,6 @@ impl Engine {
         let Some(book) = self.book_of(token) else {
             return;
         };
-        let crossed = book.is_crossed();
         let top = book.top();
         let ours_bid = top.best_bid.map(|(p, _)| p);
         let ours_ask = top.best_ask.map(|(p, _)| p);
@@ -674,35 +717,63 @@ impl Engine {
             })
         });
         let event_id = group.map(|g| self.universe.groups[g].event_id.clone());
-        if let Some(detail) = mismatch {
-            out.push(self.integrity(
-                ts,
-                Issue {
-                    kind: "top_mismatch",
-                    shard: Some(conn),
-                    token: Some(token.to_string()),
-                    event_id: event_id.clone(),
-                    detail: Some(detail),
-                },
-            ));
-            out.push(Out::Resnapshot {
-                token: token.to_string(),
+        if let Some(mut detail) = mismatch {
+            // Rule 1 (S3a Task 8): the stream's top is authoritative. Drop every level of ours
+            // the server's top disproves, then see if that alone repairs the disagreement.
+            let (sb, sa) = server.unwrap_or((None, None));
+            let repaired = self.book_mut(token).is_some_and(|b| {
+                b.trim_to_top(sb, sa);
+                let t = b.top();
+                (sb.is_none() || sb == t.best_bid.map(|(x, _)| x))
+                    && (sa.is_none() || sa == t.best_ask.map(|(x, _)| x))
             });
+            if repaired {
+                detail.push_str(" → repaired from stream");
+            }
+            if let Some(n) = self.throttle("top_mismatch", token, ts) {
+                if n > 0 {
+                    detail.push_str(&format!(" (+{n} suppressed)"));
+                }
+                out.push(self.integrity(
+                    ts,
+                    Issue {
+                        kind: "top_mismatch",
+                        shard: Some(conn),
+                        token: Some(token.to_string()),
+                        event_id: event_id.clone(),
+                        detail: Some(detail),
+                    },
+                ));
+                if !repaired {
+                    out.push(Out::Resnapshot {
+                        token: token.to_string(),
+                    });
+                }
+            }
             if let Some(g) = group {
                 self.suspect(g, ts + self.ctx.suspect_window_ms, ts, out);
             }
+            if repaired && let Some(g) = group {
+                let eval_ts = ts.max(self.group_last_ts.get(g).copied().unwrap_or(i64::MIN));
+                self.evaluate(g, eval_ts, eval_ts, out);
+            }
         }
+        // Rule 3: evaluated after the trim, so a phantom that crossed the book and was repaired
+        // is not also reported as crossed.
+        let crossed = self.book_of(token).is_some_and(|b| b.is_crossed());
         if crossed {
-            out.push(self.integrity(
-                ts,
-                Issue {
-                    kind: "crossed_book",
-                    shard: Some(conn),
-                    token: Some(token.to_string()),
-                    event_id,
-                    detail: None,
-                },
-            ));
+            if let Some(n) = self.throttle("crossed_book", token, ts) {
+                out.push(self.integrity(
+                    ts,
+                    Issue {
+                        kind: "crossed_book",
+                        shard: Some(conn),
+                        token: Some(token.to_string()),
+                        event_id,
+                        detail: (n > 0).then(|| format!("+{n} suppressed")),
+                    },
+                ));
+            }
             if let Some(g) = group {
                 self.suspect(g, ts + self.ctx.suspect_window_ms, ts, out);
             }

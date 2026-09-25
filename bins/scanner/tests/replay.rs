@@ -31,6 +31,7 @@ fn ctx() -> EngineCtx {
         suspect_window_ms: 60_000,
         l1_suspect_window_ms: 3_600_000,
         drift_settle_ms: 2_000,
+        issue_throttle_ms: 5_000,
     }
 }
 

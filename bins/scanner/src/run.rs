@@ -114,6 +114,7 @@ fn engine_ctx(cfg: &Config, cfg_hash: &str, run_id: i64, source: &str) -> Engine
         suspect_window_ms: cfg.engine.suspect_window_ms,
         l1_suspect_window_ms: cfg.engine.l1_suspect_window_ms,
         drift_settle_ms: cfg.engine.drift_settle_ms,
+        issue_throttle_ms: cfg.engine.issue_throttle_ms,
     }
 }
 

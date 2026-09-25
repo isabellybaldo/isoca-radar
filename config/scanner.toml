@@ -28,6 +28,7 @@ suspect_window_ms = 60000
 l1_suspect_window_ms = 3600000  # Phase 0: 6/346 NegRisk legs failed the mirror check
 drift_settle_ms = 2000
 channel_capacity = 50000
+issue_throttle_ms = 5000         # one top_mismatch/crossed_book row per token per 5 s (VPS soak 2026-09-25: 20k rows/35 min from one book)
 
 [recheck]
 offsets_ms = [1000, 2000, 5000] # spec §8.2 (+ max secondsDelay when > 0)

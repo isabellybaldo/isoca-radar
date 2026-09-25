@@ -579,7 +579,10 @@ fn a_late_top_mismatch_flags_the_episode_already_open_in_its_group() {
     let open = episodes(&open_on_a_wrong_book(&mut e));
     assert_eq!(open.len(), 1);
     assert!(!open[0].engine_suspect, "nothing is known to be wrong yet");
-    // a later frame on the same conn (> 1 s past 2_000) resolves the check as a real mismatch
+    // a later frame on the same conn (> 1 s past 2_000) resolves the check as a real mismatch.
+    // Our only ask (0.30) is strictly below the server's reported top (0.31): S3a Task 8 trims it
+    // as a phantom, which also exposes that the basket it opened was fake, so the same frame
+    // closes the episode, still flagged suspect.
     let outs = e.on_frame(0, 3_200, &[ask("e1-y2", 3_001, "0.30", "10")]);
     assert!(
         outs.iter()
@@ -592,9 +595,7 @@ fn a_late_top_mismatch_flags_the_episode_already_open_in_its_group() {
         .find(|r| r.episode_id == "live-7-00000001")
         .expect("the open episode is re-emitted");
     assert!(last.engine_suspect);
-    assert_eq!(last.closed_server_ms, None, "still open");
-    let outs = e.close_all(4_000);
-    assert!(episodes(&outs)[0].engine_suspect, "and it stays flagged");
+    assert_eq!(last.closed_server_ms, Some(3_001));
 }
 
 #[test]
@@ -644,4 +645,88 @@ fn a_clean_resolution_re_emits_nothing() {
     );
     let outs = e.on_frame(0, 3_200, &[ask("e1-y2", 3_001, "0.30", "10")]);
     assert!(episodes(&outs).is_empty(), "{outs:?}");
+}
+
+#[test]
+fn a_phantom_level_is_trimmed_from_the_streams_top_without_a_resnapshot() {
+    let mut e = engine();
+    seed(&mut e); // e1-y0 ask 0.40
+    // the server removed our 0.40 ask without us seeing it; its final top ask is now 0.45
+    e.on_frame(
+        0,
+        2_100,
+        &[delta(
+            "e1-y0",
+            2_000,
+            Side::Ask,
+            "0.45",
+            "5",
+            None,
+            Some("0.45"),
+        )],
+    );
+    let outs = e.on_frame(0, 3_200, &[ask("e1-y1", 3_001, "0.20", "10")]); // > 1 s later: resolves
+    let rows: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            Out::Integrity(i) if i.kind == "top_mismatch" => Some(i.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "{outs:?}");
+    assert!(
+        rows[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("repaired from stream"),
+        "{rows:?}"
+    );
+    assert!(
+        !outs.iter().any(|o| matches!(o, Out::Resnapshot { .. })),
+        "{outs:?}"
+    );
+    assert_eq!(
+        e.book_of("e1-y0").unwrap().top().best_ask.map(|(x, _)| x),
+        Some(p("0.45"))
+    );
+}
+
+#[test]
+fn a_persistent_mismatch_is_reported_at_most_once_per_throttle_window() {
+    let mut e = engine(); // common::ctx(): issue_throttle_ms = 5_000
+    seed(&mut e); // e1-y2 ask 0.30
+    // the server keeps saying 0.29: a level we LACK, so only a resnapshot could fix it
+    let mut details = Vec::new();
+    let mut resnaps = 0;
+    for k in 0..10_i64 {
+        let t = 2_000 + k * 1_100; // each later delta resolves the previous pending check
+        let outs = e.on_frame(
+            0,
+            t + 100,
+            &[MarketEvent::Delta {
+                token: "e1-y2".into(),
+                server_ts_ms: t,
+                side: Side::Ask,
+                price: p("0.50"),
+                size: sh("5"),
+                best_bid: None,
+                best_ask: Some(p("0.29")),
+            }],
+        );
+        for o in &outs {
+            match o {
+                Out::Integrity(i) if i.kind == "top_mismatch" => {
+                    details.push(i.detail.clone().unwrap_or_default())
+                }
+                Out::Resnapshot { token } if token == "e1-y2" => resnaps += 1,
+                _ => {}
+            }
+        }
+    }
+    // resolutions at ts 2000, 3100, …, 10800: emitted at 2000 and 7500 only (window 5000)
+    assert_eq!(details.len(), 2, "{details:?}");
+    assert_eq!(resnaps, 2);
+    assert!(details[1].ends_with("(+4 suppressed)"), "{details:?}");
+    assert!(!details[0].contains("repaired"));
 }

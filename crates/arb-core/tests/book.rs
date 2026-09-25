@@ -86,3 +86,32 @@ fn snapshot_ignores_zero_size_levels() {
     b.apply_snapshot(&[lv("0.40", "0"), lv("0.39", "5")], &[], 0);
     assert_eq!(b.top().best_bid, Some(lv("0.39", "5")));
 }
+
+#[test]
+fn trim_to_top_drops_only_levels_the_servers_top_disproves() {
+    let lv = |p: &str, s: &str| {
+        (
+            arb_core::money::Price::parse(p).unwrap(),
+            arb_core::money::Shares::parse(s).unwrap(),
+        )
+    };
+    let px = |p: &str| arb_core::money::Price::parse(p).unwrap();
+    let mut b = arb_core::book::Book::default();
+    b.apply_snapshot(
+        &[lv("0.48", "5"), lv("0.47", "9")],
+        &[lv("0.49", "3"), lv("0.50", "7")],
+        0,
+    );
+    // server: best bid 0.47, best ask 0.50 → our 0.48 bid and 0.49 ask are phantoms
+    assert!(b.trim_to_top(Some(px("0.47")), Some(px("0.50"))));
+    let t = b.top();
+    assert_eq!(
+        (t.best_bid.map(|x| x.0), t.best_ask.map(|x| x.0)),
+        (Some(px("0.47")), Some(px("0.50")))
+    );
+    // nothing left to trim; None sides are never proof
+    assert!(!b.trim_to_top(Some(px("0.47")), Some(px("0.50"))));
+    assert!(!b.trim_to_top(None, None));
+    // a missing level (server best bid 0.49 > ours) cannot be repaired by trimming
+    assert!(!b.trim_to_top(Some(px("0.49")), None));
+}

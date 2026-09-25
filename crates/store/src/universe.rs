@@ -88,6 +88,11 @@ impl Store {
         seen_ms: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await?;
+        // Background work: the scanner role's 5 s default (01-roles.sh) is for the hot path. The
+        // ~89k-leg upsert hit it under load on the VPS soak (2026-09-25). This transaction only.
+        sqlx::query("SET LOCAL statement_timeout = '60s'")
+            .execute(&mut *tx)
+            .await?;
         let events = dedupe_last_events(events);
         for chunk in events.chunks(CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(
@@ -147,6 +152,11 @@ impl Store {
     /// Call only after a COMPLETE universe scan stamped `seen_ms` (spec §7: otherwise closed markets stay open forever).
     pub async fn mark_gone(&self, seen_ms: i64) -> Result<u64, StoreError> {
         let mut tx = self.pool().begin().await?;
+        // Background work: the scanner role's 5 s default (01-roles.sh) is for the hot path. The
+        // ~89k-leg upsert hit it under load on the VPS soak (2026-09-25). This transaction only.
+        sqlx::query("SET LOCAL statement_timeout = '60s'")
+            .execute(&mut *tx)
+            .await?;
         let events = sqlx::query(
             "UPDATE events SET gone_ms = $1 WHERE last_seen_ms < $1 AND gone_ms IS NULL",
         )

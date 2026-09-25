@@ -108,4 +108,18 @@ impl Book {
             .map(|(p, s)| (p.complement(), s))
             .collect()
     }
+
+    /// Drop levels the server's authoritative top proves are gone: bids strictly above
+    /// `best_bid`, asks strictly below `best_ask` (a removal we never applied). `None` leaves that
+    /// side alone: an empty or unreported side is not proof. Returns true if anything was removed.
+    pub fn trim_to_top(&mut self, best_bid: Option<Price>, best_ask: Option<Price>) -> bool {
+        let before = self.bids.len() + self.asks.len();
+        if let Some(b) = best_bid {
+            self.bids.retain(|p, _| *p <= b);
+        }
+        if let Some(a) = best_ask {
+            self.asks.retain(|p, _| *p >= a);
+        }
+        self.bids.len() + self.asks.len() != before
+    }
 }
