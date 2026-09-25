@@ -1,6 +1,7 @@
 //! pm-api: the ONLY crate that touches the network. Read-only Polymarket access (spec §16).
 #![forbid(unsafe_code)]
 
+pub mod clob;
 pub mod error;
 pub mod gamma;
 pub mod routes;
