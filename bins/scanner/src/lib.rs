@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod engine;
 pub mod guard;
 pub mod shards;
 pub mod universe;
