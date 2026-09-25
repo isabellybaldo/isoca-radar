@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod replay;
 pub mod shards;
 pub mod universe;
+pub mod writer;
 
 /// Wall-clock milliseconds (our receive clock).
 pub fn now_ms() -> i64 {
