@@ -120,9 +120,7 @@ struct At {
     recv_ms: i64,
 }
 
-// Fields are read starting Task 5's `drift_check`/`tick`; not yet in Task 4's code.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct PendingDrift {
     pub token: String,
     pub rest: Book,
@@ -141,8 +139,6 @@ pub struct Engine {
     open_by_key: HashMap<String, u64>,
     suspect_until: Vec<i64>,
     msgs: HashMap<String, u64>,
-    // Populated by Task 5's `drift_check`, drained by `tick`; not yet in Task 4's code.
-    #[allow(dead_code)]
     pending_drift: Vec<PendingDrift>,
     /// Mirrors `EpisodeTracker`'s private `seen` set so the engine can recover `first_sight`
     /// (censor_left) for open/peak rows; see `OpenEp::censor_left`.
@@ -776,5 +772,104 @@ impl Engine {
         // `EpisodeTracker::close_all` clears its own `seen` set entirely; mirror that.
         self.seen.clear();
         out
+    }
+
+    pub fn alive(&mut self, conn: usize, ts_ms: i64) {
+        let keys: Vec<String> = self
+            .open
+            .values()
+            .filter(|ep| self.group_conn.get(ep.group).copied().flatten() == Some(conn))
+            .map(|ep| ep.key.clone())
+            .collect();
+        for k in keys {
+            self.tracker.on_alive(&k, ts_ms);
+        }
+    }
+
+    pub fn book_of(&self, token: &str) -> Option<&Book> {
+        match self.token_ix.get(token) {
+            Some(&(g, l)) => Some(&self.groups[g].legs[l].book),
+            None => self.canary.get(token),
+        }
+    }
+
+    pub fn rest_snapshot(&mut self, token: &str, book: Book) -> Vec<Out> {
+        let mut out = Vec::new();
+        let ts = book.server_ts_ms();
+        if let Some(&(g, l)) = self.token_ix.get(token) {
+            if ts < self.groups[g].legs[l].book.server_ts_ms() {
+                return out;
+            }
+            self.groups[g].legs[l].book = book;
+            self.evaluate(g, ts, ts, &mut out);
+        } else if let Some(b) = self.canary.get_mut(token)
+            && ts >= b.server_ts_ms()
+        {
+            *b = book;
+        }
+        out
+    }
+
+    pub fn drift_check(&mut self, token: &str, rest: Book, now_ms: i64) {
+        self.pending_drift.push(PendingDrift {
+            token: token.to_string(),
+            rest,
+            due_ms: now_ms + self.ctx.drift_settle_ms,
+        });
+    }
+
+    pub fn tick(&mut self, now_ms: i64) -> Vec<Out> {
+        let mut out = Vec::new();
+        let (due, later): (Vec<PendingDrift>, Vec<PendingDrift>) =
+            std::mem::take(&mut self.pending_drift)
+                .into_iter()
+                .partition(|p| p.due_ms <= now_ms);
+        self.pending_drift = later;
+        for p in due {
+            let Some(ours) = self.book_of(&p.token) else {
+                continue;
+            };
+            if ours.server_ts_ms() > p.rest.server_ts_ms() {
+                continue; // we moved on after the REST snapshot: inconclusive
+            }
+            if ours.asks_best_first() == p.rest.asks_best_first()
+                && ours.bids_best_first() == p.rest.bids_best_first()
+            {
+                continue;
+            }
+            let event_id = self
+                .token_ix
+                .get(&p.token)
+                .map(|&(g, _)| self.universe.groups[g].event_id.clone());
+            out.push(Out::Drift {
+                token: p.token.clone(),
+                event_id,
+                detail: format!(
+                    "ws asks {} bids {} vs rest asks {} bids {} (ws ts {} rest ts {})",
+                    ours.asks_best_first().len(),
+                    ours.bids_best_first().len(),
+                    p.rest.asks_best_first().len(),
+                    p.rest.bids_best_first().len(),
+                    ours.server_ts_ms(),
+                    p.rest.server_ts_ms()
+                ),
+            });
+        }
+        out
+    }
+
+    pub fn mark_suspect(&mut self, event_id: &str, until_ms: i64) {
+        if let Some(g) = self
+            .universe
+            .groups
+            .iter()
+            .position(|m| m.event_id == event_id)
+        {
+            self.suspect(g, until_ms);
+        }
+    }
+
+    pub fn rates(&mut self) -> HashMap<String, u64> {
+        std::mem::take(&mut self.msgs)
     }
 }
