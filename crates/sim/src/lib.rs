@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod latency;
 pub mod types;
 
 use thiserror::Error;
