@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
-use arb_core::detect::{Group, Kind, detect_implication, detect_no_basket, detect_yes_basket};
+use arb_core::detect::{
+    Group, GroupLeg, Kind, LegStatus, detect_implication, detect_no_basket, detect_yes_basket,
+};
 use arb_core::fee::FeeSchedule;
 use arb_core::stats::annualized;
 use common::{ctx, d, fee, live, no_group, p};
@@ -219,10 +221,34 @@ fn p2_needs_an_approved_pair_and_buys_no_a_yes_b() {
 
 #[test]
 fn multi_level_books_never_size_past_the_budget() {
-    // The key issue: with a tight budget and multi-level books, average cost can
-    // underestimate actual cost. Use a scenario where per_trade is tight.
-    // Build a NO basket with limited budget.
-    let g = no_group(FeeSchedule::ZERO);
+    // Build a 4-leg NO basket with leg0 having multi-level books.
+    // leg0: YES bids [("0.90","50"), ("0.36","950")], asks [("0.95","100")]
+    // leg1: YES bids [("0.35","1000")], asks [("0.40","100")]
+    // leg2: YES bids [("0.30","1000")], asks [("0.35","100")]
+    // leg3: YES asks [("0.05","100")], no bids
+    // NO asks: 0.10×50 then 0.64×950, 0.65×1000, 0.70×1000.
+    // Walked cost for q > 50: 1.99q − 27.
+    let g = Group {
+        legs: vec![
+            GroupLeg {
+                status: LegStatus::Live,
+                book: common::book(&[("0.90", "50"), ("0.36", "950")], &[("0.95", "100")]),
+                fee: FeeSchedule::ZERO,
+            },
+            GroupLeg {
+                status: LegStatus::Live,
+                book: common::book(&[("0.35", "1000")], &[("0.40", "100")]),
+                fee: FeeSchedule::ZERO,
+            },
+            GroupLeg {
+                status: LegStatus::Live,
+                book: common::book(&[("0.30", "1000")], &[("0.35", "100")]),
+                fee: FeeSchedule::ZERO,
+            },
+            live(None, Some("0.05"), FeeSchedule::ZERO),
+        ],
+        augmented: false,
+    };
     let sig = detect_no_basket(&g).unwrap();
     let c = ctx(
         "e1",
@@ -232,30 +258,64 @@ fn multi_level_books_never_size_past_the_budget() {
         &[Outcome::No, Outcome::No, Outcome::No],
     );
 
-    // Set per_trade = 20 and free_cash = 30. The old algorithm might have sized beyond budget
-    // because it used average cost. The new bisection approach should respect the actual cost.
-    let Decision::Take(pl) = decide(&cfg(), &acct(PolicyKind::P0Converter, "20"), d("30"), &c)
+    // Case A: per_trade binds. per_trade=100, free_cash=1000.
+    // Bisection: 1.99q − 27 ≤ 100 → q ≤ 63.8 → q_target = 63 on the whole-share grid.
+    let Decision::Take(pl_a) = decide(&cfg(), &acct(PolicyKind::P0Converter, "100"), d("1000"), &c)
     else {
-        panic!("expected take with tight budget")
+        panic!("expected take in case A (per_trade binds)")
     };
+    assert_eq!(pl_a.q_target, d("63"), "case A: q_target should be 63");
 
-    // Verify walked cost does not exceed per_trade budget (20).
-    let mut total_cost = Decimal::ZERO;
-    for (levels, leg) in c.open_levels.iter().zip(&pl.legs) {
-        let (cost, _) = walk_cost(levels, pl.q_target, leg.fee, false)
+    // Verify walked cost for q=63 is ≤ 100.
+    let mut walked_cost_a = Decimal::ZERO;
+    for (levels, leg) in c.open_levels.iter().zip(&pl_a.legs) {
+        let (cost, _) = walk_cost(levels, pl_a.q_target, leg.fee, false)
             .expect("walked cost should succeed for taken q");
-        total_cost += cost;
+        walked_cost_a += cost;
     }
     assert!(
-        total_cost <= d("20"),
-        "walked cost {} should be <= per_trade budget 20",
-        total_cost
+        walked_cost_a <= d("100"),
+        "case A: walked cost {} should be <= per_trade 100",
+        walked_cost_a
+    );
+    // Walked cost should be 1.99*63 − 27 = 98.37.
+    assert!(
+        walked_cost_a >= d("98"),
+        "case A: walked cost {} should be >= 98",
+        walked_cost_a
     );
 
-    // Verify reserve does not exceed free_cash (30).
+    // Reserve should be 1.99 * 63 + 0.001 = 125.371.
+    assert_eq!(
+        pl_a.reserve,
+        d("125.371"),
+        "case A: reserve should be 125.371"
+    );
     assert!(
-        pl.reserve <= d("30"),
-        "reserve {} should be <= free_cash 30",
-        pl.reserve
+        pl_a.reserve <= d("1000"),
+        "case A: reserve {} should be <= free_cash 1000",
+        pl_a.reserve
+    );
+
+    // Case B: reserve binds. per_trade=1000, free_cash=110.
+    // Bisection: 1.99q − 27 ≤ 110 → q ≤ 68.84 → q_target = 68.
+    // Reserve at q=68: 1.99*68 + 0.001 = 135.321 > 110, so reserve correction kicks in.
+    // C = 1.99, q = (110 − 0.001) / 1.99 = 109.999 / 1.99 ≈ 55.27 → q_target = 55.
+    let Decision::Take(pl_b) = decide(&cfg(), &acct(PolicyKind::P0Converter, "1000"), d("110"), &c)
+    else {
+        panic!("expected take in case B (reserve binds)")
+    };
+    assert_eq!(pl_b.q_target, d("55"), "case B: q_target should be 55");
+
+    // Reserve should be 1.99 * 55 + 0.001 = 109.451 ≤ 110.
+    assert_eq!(
+        pl_b.reserve,
+        d("109.451"),
+        "case B: reserve should be 109.451"
+    );
+    assert!(
+        pl_b.reserve <= d("110"),
+        "case B: reserve {} should be <= free_cash 110",
+        pl_b.reserve
     );
 }
