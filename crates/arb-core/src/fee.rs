@@ -78,4 +78,12 @@ impl FeeSchedule {
         self.fee_exact(p, qty)
             .round_dp_with_strategy(5, RoundingStrategy::AwayFromZero)
     }
+
+    pub fn rate(&self) -> Decimal {
+        self.rate
+    }
+
+    pub fn exponent(&self) -> u8 {
+        self.exponent
+    }
 }

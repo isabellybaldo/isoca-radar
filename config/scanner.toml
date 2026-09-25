@@ -1,0 +1,50 @@
+# cute-trading scanner. Integers only. Phase 0 = spikes/probe/RESULTS.md.
+[universe]
+refresh_secs = 300              # spec §7
+warm_start_max_age_secs = 300   # spec §8.1.2
+canary_pairs = 200              # spec §7
+
+[shards]
+max_connections = 40            # Phase 0: cap ≥ 40, untested above
+hot_events = 50
+hot_shard_tokens = 500          # Phase 0: clean at 500/conn
+cold_shard_tokens = 1000        # Phase 0: healthy ~1,200; 5,000 fails
+retier_every_refreshes = 6      # re-rank hot/cold every 30 min, not every refresh (limits reconnect churn)
+per_shard_capacity = 4096
+
+[connect]
+per_sec = 2                     # spec §8.1.2
+per_min = 20
+backoff_base_ms = 1000
+backoff_cap_ms = 60000
+healthy_session_ms = 30000
+park_after_failures = 5
+park_window_secs = 600
+
+[engine]
+gap_ms = 30000                  # spec §5.5
+stale_lag_ms = 500              # Phase 0: healthy p99 lag 290 ms at 500/conn
+suspect_window_ms = 60000
+l1_suspect_window_ms = 3600000  # Phase 0: 6/346 NegRisk legs failed the mirror check
+drift_settle_ms = 2000
+channel_capacity = 50000
+
+[recheck]
+offsets_ms = [1000, 2000, 5000] # spec §8.2 (+ max secondsDelay when > 0)
+rest_per_sec = 10
+drift_tokens_per_min = 100
+l1_legs_per_min = 50
+
+[capture]
+dir = "/data/capture"
+pause_below_gb = 10             # spec §8.1.2
+resume_above_gb = 15
+retention_hours = 48            # Phase 0: ~25–33 GB/day compressed
+
+[breaker]
+max_starts = 5                  # spec §8.1.2
+window_secs = 600
+
+[store]
+flush_ms = 100                  # spec §10
+max_pending_rows = 200000
