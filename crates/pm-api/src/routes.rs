@@ -1,0 +1,20 @@
+//! Every URL pm-api may reach. Adding one here is the only way to add network access (spec §16).
+pub const GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
+pub const CLOB_BASE: &str = "https://clob.polymarket.com";
+pub const WS_MARKET: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+pub const WS_SPORTS: &str = "wss://sports-api.polymarket.com/ws";
+
+pub const GAMMA_EVENTS_KEYSET: &str = "/events/keyset";
+pub const CLOB_BOOK: &str = "/book";
+pub const CLOB_BOOKS: &str = "/books";
+pub const CLOB_OK: &str = "/ok";
+
+/// (method, full URL). Asserted exactly by tests/routes.rs.
+pub const ALLOWED: &[(&str, &str)] = &[
+    ("GET", "https://gamma-api.polymarket.com/events/keyset"),
+    ("GET", "https://clob.polymarket.com/book"),
+    ("POST", "https://clob.polymarket.com/books"),
+    ("GET", "https://clob.polymarket.com/ok"),
+    ("WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market"),
+    ("WS", "wss://sports-api.polymarket.com/ws"),
+];
