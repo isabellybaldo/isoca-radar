@@ -8,6 +8,15 @@ Keep the PC awake for the whole run.
 docker build -f spikes/probe/Dockerfile -t cute-probe .
 docker volume create probe-data
 
+# 0. clock check. On 2026-09-24 the probe measured lag ≈ −22.5 s: the WINDOWS clock was ~23 s behind real time
+#    (Google and Polymarket Date headers agreed; Docker matched Windows). Fix it before capturing, or every lag is off:
+#    Settings > Time & language > Date & time > "Sync now"   (or, in an admin shell: w32tm /resync)
+curl.exe -sI https://www.google.com | Select-String '^date'; (Get-Date).ToUniversalTime().ToString("HH:mm:ss")
+#    the two times should now agree to the second. Docker follows Windows; if it doesn't, check it too:
+docker run --rm debian:bookworm-slim date -u +%T.%3N; (Get-Date).ToUniversalTime().ToString("HH:mm:ss.fff")
+#    (still off → docker run --rm --privileged alpine hwclock -s, or wsl --shutdown and restart Docker Desktop)
+#    Q17 then reads the residual offset from the capture's min/p1 lag.
+
 # 1. universe (≈ 1 min)
 docker run --rm -v probe-data:/data cute-probe universe --out /data/universe.json
 
