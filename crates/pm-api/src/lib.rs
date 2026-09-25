@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod gamma;
 pub mod routes;
+pub mod wire;
 
 pub use error::ApiError;
 
