@@ -3,6 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use scanner::capture::{
     CaptureMsg, Ctl, DiskGuard, Line, UniverseRecord, Writer, civil, expired_hours, hour_path,
+    over_budget_hours,
 };
 use scanner::engine::{EngineCtx, Out};
 use scanner::replay::replay_dir;
@@ -184,5 +185,36 @@ fn replay_reproduces_episodes_and_censoring_byte_for_byte() {
     assert!(second.censor_left);
     assert!(second.censor_right, "closed by shutdown");
     assert_eq!(second.closed_server_ms, Some(t0 + 3_000));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn capture_budget_deletes_the_oldest_hours_but_never_the_open_one() {
+    let dir = tmp("budget");
+    let t = 1_790_121_600_000_i64;
+    let paths: Vec<_> = (0..4)
+        .map(|h| {
+            let p = hour_path(&dir, t + h * 3_600_000);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, vec![0u8; 100]).unwrap();
+            p
+        })
+        .collect();
+    std::fs::write(
+        dir.join("2026-09-23").join("universe-1.json"),
+        vec![0u8; 1000],
+    )
+    .unwrap(); // not an hour file
+    // 400 bytes of hour files, budget 250: delete the two oldest
+    assert_eq!(
+        over_budget_hours(&dir, 250, None),
+        vec![paths[0].clone(), paths[1].clone()]
+    );
+    // the open file is skipped even if it is the oldest
+    assert_eq!(
+        over_budget_hours(&dir, 250, Some(&paths[0])),
+        vec![paths[1].clone(), paths[2].clone()]
+    );
+    assert!(over_budget_hours(&dir, 1_000, None).is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }

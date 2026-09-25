@@ -159,6 +159,11 @@ impl Writer {
         }
     }
 
+    /// The hour file currently open for appending (never deleted by the budget).
+    pub fn current_path(&self) -> Option<&Path> {
+        self.cur.as_ref().map(|(p, _)| p.as_path())
+    }
+
     pub fn finish(&mut self) {
         self.cur = None;
     }
@@ -237,6 +242,42 @@ pub fn expired_hours(dir: &Path, now_ms: i64, retention_hours: i64) -> Vec<PathB
     out
 }
 
+/// Oldest hour files to delete so the capture directory fits `max_bytes` (chronological by
+/// name). `keep` (the file being written) is never returned.
+pub fn over_budget_hours(dir: &Path, max_bytes: u64, keep: Option<&Path>) -> Vec<PathBuf> {
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let Ok(days) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for day in days.flatten() {
+        let day_name = day.file_name().to_string_lossy().to_string();
+        let Ok(entries) = std::fs::read_dir(day.path()) else {
+            continue;
+        };
+        for f in entries.flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            if hour_start_ms(&day_name, &name).is_some() {
+                let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+                files.push((f.path(), size));
+            }
+        }
+    }
+    files.sort();
+    let mut total: u64 = files.iter().map(|(_, s)| *s).sum();
+    let mut out = Vec::new();
+    for (p, size) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if keep == Some(p.as_path()) {
+            continue;
+        }
+        total = total.saturating_sub(size);
+        out.push(p);
+    }
+    out
+}
+
 /// The capture thread: never panics, never blocks the engine (the engine uses try_send).
 pub fn spawn(
     cfg: CaptureCfg,
@@ -260,6 +301,10 @@ pub fn spawn(
                     metrics.capture_paused.store(paused, Ordering::Relaxed);
                 }
                 for p in expired_hours(&dir, now, cfg.retention_hours) {
+                    let _ = std::fs::remove_file(p);
+                }
+                let budget = cfg.max_capture_gb.saturating_mul(1_000_000_000);
+                for p in over_budget_hours(&dir, budget, writer.current_path()) {
                     let _ = std::fs::remove_file(p);
                 }
             }

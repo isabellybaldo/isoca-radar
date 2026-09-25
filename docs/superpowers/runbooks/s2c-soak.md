@@ -2,6 +2,8 @@
 
 Spec §19: 24 h without drops; replay reproduces episodes. Keep the PC awake. Clock synced first (Phase 0: `w32tm` peers).
 
+**Disk first.** Docker Desktop's VM cannot see the Windows drive: inside the container the disk looks nearly empty even when C: is full (smoke test 2026-09-25: VM 936 GB free vs host 4.2 GB). Before the soak, make sure C: has at least **25 GB free** (`Get-PSDrive C`). The scanner caps its own capture at `capture.max_capture_gb` (10 GB), but Postgres and Docker's virtual disk also grow.
+
 ```powershell
 docker compose --profile core up -d
 # after ~24 h:

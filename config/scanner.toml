@@ -40,6 +40,7 @@ dir = "/data/capture"
 pause_below_gb = 10             # spec §8.1.2
 resume_above_gb = 15
 retention_hours = 48            # Phase 0: ~25–33 GB/day compressed
+max_capture_gb = 10             # hard cap: Docker's VM can't see the Windows drive filling up (smoke test 2026-09-25)
 
 [breaker]
 max_starts = 5                  # spec §8.1.2

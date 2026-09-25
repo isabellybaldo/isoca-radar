@@ -76,6 +76,10 @@ pub struct CaptureCfg {
     pub pause_below_gb: u64,
     pub resume_above_gb: u64,
     pub retention_hours: i64,
+    /// Hard cap on the capture directory. The container can't see the HOST drive's free space
+    /// (Docker Desktop's VM reports its own huge virtual disk), so free-space checks alone can
+    /// fill a Windows drive: over budget, the oldest hour files are deleted.
+    pub max_capture_gb: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -160,6 +164,10 @@ impl Config {
         anyhow::ensure!(
             self.capture.resume_above_gb > self.capture.pause_below_gb,
             "capture.resume_above_gb must exceed pause_below_gb"
+        );
+        anyhow::ensure!(
+            self.capture.max_capture_gb >= 1,
+            "capture.max_capture_gb must be ≥ 1"
         );
         anyhow::ensure!(
             self.capture.retention_hours >= 1,
