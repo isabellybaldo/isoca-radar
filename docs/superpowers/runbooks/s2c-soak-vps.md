@@ -86,5 +86,5 @@ sh scripts/disk-budget.sh
   - crossed_book 289, drift 66, mirror_mismatch 31.
 - **Store:** one `refresh persist` statement timeout. The universe upsert hit scanner_rw's 5 s statement_timeout under load.
 - **Episodes (at 76 min):** yes_basket_incomplete 271 (137 stale), no_basket 72, yes_basket 9.
-- **Fixes:** S3a Task 4 (stop changed slots before start; idle slots) and **Task 8** (repair phantom levels from the stream's top; throttle integrity rows and resnapshots; 60 s universe-save timeout). Also noted for Phase 8: KVM 2 CPU headroom for the full universe plus the sim.
+- **Fixes:** S3a Task 4 (stop changed slots before start; idle slots; no churn on refreshes between retiers) and **Task 8** (repair phantom levels from the stream's top; throttle integrity rows and resnapshots; 60 s universe-save timeout). Also noted for Phase 8: KVM 2 CPU headroom for the full universe plus the sim. **Not fixed (deferred):** a retier is still a full re-plan, so expect all 40 connections to reconnect every 30 min in run 2 (paced at 20/min, so about 2 min until the last shard is back). Soak 2 pass criteria must allow it, and record CPU next to the retier times.
 - The replay prefix was deleted: after Task 8 the replay would diverge from this live run by design. Redeploy after S3a and restart the soak with a fresh prefix.
