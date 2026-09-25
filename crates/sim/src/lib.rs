@@ -7,6 +7,7 @@ pub mod config;
 pub mod consumed;
 pub mod latency;
 pub mod types;
+pub mod venue;
 
 use thiserror::Error;
 
