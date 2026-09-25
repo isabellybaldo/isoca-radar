@@ -5,7 +5,7 @@
 use crate::config::ConnectCfg;
 use crate::metrics::Metrics;
 use crate::now_ms;
-use crate::shards::Plan;
+use crate::shards::{Plan, Shard};
 use pm_api::backoff::{Backoff, ConnectBudget};
 use pm_api::ws::{Frame, run_connection};
 use std::collections::VecDeque;
@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 #[derive(Debug)]
 pub enum FeedMsg {
@@ -200,8 +201,73 @@ type Slot = (
     Arc<AtomicBool>,
 );
 
+/// The slot indices `Supervisor::apply` must stop and must (re)start to go from `running` to
+/// `plan`. `running[i]` is `Some((tokens, finished))` for a slot with a task, `None` for an idle
+/// one; a plan shard with no tokens is an idle slot (no connection).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SlotChanges {
+    pub stop: Vec<usize>,
+    pub start: Vec<usize>,
+}
+
+pub fn slot_changes(running: &[Option<(&[String], bool)>], plan: &[Shard]) -> SlotChanges {
+    let mut c = SlotChanges::default();
+    for i in 0..running.len().max(plan.len()) {
+        let old = running.get(i).copied().flatten();
+        let new = plan
+            .get(i)
+            .map(|s| s.tokens.as_slice())
+            .filter(|t| !t.is_empty());
+        match (old, new) {
+            (None, None) => {}
+            (Some(_), None) => c.stop.push(i),
+            (None, Some(_)) => c.start.push(i),
+            (Some((t, finished)), Some(n)) => {
+                if needs_restart(Some(t), finished, n) {
+                    c.stop.push(i);
+                    c.start.push(i);
+                }
+            }
+        }
+    }
+    c
+}
+
+/// Ask one shard to stop, wait (bounded) for it to drain and send its own `Down`, and only then
+/// return. Falls back to `abort()` only if the shard doesn't end within the timeout: aborting
+/// cancels the shard's connection and its inline forwarder together (nothing survives it to
+/// keep sending frames), but the shard never got to send its own `Down`, so once the abort has
+/// actually completed (`handle.await`) this sends that `Down` itself — only in that fallback.
+/// A free function so `Supervisor::apply` can stop many slots concurrently.
+async fn stop_slot(conn: usize, slot: Slot, shared: mpsc::Sender<FeedMsg>, metrics: Arc<Metrics>) {
+    let (_, mut handle, tx, parked) = slot;
+    let _ = tx.send(true);
+    if tokio::time::timeout(Duration::from_secs(5), &mut handle)
+        .await
+        .is_err()
+    {
+        eprintln!("feed: shard {conn} did not stop within 5s; aborting");
+        handle.abort();
+        let _ = handle.await; // wait until the cancellation has actually happened
+        let _ = shared
+            .send(FeedMsg::Down {
+                conn,
+                reason: "aborted after stop timeout".into(),
+            })
+            .await;
+    }
+    if parked.load(Ordering::Relaxed) {
+        let _ = metrics
+            .parked
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
+                Some(p.saturating_sub(1))
+            });
+    }
+}
+
 pub struct Supervisor {
-    handles: Vec<Slot>,
+    /// One entry per plan shard index; `None` = idle slot (no task, no connection).
+    handles: Vec<Option<Slot>>,
     shared: mpsc::Sender<FeedMsg>,
     budget: Arc<Mutex<ConnectBudget>>,
     cfg: ConnectCfg,
@@ -227,63 +293,40 @@ impl Supervisor {
         }
     }
 
-    /// Ask a shard to stop, wait (bounded) for it to drain and send its own `Down`, and only
-    /// then return — so the caller never spawns a replacement for `conn` before the old task is
-    /// gone. Falls back to `abort()` only if the shard doesn't end within the timeout: aborting
-    /// cancels the shard's connection and its inline forwarder together (nothing survives it to
-    /// keep sending frames), but the shard never got to send its own `Down`, so once the abort
-    /// has actually completed (`handle.await`, since cancellation only takes effect at the
-    /// task's next poll) the `Supervisor` sends that `Down` itself — only in this fallback path.
-    async fn stop_slot(&self, conn: usize, slot: Slot) {
-        let (_, mut handle, tx, parked) = slot;
-        let _ = tx.send(true);
-        if tokio::time::timeout(Duration::from_secs(5), &mut handle)
-            .await
-            .is_err()
-        {
-            eprintln!("feed: shard {conn} did not stop within 5s; aborting");
-            handle.abort();
-            let _ = handle.await; // wait until the cancellation has actually happened
-            let _ = self
-                .shared
-                .send(FeedMsg::Down {
-                    conn,
-                    reason: "aborted after stop timeout".into(),
-                })
-                .await;
-        }
-        if parked.load(Ordering::Relaxed) {
-            let _ = self
-                .metrics
-                .parked
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
-                    Some(p.saturating_sub(1))
-                });
-        }
-    }
-
     pub async fn apply(&mut self, plan: &Plan) {
-        while self.handles.len() > plan.shards.len() {
-            if let Some(slot) = self.handles.pop() {
-                let conn = self.handles.len();
-                self.stop_slot(conn, slot).await;
+        let running: Vec<Option<(&[String], bool)>> = self
+            .handles
+            .iter()
+            .map(|s| {
+                s.as_ref()
+                    .map(|(t, h, _, _)| (t.as_slice(), h.is_finished()))
+            })
+            .collect();
+        let changes = slot_changes(&running, &plan.shards);
+        // 1. Stop EVERY changed slot, concurrently, and wait for all of them before anything new
+        //    connects: live connections never exceed the budget, and a unit that moved between
+        //    shards is never subscribed on two connections at once.
+        let mut stopping = JoinSet::new();
+        for &i in &changes.stop {
+            if let Some(slot) = self.handles.get_mut(i).and_then(Option::take) {
+                stopping.spawn(stop_slot(
+                    i,
+                    slot,
+                    self.shared.clone(),
+                    self.metrics.clone(),
+                ));
             }
         }
-        for (i, s) in plan.shards.iter().enumerate() {
-            let (old, finished) = match self.handles.get(i) {
-                Some((t, h, _, _)) => (Some(t.as_slice()), h.is_finished()),
-                None => (None, false),
-            };
-            if !needs_restart(old, finished, &s.tokens) {
+        while stopping.join_next().await.is_some() {}
+        // 2. Only now start the replacements (released trailing slots are simply dropped).
+        self.handles.resize_with(plan.shards.len(), || None);
+        for &i in &changes.start {
+            let (Some(s), Some(entry)) = (plan.shards.get(i), self.handles.get_mut(i)) else {
                 continue;
-            }
-            if i < self.handles.len() {
-                let slot = self.handles.remove(i);
-                self.stop_slot(i, slot).await;
-            }
+            };
             let (tx, stop) = watch::channel(false);
             let parked = Arc::new(AtomicBool::new(false));
-            let h = spawn_shard(
+            let task = spawn_shard(
                 i,
                 s.tokens.clone(),
                 self.shared.clone(),
@@ -294,22 +337,18 @@ impl Supervisor {
                 stop,
                 parked.clone(),
             );
-            let slot = (s.tokens.clone(), h, tx, parked);
-            if i < self.handles.len() {
-                self.handles.insert(i, slot);
-            } else {
-                self.handles.push(slot);
-            }
+            *entry = Some((s.tokens.clone(), task, tx, parked));
         }
         self.metrics
             .shards
-            .store(plan.shards.len() as u64, Ordering::Relaxed);
+            .store(plan.live_shards() as u64, Ordering::Relaxed);
         self.metrics
             .tokens
             .store(plan.tokens() as u64, Ordering::Relaxed);
-        self.metrics
-            .dropped_groups
-            .store(plan.dropped.len() as u64, Ordering::Relaxed);
+        self.metrics.dropped_groups.store(
+            (plan.dropped.len() + plan.oversize.len()) as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Signal every shard to stop and detach: the tasks drain and send their own `Down` (or exit
@@ -317,7 +356,7 @@ impl Supervisor {
     /// dropping the `Supervisor` itself (e.g. on process shutdown) has the same effect, since
     /// dropping `self.handles` drops every `watch::Sender`, closing each shard's stop channel.
     pub fn abort_all(&mut self) {
-        for (_, _, tx, _) in self.handles.drain(..) {
+        for (_, _, tx, _) in self.handles.drain(..).flatten() {
             let _ = tx.send(true);
         }
     }
@@ -375,6 +414,34 @@ mod tests {
         assert_eq!(
             session_reason(false, &Err(pm_api::ApiError::Timeout("connect"))),
             "timed out: connect"
+        );
+    }
+
+    #[test]
+    fn slot_changes_list_every_stop_and_start_for_a_plan() {
+        let a = vec!["a".to_string()];
+        let b = vec!["b".to_string()];
+        let shard = |t: &[String]| Shard {
+            hot: false,
+            units: vec![],
+            tokens: t.to_vec(),
+        };
+        let running: Vec<Option<(&[String], bool)>> = vec![
+            Some((a.as_slice(), false)), // 0: unchanged → untouched
+            Some((a.as_slice(), false)), // 1: tokens changed → stop + start
+            Some((b.as_slice(), true)),  // 2: finished (parked) → retried
+            None,                        // 3: idle → starts
+            Some((b.as_slice(), false)), // 4: becomes an idle slot → stop only
+            Some((a.as_slice(), false)), // 5: released (plan is shorter) → stop only
+        ];
+        let plan = vec![shard(&a), shard(&b), shard(&b), shard(&a), shard(&[])];
+        let c = slot_changes(&running, &plan);
+        assert_eq!(c.stop, vec![1, 2, 4, 5]);
+        assert_eq!(c.start, vec![1, 2, 3]);
+        assert_eq!(
+            slot_changes(&running[..1], &plan[..1]),
+            SlotChanges::default(),
+            "a no-op refresh touches nothing"
         );
     }
 }

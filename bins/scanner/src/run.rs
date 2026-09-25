@@ -41,6 +41,22 @@ pub enum EngineCmd {
     Rates(oneshot::Sender<HashMap<String, u64>>),
 }
 
+/// Integrity row for a unit above the Phase 0 per-connection limit (never subscribed).
+pub fn oversize_row(run_id: i64, ts_ms: i64, key: &str, tokens: usize) -> IntegrityRow {
+    IntegrityRow {
+        run_id,
+        ts_ms,
+        kind: "unit_oversize".into(),
+        shard: None,
+        token: None,
+        event_id: Some(key.to_string()),
+        detail: Some(format!(
+            "{tokens} tokens > {} per connection (Phase 0); not subscribed",
+            shards::MAX_UNIT_TOKENS
+        )),
+    }
+}
+
 fn new_run(cfg_hash: &str, mode: &str) -> NewRun {
     NewRun {
         service: "scanner".into(),
@@ -308,6 +324,17 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         cfg.store.max_pending_rows,
         metrics.clone(),
     ));
+    for (key, count) in plan.new_oversize(&Plan::default()) {
+        writer_tx
+            .send(WriterMsg::Integrity(oversize_row(
+                run_id,
+                now_ms(),
+                &key,
+                count,
+            )))
+            .await
+            .context("writer gone")?;
+    }
     let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
     let clob = Arc::new(ClobClient::new()?);
     let limiter = Arc::new(Limiter::new(cfg.recheck.rest_per_sec));
@@ -398,14 +425,18 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
     };
     let refresher_task = {
         // refresher (spec §7: every 5 min, and on new_market / market_resolved)
-        let (cfg, store, cmd_tx, plan_tx, u_tx, refresh) = (
+        let (cfg, store, cmd_tx, plan_tx, u_tx, refresh, writer_tx) = (
             cfg.clone(),
             store.clone(),
             cmd_tx.clone(),
             plan_tx.clone(),
             u_tx.clone(),
             refresh.clone(),
+            writer_tx.clone(),
         );
+        // Sticky plans (S3a): a refresh keeps every unit on its connection; only a retier (every
+        // `retier_every_refreshes`) re-plans from scratch.
+        let mut prev = plan.clone();
         tokio::spawn(async move {
             let mut rates: HashMap<String, u64> = HashMap::new();
             let mut n: u32 = 0;
@@ -422,14 +453,22 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                         continue;
                     }
                 };
-                if n.is_multiple_of(cfg.shards.retier_every_refreshes) {
+                let retier = n.is_multiple_of(cfg.shards.retier_every_refreshes);
+                if retier {
                     let (tx, rx) = oneshot::channel();
                     if cmd_tx.send(EngineCmd::Rates(tx)).await.is_err() {
                         return;
                     }
                     rates = rx.await.unwrap_or_default();
                 }
-                let plan = shards::plan(shards::units(&u, &rates), &cfg.shards);
+                let plan = shards::replan(&prev, shards::units(&u, &rates), &cfg.shards, retier);
+                for (key, count) in plan.new_oversize(&prev) {
+                    let row = oversize_row(run_id, now_ms(), &key, count);
+                    if writer_tx.send(WriterMsg::Integrity(row)).await.is_err() {
+                        return;
+                    }
+                }
+                prev = plan.clone();
                 if let Err(e) = persist_universe(&store, &u).await {
                     eprintln!("refresh persist: {e:#}");
                 }
@@ -627,7 +666,7 @@ pub async fn census(cfg: &Config) -> anyhow::Result<()> {
     println!("subscribed tokens (all): {}", u.subscribed_tokens());
     println!(
         "shard plan: {} shards ({} hot), {} tokens, max {} tokens/shard",
-        plan.shards.len(),
+        plan.live_shards(),
         plan.shards.iter().filter(|s| s.hot).count(),
         plan.tokens(),
         plan.shards
@@ -640,6 +679,11 @@ pub async fn census(cfg: &Config) -> anyhow::Result<()> {
         "dropped (connection budget): {} units, {} tokens",
         plan.dropped.len(),
         plan.dropped_tokens
+    );
+    println!(
+        "oversize units (> {} tokens, never subscribed): {:?}",
+        shards::MAX_UNIT_TOKENS,
+        plan.oversize
     );
     if let Ok(url) = std::env::var("DATABASE_URL") {
         match Store::connect(&url, 1).await {
@@ -742,6 +786,20 @@ mod tests {
         assert!(
             !warm_start_usable(500_000, 400_000, 300_000),
             "a snapshot from the future is not trusted"
+        );
+    }
+
+    #[test]
+    fn an_oversize_unit_becomes_an_integrity_row_naming_it() {
+        let r = oversize_row(3, 9, "e1", 1_234);
+        assert_eq!(
+            (r.run_id, r.ts_ms, r.kind.as_str(), r.event_id.as_deref()),
+            (3, 9, "unit_oversize", Some("e1"))
+        );
+        assert!(
+            r.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("1234 tokens"))
         );
     }
 }
