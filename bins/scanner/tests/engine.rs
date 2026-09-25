@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
-use arb_core::book::Side;
+use arb_core::book::{Book, Side};
 use common::*;
 use pm_api::ws::MarketEvent;
 use rust_decimal_macros::dec;
@@ -489,4 +489,72 @@ fn a_book_crossed_only_mid_frame_is_not_flagged() {
         !outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "crossed_book" || i.kind == "top_mismatch")),
         "{outs:?}"
     );
+}
+
+#[test]
+fn a_group_that_loses_its_connection_on_refresh_closes_right_censored_and_stays_dark() {
+    let mut e = engine();
+    seed(&mut e);
+    e.on_frame(
+        0,
+        2_100,
+        &[
+            ask("e1-y0", 2_000, "0.30", "10"),
+            ask("e1-y0", 2_000, "0.40", "0"),
+        ],
+    );
+    assert_eq!(e.open_episodes(), 1);
+    // refresh: the event stays in the universe but gets no connection this time (dropped by the
+    // connection budget, or simply unassigned)
+    let u = Arc::new(Universe {
+        taken_ms: 1,
+        groups: vec![meta("e1", 3)],
+        canary: vec![],
+    });
+    let outs = e.apply_universe(u, &HashMap::new(), 2_600);
+    let closed = episodes(&outs);
+    assert_eq!(closed.len(), 1, "{outs:?}");
+    assert!(closed[0].censor_right);
+    assert_eq!(closed[0].closed_server_ms, Some(2_600));
+    assert_eq!(e.open_episodes(), 0);
+    // a later REST snapshot for one of its legs opens nothing: the group has no connection
+    let mut b = Book::default();
+    b.apply_snapshot(&[], &[(p("0.10"), sh("10"))], 3_000);
+    let outs = e.rest_snapshot("e1-y0", b);
+    assert!(episodes(&outs).is_empty(), "{outs:?}");
+    assert_eq!(e.open_episodes(), 0);
+}
+
+#[test]
+fn a_leg_removed_from_an_open_episodes_event_closes_it_right_censored_without_panicking() {
+    let mut e = engine();
+    seed(&mut e);
+    e.on_frame(
+        0,
+        2_100,
+        &[
+            ask("e1-y0", 2_000, "0.30", "10"),
+            ask("e1-y0", 2_000, "0.40", "0"),
+        ],
+    );
+    assert_eq!(
+        e.open_episodes(),
+        1,
+        "the open episode's legs_used spans all 3 legs"
+    );
+    // refresh: same event, same connection, but the leg-list sequence changed (one leg gone)
+    let mut m = meta("e1", 3);
+    m.legs.truncate(2);
+    let u = Arc::new(Universe {
+        taken_ms: 1,
+        groups: vec![m],
+        canary: vec![],
+    });
+    let conn: HashMap<String, usize> = [("e1".to_string(), 0)].into_iter().collect();
+    let outs = e.apply_universe(u, &conn, 2_600);
+    let closed = episodes(&outs);
+    assert_eq!(closed.len(), 1, "{outs:?}");
+    assert!(closed[0].censor_right);
+    assert_eq!(closed[0].closed_server_ms, Some(2_600));
+    assert_eq!(e.open_episodes(), 0);
 }

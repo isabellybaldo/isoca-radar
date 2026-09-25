@@ -153,6 +153,10 @@ pub struct Engine {
     /// Keyed by token; iterated in key order so live and replay resolve pending checks
     /// identically (spec §9.3: no clock, deterministic from inputs alone).
     pending_tops: BTreeMap<String, PendingTop>,
+    /// Highest `ts` ever passed to `evaluate` for each group, carried across refreshes by
+    /// event id. Lets `rest_snapshot` evaluate at a ts that never goes backwards even when the
+    /// REST snapshot is older than a ws frame already evaluated for this group.
+    group_last_ts: Vec<i64>,
 }
 
 fn kind_str(k: Kind) -> &'static str {
@@ -216,6 +220,7 @@ impl Engine {
             msgs: HashMap::new(),
             pending_drift: Vec::new(),
             pending_tops: BTreeMap::new(),
+            group_last_ts: Vec::new(),
         }
     }
 
@@ -266,6 +271,60 @@ impl Engine {
                 self.close_episode(e, &mut out);
             }
         }
+        // 1b. groups that stay in the universe but get no connection this refresh (dropped by
+        // the connection budget or unassigned): right-censor any open episode and reset the
+        // tracker's first-sight state for BOTH keys (rows from the OLD universe, before any
+        // mutation — same treatment as `disconnect`).
+        let no_conn: HashSet<&str> = u
+            .groups
+            .iter()
+            .filter(|m| !conn_of.contains_key(&m.event_id))
+            .map(|m| m.event_id.as_str())
+            .collect();
+        let mut no_conn_groups: Vec<usize> = self
+            .universe
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| no_conn.contains(m.event_id.as_str()))
+            .map(|(g, _)| g)
+            .collect();
+        no_conn_groups.sort_unstable();
+        for g in &no_conn_groups {
+            for det in [Det::Yes, Det::No] {
+                let key = Self::key(&self.universe.groups[*g], det);
+                for e in self.tracker.on_disconnect(&key, ts_ms) {
+                    self.close_episode(e, &mut out);
+                }
+            }
+        }
+        // 1c. an open episode's `legs_used` indices refer to the leg list AT OPEN TIME: if the
+        // event's (market_id, yes_token) leg sequence changed, those indices may no longer be
+        // valid. Right-censor before the universe (and any leg list) is swapped.
+        let mut leg_changed_groups: Vec<usize> = Vec::new();
+        for (g, meta) in self.universe.groups.iter().enumerate() {
+            if let Some(new_meta) = u.group_by_event(&meta.event_id) {
+                let old_legs = meta
+                    .legs
+                    .iter()
+                    .map(|l| (l.market_id.as_str(), l.yes_token.as_str()));
+                let new_legs = new_meta
+                    .legs
+                    .iter()
+                    .map(|l| (l.market_id.as_str(), l.yes_token.as_str()));
+                if !old_legs.eq(new_legs) {
+                    leg_changed_groups.push(g);
+                }
+            }
+        }
+        for g in &leg_changed_groups {
+            for det in [Det::Yes, Det::No] {
+                let key = Self::key(&self.universe.groups[*g], det);
+                for e in self.tracker.on_disconnect(&key, ts_ms) {
+                    self.close_episode(e, &mut out);
+                }
+            }
+        }
         // 2. carry books (by token), suspect windows and open episodes (by event id)
         let mut old_books: HashMap<String, Book> = HashMap::new();
         for (g, meta) in self.universe.groups.iter().enumerate() {
@@ -285,6 +344,13 @@ impl Engine {
             .zip(&self.suspect_until)
             .map(|(m, &t)| (m.event_id.clone(), t))
             .collect();
+        let old_last_ts: HashMap<String, i64> = self
+            .universe
+            .groups
+            .iter()
+            .zip(&self.group_last_ts)
+            .map(|(m, &t)| (m.event_id.clone(), t))
+            .collect();
         let open_events: Vec<(u64, String)> = self
             .open
             .iter()
@@ -296,6 +362,7 @@ impl Engine {
         self.token_ix.clear();
         for (g, meta) in u.groups.iter().enumerate() {
             index.insert(meta.event_id.clone(), g);
+            let has_conn = conn_of.contains_key(&meta.event_id);
             let legs = meta
                 .legs
                 .iter()
@@ -304,9 +371,17 @@ impl Engine {
                     if leg.status == Status::Live && !leg.yes_token.is_empty() {
                         self.token_ix.insert(leg.yes_token.clone(), (g, l));
                     }
+                    let carried = old_books.remove(&leg.yes_token);
+                    // A group with no connection this refresh gets no book: nothing stale
+                    // survives to look tradeable while unsubscribed (F4).
+                    let book = if has_conn {
+                        carried.unwrap_or_default()
+                    } else {
+                        Book::default()
+                    };
                     GroupLeg {
                         status: leg.status.to_core(),
-                        book: old_books.remove(&leg.yes_token).unwrap_or_default(),
+                        book,
                         fee: leg.fee(),
                     }
                 })
@@ -337,6 +412,11 @@ impl Engine {
             .groups
             .iter()
             .map(|m| old_suspect.get(&m.event_id).copied().unwrap_or(i64::MIN))
+            .collect();
+        self.group_last_ts = u
+            .groups
+            .iter()
+            .map(|m| old_last_ts.get(&m.event_id).copied().unwrap_or(i64::MIN))
             .collect();
         for (id, ev) in open_events {
             if let (Some(&g), Some(ep)) = (index.get(&ev), self.open.get_mut(&id)) {
@@ -496,6 +576,11 @@ impl Engine {
         out: &mut Vec<Out>,
     ) {
         let group = self.token_ix.get(token).map(|&(g, _)| g);
+        // A group with no connection this refresh has no live feed to check against (F4): a
+        // deferred top-check on it can only be a false positive.
+        if group.is_some_and(|g| self.group_conn.get(g).copied().flatten().is_none()) {
+            return;
+        }
         let Some(book) = self.book_of(token) else {
             return;
         };
@@ -546,6 +631,15 @@ impl Engine {
     }
 
     pub(crate) fn evaluate(&mut self, g: usize, ts: i64, recv_ms: i64, out: &mut Vec<Out>) {
+        // A group with no connection this refresh (dropped by the connection budget or
+        // unassigned) has no live book to evaluate (F4): its episode was already closed
+        // right-censored in `apply_universe`.
+        if self.group_conn.get(g).copied().flatten().is_none() {
+            return;
+        }
+        if let Some(last) = self.group_last_ts.get_mut(g) {
+            *last = (*last).max(ts);
+        }
         for det in [Det::Yes, Det::No] {
             let sig = match det {
                 Det::Yes => detect_yes_basket(&self.groups[g]),
@@ -715,7 +809,10 @@ impl Engine {
             .enumerate()
             .min_by_key(|(_, f)| f.notional)
             .map(|(k, f)| (used.get(k).copied().unwrap_or(k), f.notional));
-        let min_size = used.iter().filter_map(|&i| meta.legs[i].min_size).max();
+        let min_size = used
+            .iter()
+            .filter_map(|&i| meta.legs.get(i).and_then(|l| l.min_size))
+            .max();
         let censor = closed.map(|c| c.2).unwrap_or(Censor {
             left: ep.censor_left,
             right: false,
@@ -767,7 +864,7 @@ impl Engine {
             below_min_size: min_size.map(|m| q.q_max < m),
             max_seconds_delay: used
                 .iter()
-                .filter_map(|&i| meta.legs[i].seconds_delay)
+                .filter_map(|&i| meta.legs.get(i).and_then(|l| l.seconds_delay))
                 .max(),
             days_to_end: None,
             annualized_return: None,
@@ -782,12 +879,16 @@ impl Engine {
         let legs = used
             .iter()
             .enumerate()
-            .map(|(k, &i)| {
-                let lm = &meta.legs[i];
+            .filter_map(|(k, &i)| {
+                // Defensive: `i` indexes the leg list AT OPEN TIME. If the universe refreshed
+                // with a shorter leg list before this row was written, skip the row rather than
+                // index out of bounds (F5) — `apply_universe` already closes such episodes, so
+                // this is a belt-and-suspenders guard, not the primary defense.
+                let lm = meta.legs.get(i)?;
                 let fill = q.legs.get(k).cloned().unwrap_or_default();
                 let (best_price, size_at_best) =
                     ep.peak.best.get(k).copied().unwrap_or((None, None));
-                EpisodeLegRow {
+                Some(EpisodeLegRow {
                     episode_id: ep.episode_id.clone(),
                     leg_idx: to_i32(i),
                     market_id: lm.market_id.clone(),
@@ -813,7 +914,7 @@ impl Engine {
                     in_s: true,
                     fee_rate: lm.fee_rate,
                     fee_exponent: i16::from(lm.fee_exponent),
-                }
+                })
             })
             .collect();
         EpisodeWrite { row, legs }
@@ -880,10 +981,16 @@ impl Engine {
                 return out;
             }
             self.groups[g].legs[l].book = book;
-            self.evaluate(g, ts, ts, &mut out);
+            // A REST snapshot is complete state, superseding any deferred delta top-check.
+            self.pending_tops.remove(token);
+            // Never move the tracker's clock backwards: a REST snapshot can be older than a ws
+            // frame this group already evaluated.
+            let eval_ts = ts.max(self.group_last_ts.get(g).copied().unwrap_or(i64::MIN));
+            self.evaluate(g, eval_ts, eval_ts, &mut out);
         } else if let Some(b) = self.canary.get_mut(token)
             && ts >= b.server_ts_ms()
         {
+            self.pending_tops.remove(token);
             *b = book;
         }
         out
@@ -910,6 +1017,13 @@ impl Engine {
             };
             if ours.server_ts_ms() == 0 {
                 continue; // never received a snapshot (unsubscribed / dropped group): nothing to compare
+            }
+            if self
+                .token_ix
+                .get(&p.token)
+                .is_some_and(|&(g, _)| self.group_conn.get(g).copied().flatten().is_none())
+            {
+                continue; // no connection this refresh (F4): our book can't be trusted as "current"
             }
             if ours.server_ts_ms() > p.rest.server_ts_ms() {
                 continue; // we moved on after the REST snapshot: inconclusive
