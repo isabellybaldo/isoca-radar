@@ -97,8 +97,10 @@ fn session_reason(stopping: bool, result: &Result<(), pm_api::ApiError>) -> Stri
 /// One websocket shard. `stop` is watched everywhere the shard could otherwise block (budget
 /// wait, the connection itself, the backoff sleep) so a caller can ask it to end its current
 /// session and return WITHOUT ever aborting the task: dropping the `run_connection` future drops
-/// its `ftx`, the forwarder then drains and exits, and only after that does the shard send its
-/// own `Down` — so `Down` always follows the shard's last frame (fix round 1, ordering flaw).
+/// its `ftx`, the frame forwarder (run inline, `tokio::join!`ed alongside the connection — NOT a
+/// separately spawned task, fix round 2) then drains and exits, and only after that does the
+/// shard send its own `Down` — so `Down` always follows the shard's last frame, AND aborting this
+/// whole task cancels the connection and the forwarder together, with nothing left running.
 /// A closed `stop` channel (sender dropped, `changed()` returning `Err`) is treated exactly like
 /// an explicit `true`: `tokio::select!`'s `_ = stop.changed()` arm fires on either outcome, so
 /// dropping the `Supervisor` stops every shard even without calling `abort_all`.
@@ -139,25 +141,29 @@ pub fn spawn_shard(
                 return;
             }
             let (ftx, mut frx) = mpsc::channel::<Frame>(capacity.max(1));
-            let fwd_shared = shared.clone();
-            let fwd = tokio::spawn(async move {
+            // Not spawned: a separately spawned forwarder would outlive this task if it were
+            // ever aborted (fix round 2). Run both futures inline instead, so cancelling THIS
+            // task (`JoinHandle::abort`) cancels the connection and the forwarder atomically,
+            // at their next poll, with nothing left running to keep pushing frames afterward.
+            let session = async {
+                tokio::select! {
+                    r = run_connection(conn, tokens.clone(), ftx) => (r, false),
+                    // Dropping this branch's `ftx` (the losing side of `select!` is dropped) is
+                    // what lets `forward`, below, see the channel close and drain.
+                    _ = stop.changed() => (Ok(()), true),
+                }
+            };
+            let forward = async {
                 while let Some(f) = frx.recv().await {
-                    if fwd_shared.send(FeedMsg::Frame(f)).await.is_err() {
+                    if shared.send(FeedMsg::Frame(f)).await.is_err() {
                         break;
                     }
                 }
-            });
-            let mut stopping = false;
-            let result = tokio::select! {
-                r = run_connection(conn, tokens.clone(), ftx) => r,
-                // Dropping this branch's `ftx` (via the future above being cancelled) is what
-                // makes the forwarder see a closed channel and drain below.
-                _ = stop.changed() => {
-                    stopping = true;
-                    Ok(())
-                }
             };
-            let _ = fwd.await; // all of this session's frames are in `shared` before Down
+            // `forward` only completes once `session` has dropped `ftx` and every already
+            // buffered frame has been sent on: all of this session's frames reach `shared`
+            // before the `Down` below, in both the normal-close and the stop-signalled case.
+            let ((result, stopping), ()) = tokio::join!(session, forward);
             let ended = now_ms();
             if matches!(result, Err(pm_api::ApiError::Dropped { .. })) {
                 metrics.drops.fetch_add(1, Ordering::Relaxed);
@@ -223,8 +229,11 @@ impl Supervisor {
 
     /// Ask a shard to stop, wait (bounded) for it to drain and send its own `Down`, and only
     /// then return — so the caller never spawns a replacement for `conn` before the old task is
-    /// gone. Falls back to `abort()` only if the shard doesn't end within the timeout (logged:
-    /// that shard's `Down`, if any, may be missing or arrive late).
+    /// gone. Falls back to `abort()` only if the shard doesn't end within the timeout: aborting
+    /// cancels the shard's connection and its inline forwarder together (nothing survives it to
+    /// keep sending frames), but the shard never got to send its own `Down`, so once the abort
+    /// has actually completed (`handle.await`, since cancellation only takes effect at the
+    /// task's next poll) the `Supervisor` sends that `Down` itself — only in this fallback path.
     async fn stop_slot(&self, conn: usize, slot: Slot) {
         let (_, mut handle, tx, parked) = slot;
         let _ = tx.send(true);
@@ -234,6 +243,14 @@ impl Supervisor {
         {
             eprintln!("feed: shard {conn} did not stop within 5s; aborting");
             handle.abort();
+            let _ = handle.await; // wait until the cancellation has actually happened
+            let _ = self
+                .shared
+                .send(FeedMsg::Down {
+                    conn,
+                    reason: "aborted after stop timeout".into(),
+                })
+                .await;
         }
         if parked.load(Ordering::Relaxed) {
             let _ = self
