@@ -7,6 +7,7 @@ pub mod account;
 pub mod config;
 pub mod consumed;
 pub mod latency;
+pub mod policy;
 pub mod types;
 pub mod venue;
 
