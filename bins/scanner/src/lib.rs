@@ -4,6 +4,7 @@
 pub mod capture;
 pub mod config;
 pub mod engine;
+pub mod feed;
 pub mod guard;
 pub mod metrics;
 pub mod replay;
