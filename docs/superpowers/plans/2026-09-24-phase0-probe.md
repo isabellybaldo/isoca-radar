@@ -6,7 +6,7 @@
 
 **Architecture:** A workspace binary `spikes/probe` built on `pm-api` (S2a must be done first) with five subcommands: `universe`, `conncap`, `capture`, `mirror`, `report`. Pure logic (universe selection, event-affine shard packing, CSV rows, statistics, mirror comparison) is unit-tested. Network paths are exercised by the actual run. The outputs are CSV/Markdown files plus a hand-filled `RESULTS.md` that answers Q7 and Q17.
 
-**Tech Stack:** Rust 1.98.1, pm-api, arb-core, tokio, tokio-tungstenite, zstd 0.13, clap 4, anyhow 1, serde/serde_json. Docker Desktop (WSL2).
+**Tech Stack:** Rust 1.98.1, pm-api, arb-core, tokio, zstd 0.13, clap 4, anyhow 1, serde/serde_json. Docker Desktop (WSL2).
 
 **Spec:** `docs/superpowers/specs/2026-09-22-arb-scanner-design.md` (§7 capture, §8.1.2, §18 Q7/Q17, §19 phase 0).
 
@@ -59,7 +59,6 @@ spikes/probe/
   - `pm_api::gamma::{GammaClient, GammaEvent, leg_status, token_ids}`
   - `GammaEvent::{is_neg_risk, is_augmented, markets}`
   - `GammaClient::all_active_events()`
-  - `pm_api::init_tls()`
   - `arb_core::detect::LegStatus`
 - Produces:
   - `universe::{Group { event_id, title, yes_tokens: Vec<String> }, CanaryPair { market_id, yes, no }, Universe { groups, canary }}` (all serde)
@@ -86,9 +85,6 @@ publish.workspace = true
 arb-core = { path = "../../crates/arb-core" }
 pm-api = { path = "../../crates/pm-api" }
 tokio.workspace = true
-tokio-tungstenite.workspace = true
-futures-util.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
@@ -234,10 +230,9 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    pm_api::init_tls();
     match Cli::parse().cmd {
         Cmd::Universe { out, canary } => {
-            let events = pm_api::gamma::GammaClient::new(reqwest::Client::new()).all_active_events().await?;
+            let events = pm_api::gamma::GammaClient::new()?.all_active_events().await?;
             let u = universe::select(&events, canary);
             let tokens: usize = u.token_groups().iter().map(Vec::len).sum();
             std::fs::write(&out, serde_json::to_string_pretty(&u)?)?;
@@ -424,8 +419,8 @@ fn kind_and_ts(e: &MarketEvent) -> (&'static str, Option<i64>) {
         MarketEvent::Delta { server_ts_ms, .. } => ("price_change", Some(*server_ts_ms)),
         MarketEvent::LastTrade { server_ts_ms, .. } => ("last_trade_price", Some(*server_ts_ms)),
         MarketEvent::TickSize { server_ts_ms, .. } => ("tick_size_change", Some(*server_ts_ms)),
-        MarketEvent::Resolved { server_ts_ms, .. } => ("market_resolved", Some(*server_ts_ms)),
-        MarketEvent::NewMarket { server_ts_ms } => ("new_market", Some(*server_ts_ms)),
+        MarketEvent::Resolved { server_ts_ms, .. } => ("market_resolved", *server_ts_ms),
+        MarketEvent::NewMarket { server_ts_ms } => ("new_market", *server_ts_ms),
         MarketEvent::Other { .. } => ("other", None),
     }
 }
@@ -622,7 +617,7 @@ pub fn mirror_matches(yes: &Book, no: &Book) -> bool {
 }
 
 pub async fn mirror(u: &Universe, out: &Path) -> anyhow::Result<()> {
-    let clob = ClobClient::new(reqwest::Client::new());
+    let clob = ClobClient::new()?;
     let tokens: Vec<String> = u.canary.iter().flat_map(|c| [c.yes.clone(), c.no.clone()]).collect();
     let books: HashMap<String, BookWire> = clob.books(&tokens).await?.into_iter().map(|b| (b.asset_id.clone(), b)).collect();
     let mut lines = vec!["market_id,status,yes_levels".to_string()];
@@ -661,40 +656,63 @@ pub async fn mirror(u: &Universe, out: &Path) -> anyhow::Result<()> {
 `spikes/probe/src/conncap.rs`:
 ```rust
 //! Per-IP websocket connection cap, measured politely: 1 token each, spaced, stop at first refusal.
-use futures_util::{SinkExt, StreamExt};
-use pm_api::routes::WS_MARKET;
-use pm_api::ws::subscribe_message;
+//! Sockets are opened only through pm-api's `run_connection` (deny.toml: only pm-api may use tungstenite).
+use pm_api::ApiError;
+use pm_api::ws::{run_connection, Frame};
 use std::path::Path;
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+type Conn = (JoinHandle<Result<(), ApiError>>, mpsc::Receiver<Frame>);
 
 pub async fn conncap(token: &str, max: usize, spacing_ms: u64, hold_secs: u64, out: &Path) -> anyhow::Result<()> {
-    let mut conns = Vec::new();
+    let mut conns: Vec<Conn> = Vec::new();
     let mut lines = vec!["n,ok,detail".to_string()];
     for n in 1..=max {
-        match tokio_tungstenite::connect_async(WS_MARKET).await {
-            Ok((mut ws, _)) => {
-                ws.send(Message::text(subscribe_message(&[token.to_string()]))).await?;
-                conns.push(ws);
+        let (tx, mut rx) = mpsc::channel::<Frame>(1024);
+        let handle = tokio::spawn(run_connection(n, vec![token.to_string()], tx));
+        // A connection counts as open once it delivers its first frame (the initial book dump).
+        match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
+            Ok(Some(_)) => {
                 lines.push(format!("{n},1,"));
+                conns.push((handle, rx));
             }
-            Err(e) => {
-                lines.push(format!("{n},0,{}", e.to_string().replace(',', ";")));
+            Ok(None) => {
+                let detail = match handle.await {
+                    Ok(Err(e)) => e.to_string(),
+                    Ok(Ok(())) => "closed before first frame".to_string(),
+                    Err(e) => e.to_string(),
+                };
+                lines.push(format!("{n},0,{}", detail.replace(',', ";")));
+                break;
+            }
+            Err(_) => {
+                handle.abort();
+                lines.push(format!("{n},0,no frame within 15 s"));
                 break;
             }
         }
         tokio::time::sleep(Duration::from_millis(spacing_ms.max(500))).await;
     }
-    tokio::time::sleep(Duration::from_secs(hold_secs)).await;
-    let mut alive = 0usize;
-    for ws in &mut conns {
-        let _ = ws.send(Message::text("PING")).await;
-        if let Ok(Some(Ok(_))) = tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
-            alive += 1;
+    // Hold, draining every receiver so no connection ends on a full channel (ApiError::Dropped).
+    // run_connection pings every 10 s and returns ApiError::Stale after 30 s of silence,
+    // so a connection still running after the hold is alive.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(hold_secs);
+    while tokio::time::Instant::now() < deadline {
+        for (_, rx) in &mut conns {
+            while rx.try_recv().is_ok() {}
         }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let alive = conns.iter().filter(|(h, _)| !h.is_finished()).count();
+    for (h, _) in &conns {
+        h.abort();
     }
     lines.push(format!("# opened={} alive_after_hold={alive}", conns.len()));
-    std::fs::write(out, lines.join("\n") + "\n")?;
+    std::fs::write(out, lines.join("
+") + "
+")?;
     println!("opened={} alive_after_hold={alive}", conns.len());
     Ok(())
 }
