@@ -8,6 +8,8 @@ pub mod config;
 pub mod consumed;
 pub mod latency;
 pub mod policy;
+pub mod rows;
+pub mod trader;
 pub mod types;
 pub mod venue;
 
