@@ -18,6 +18,7 @@ futures-util.workspace = true
 rustls.workspace = true
 
 [dev-dependencies]
+reqwest = { workspace = true }
 rust_decimal_macros.workspace = true
 tokio = { workspace = true }
 
