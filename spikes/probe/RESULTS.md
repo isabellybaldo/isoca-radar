@@ -1,15 +1,19 @@
-# Phase 0 results (fill in after the run)
+# Phase 0 results
 
-Run date / machine: …
+Run date / machine: 2026-09-25 00:06–01:10 (BRT), owner's PC (Docker Desktop / WSL2, RTX 3060 box), residential IP in Brazil.
+Universe at run time: 18,901 active events → 7,235 NegRisk groups + 100 canary pairs = 56,180 tokens.
+Clock: Windows was ~23 s slow before the run; fixed via w32time (peers a.st1.ntp.br / time.google.com, offset ≈ 1 ms), Docker VM within ~0.1 s of Windows.
 
 | Question | Answer | Evidence |
 |---|---|---|
-| Q7a: per-IP websocket connection cap | opened = …, first refusal at n = … (or none up to 40). Note: a `no frame within 15 s` detail is a timeout, not necessarily a refusal — read the detail column. | conncap.csv |
-| Q7b: message rate for the NegRisk universe (run-5000 covers it) | … frames/s AND … events/s, from the `all` row of run-5000/report.md | run-5000/report.md |
-| Q7c: bytes/day of raw capture | … bytes/day uncompressed (`all` row, dumps excluded); … dump bytes per reconnect; … compressed size (from raw_size.txt) | run-5000/report.md, run-5000/raw_size.txt |
-| Q7d: stall rate vs shard size (50 / 500 / 5000) | … / … / … stalls_permille (per run, `all` row) | run-*/report.md |
-| Q7e: chosen shard size + connection budget for S2c | … tokens/conn, … connections | reasoning: … |
-| Q17: WSL2 clock offset (min lag; negative = server ahead) | min = … ms, lag_p1 = … ms. Note: min lag = clock offset + min one-way latency; reference: compare `docker run --rm debian:bookworm-slim date +%s%3N` against `w32tm /stripchart /computer:time.windows.com /samples:3 /dataonly` | run-*/report.md `min`, `p1` |
-| L1 at scale: mirror on canary pairs | mirror = … / mismatch = … / missing = … | mirror.csv |
-| Reconnects per run (count "reconnecting" lines) | … / … / … | results/run-*.log |
-| pm-api on live traffic: parse errors | … per … frames; shapes to fix: … | run-*/errors.jsonl |
+| Q7a: per-IP websocket connection cap | opened = 40, alive after 60 s hold = 40, **no refusal up to the probe's limit of 40**. The cap is ≥ 40; beyond 40 is untested. | conncap.csv |
+| Q7b: message rate for the NegRisk universe | run-5000 `all` row: **2,317 frames/s, 4,632 events/s** for the full universe (12 conns, 0 tokens dropped). This is a **lower bound**: the 5000-token shards spent part of the run reconnecting (see Q7d). For comparison, run-500 covered only the 8,000 tokens of the largest events and already produced 755 frames/s, 1,508 events/s. | run-5000/report.md, run-500/report.md |
+| Q7c: bytes/day of raw capture | **≈ 123 GB/day uncompressed** (run-5000 `all` row, dumps excluded). Initial dump ≈ **0.8 MB per 5000-token connect** (417 MB / 533 dumps). Compressed zstd-3 capture: **453 MB per 20 min ≈ 33 GB/day** (includes the reconnect-storm dumps). S2b must not archive the raw feed indefinitely at this rate: keep rolling raw windows and store derived books/episodes. | run-5000/report.md, run-5000/raw_size.txt |
+| Q7d: stall rate vs shard size (50 / 500 / 5000) | **7 / 0 / 23 ‰** (`all` rows). run-50's 7 ‰ comes from one quiet 98-token shard (61 ‰); run-500 is clean (p99 lag 293 ms). The 5000-token shards break down: **p99 lag 15.7 s, 30 ‰ stalls, 533 dumps on 9 conns**. The server repeatedly closes them cleanly (`Ok(())`), and backoff reaches its 60 s cap. The one 1,182-token shard in the same run was healthy: 2 dumps, p99 262 ms, ≈ 0.7 ‰. Median lag grows with shard size: 155 / 181 / 208 ms. | run-*/report.md, run-5000.log |
+| Q7e: chosen shard size + connection budget for S2c | **Provisional: ≤ 1,000 tokens/conn, ≤ 40 connections (≈ 40k tokens)**. | reasoning: 500/conn is proven clean and ~1,200/conn was healthy in the one observed shard, while 5,000/conn fails. The full 56k-token universe at 1,000/conn needs ~57 conns, more than the 40 measured. S2c either prioritizes groups to fit 40 × 1,000 (e.g. drop groups with no book activity), or first re-runs conncap to 64 before going past 40. The S2c plan decides. |
+| Q17: clock offset (min lag; negative = server ahead) | After the NTP fix: min = **100 / 145 / 176 ms**, lag_p1 = **103 / 153 / 181 ms** (runs 50/500/5000). All positive, so server ahead of us by less than the ~100 ms minimum one-way latency. **Residual clock offset is bounded by ≈ 100 ms.** Before the fix, the smoke test read −22.5 s, which was the Windows clock and not WSL2. | run-*/report.md `min`, `p1`; smoke test 2026-09-24 |
+| L1 at scale: mirror | **Canary 100 / 100 mirror**, 0 mismatch, 0 missing. **NegRisk legs (first 400): 340 mirror, 6 mismatch, 54 missing.** Missing = no book returned (closed or delisted legs). The 6 mismatches (1.7 % of present legs, e.g. `1005022#0`, `1005022#8`) need a look in S2c before D2b trusts L1 on NegRisk legs: either a real non-mirrored book or the two sides changing between snapshots. | mirror.csv |
+| Reconnects per run (count "reconnecting" lines) | **2 / 2 / 93**. All clean server closes (`Ok(())`) except 2 `ResetWithoutClosingHandshake` in run-5000. | results/run-*.log |
+| pm-api on live traffic: parse errors | **0 per 3,703,023 frames** (20,424 + 906,532 + 2,776,067). No shapes to fix. | run-*/errors.jsonl (empty) |
+
+Coverage note: run-50 and run-500 are capped at 16 connections and packed largest-event-first, so they cover only the largest events (dropped_tokens = 54,703 / 48,182). run-5000 covers everything (dropped_tokens = 0).
