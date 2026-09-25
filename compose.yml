@@ -57,6 +57,7 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: on-failure:5          # spec §8.1.2: a safe-mode exit 0 is NOT restarted
+    stop_grace_period: 30s         # flush writer + close episodes + write exit_reason before SIGKILL
     read_only: true
     tmpfs: [/tmp]
     volumes:
