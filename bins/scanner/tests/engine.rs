@@ -953,3 +953,86 @@ fn a_repair_that_uncrosses_the_book_opens_with_the_resolving_frames_recv_ms() {
     );
     assert!(opened.stale_transport, "{opened:?}");
 }
+
+#[test]
+fn the_threshold_gate_skips_detectors_until_the_top_sums_cross() {
+    let mut e = engine();
+    seed(&mut e); // ΣA = 1.05 and no bids: both gates shut
+    assert_eq!(e.detector_calls(), 0);
+    // ΣA = 0.95: the YES gate opens (one call). There are still no bids, so D2b is skipped.
+    let outs = e.on_frame(
+        0,
+        2_150,
+        &[
+            ask("e1-y0", 2_000, "0.30", "10"),
+            ask("e1-y0", 2_000, "0.40", "0"),
+        ],
+    );
+    assert_eq!(episodes(&outs).len(), 1);
+    assert_eq!(e.detector_calls(), 1);
+    // ΣA = 1.00: the gate is shut, but the open YES episode still runs D2a, which closes it at
+    // this frame's own ts.
+    let outs = e.on_frame(
+        0,
+        3_600,
+        &[
+            ask("e1-y1", 3_500, "0.40", "10"),
+            ask("e1-y1", 3_500, "0.35", "0"),
+        ],
+    );
+    let closed = episodes(&outs);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].closed_server_ms, Some(3_500));
+    assert_eq!(e.detector_calls(), 2);
+    // ΣA = 1.01 with nothing open: fully gated. Only the tracker sees this state.
+    let outs = e.on_frame(
+        0,
+        4_600,
+        &[
+            ask("e1-y2", 4_500, "0.31", "10"),
+            ask("e1-y2", 4_500, "0.30", "0"),
+        ],
+    );
+    assert!(episodes(&outs).is_empty());
+    assert_eq!(e.detector_calls(), 2);
+}
+
+#[test]
+fn the_threshold_gate_never_changes_a_single_output() {
+    let mut s = Synth::new(200, 42);
+    let frames = s.script(20_000);
+    let run = |gate: bool| {
+        let mut e = synth_engine(&s, gate);
+        let mut outs: Vec<Out> = Vec::new();
+        drive(&mut e, &frames, 4_000, &mut |o| outs.push(o));
+        (outs, e.detector_calls())
+    };
+    let (on, calls_on) = run(true);
+    let (off, calls_off) = run(false);
+    // Debug prints Decimal with its scale, so equal strings mean equal bytes, not only equal values.
+    let on_txt: Vec<String> = on.iter().map(|o| format!("{o:?}")).collect();
+    let off_txt: Vec<String> = off.iter().map(|o| format!("{o:?}")).collect();
+    assert_eq!(on_txt.len(), off_txt.len(), "output counts differ");
+    for (i, (a, b)) in on_txt.iter().zip(&off_txt).enumerate() {
+        assert_eq!(a, b, "output {i} differs with the gate on");
+    }
+    // The fixture must exercise what it claims to: both basket kinds open, feed drops
+    // right-censor, and the gate really skips work.
+    let rows = episodes(&on);
+    assert!(
+        rows.iter().any(|r| r.kind == "yes_basket"),
+        "no YES basket opened"
+    );
+    assert!(
+        rows.iter().any(|r| r.kind == "no_basket"),
+        "no NO basket opened"
+    );
+    assert!(
+        rows.iter().any(|r| r.censor_right),
+        "no right-censored close"
+    );
+    assert!(
+        calls_on < calls_off / 2,
+        "gate skipped too little: {calls_on} calls vs {calls_off}"
+    );
+}

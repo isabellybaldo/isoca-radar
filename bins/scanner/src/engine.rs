@@ -4,6 +4,7 @@ use crate::universe::{GroupMeta, Status, Universe};
 use arb_core::book::Book;
 use arb_core::detect::{
     Group, GroupLeg, Kind, Realization, Signal, detect_no_basket, detect_yes_basket,
+    no_basket_may_signal, yes_basket_may_signal,
 };
 use arb_core::episode::{Censor, EpisodeEvent, EpisodeTracker};
 use arb_core::fill::{BasketRule, BuyLeg, walk};
@@ -173,6 +174,12 @@ pub struct Engine {
     /// (`String: Borrow<str>`) instead of allocating one on every call; only a miss allocates,
     /// to insert the token's own key.
     issue_throttle: HashMap<&'static str, HashMap<String, IssueThrottle>>,
+    /// Spec §5.4/§8.2: skip a detector's depth walk when its top-of-book gate is false and no
+    /// episode is open for its key (S3a-2). Always on in live and replay. Tests and the bench turn
+    /// it off to prove the outputs are identical.
+    threshold_gate: bool,
+    /// Detector calls made so far (D2a + D2b). A counter of inputs processed, not a clock: pure.
+    detector_calls: u64,
 }
 
 /// Per-(kind, token) integrity-row rate limit (S3a Task 8), in event time.
@@ -246,11 +253,24 @@ impl Engine {
             group_last_ts: Vec::new(),
             held_closed: Vec::new(),
             issue_throttle: HashMap::new(),
+            threshold_gate: true,
+            detector_calls: 0,
         }
     }
 
     pub fn open_episodes(&self) -> usize {
         self.open.len()
+    }
+
+    /// Turn the §8.2 threshold gate off or on. Tests and the bench only: live and replay never call
+    /// this. With the gate off, every evaluation runs both detectors, as before S3a-2.
+    pub fn set_threshold_gate(&mut self, on: bool) {
+        self.threshold_gate = on;
+    }
+
+    /// How many detector calls (D2a + D2b) this engine has made.
+    pub fn detector_calls(&self) -> u64 {
+        self.detector_calls
     }
 
     fn key(meta: &GroupMeta, det: Det) -> String {
@@ -810,11 +830,28 @@ impl Engine {
             *last = (*last).max(ts);
         }
         for det in [Det::Yes, Det::No] {
-            let sig = match det {
-                Det::Yes => detect_yes_basket(&self.groups[g]),
-                Det::No => detect_no_basket(&self.groups[g]),
-            };
             let key = Self::key(&self.universe.groups[g], det);
+            let group = &self.groups[g];
+            // Spec §5.4/§8.2: walk the book only when the top-of-book sums cross the detector's
+            // threshold. A false gate proves the detector returns None (arb-core `*_may_signal`),
+            // so skipping it changes nothing. The tracker below still gets `None`, which records
+            // first sight exactly as before. A key with an open episode always runs its detector,
+            // so a close never depends on the gate.
+            let run = !self.threshold_gate
+                || self.open_by_key.contains_key(&key)
+                || match det {
+                    Det::Yes => yes_basket_may_signal(group),
+                    Det::No => no_basket_may_signal(group),
+                };
+            let sig = if run {
+                self.detector_calls += 1;
+                match det {
+                    Det::Yes => detect_yes_basket(group),
+                    Det::No => detect_no_basket(group),
+                }
+            } else {
+                None
+            };
             let pnl = sig
                 .as_ref()
                 .filter(|s| s.net_positive())
