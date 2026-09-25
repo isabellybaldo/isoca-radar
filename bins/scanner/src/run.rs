@@ -459,9 +459,9 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         suspect_window_ms: cfg.engine.suspect_window_ms,
     };
     let mut engine = Engine::new(engine_ctx(cfg, cfg_hash, run_id, "live"));
-    // Per-run counter (F3): the file name is always unique even if a warm start reuses an
-    // earlier `taken_ms`, so a later universe record can never overwrite an earlier one.
-    let mut universe_seq: u64 = 0;
+    // Unique across runs AND within a run (F3): run ids are unique, so a warm start that reuses
+    // an earlier `taken_ms` in a new process can never overwrite a previous run's record.
+    let mut universe_seq: u64 = u64::try_from(run_id).unwrap_or(0).saturating_mul(1_000_000);
     let mut apply =
         |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| {
             universe_seq += 1;
