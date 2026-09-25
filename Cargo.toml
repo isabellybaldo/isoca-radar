@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/arb-core", "crates/pm-api", "spikes/probe"]
+members = ["crates/arb-core", "crates/pm-api", "crates/store", "spikes/probe"]
 
 [workspace.package]
 edition = "2024"
@@ -22,6 +22,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 zstd = "0.13"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "rust_decimal", "migrate", "macros", "derive"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

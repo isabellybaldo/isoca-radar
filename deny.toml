@@ -20,4 +20,5 @@ deny = [
   { name = "ecdsa" },
   { name = "reqwest", wrappers = ["pm-api"] },
   { name = "tokio-tungstenite", wrappers = ["pm-api"] },
+  { name = "sqlx", wrappers = ["store"] },
 ]
