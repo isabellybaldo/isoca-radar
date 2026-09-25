@@ -58,6 +58,12 @@ impl EpisodeTracker {
         }
     }
 
+    /// Censor flags of the open episode for `key` (None if none is open). Lets callers read
+    /// `left` at Open time without mirroring the tracker's first-sight state.
+    pub fn open_censor(&self, key: &str) -> Option<Censor> {
+        self.open.get(key).map(|ep| ep.censor)
+    }
+
     /// Feed one evaluated state. `net_pnl` is Some only when the signal is net-positive:
     /// `Some(p)` with a positive `p` counts as positive; anything else (`None`, or `Some(p)`
     /// with `p <= 0`) is not.

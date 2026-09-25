@@ -162,3 +162,16 @@ fn f2_close_all_closes_every_open_episode_right_censored_ids_ascending() {
     let e = t.on_state("a", 7_000, None);
     assert!(matches!(&e[0], EpisodeEvent::Close { censor, .. } if censor.left));
 }
+
+#[test]
+fn open_censor_reads_left_at_open_time_without_a_close() {
+    let mut t = EpisodeTracker::new(30_000);
+    assert!(t.open_censor("ev1").is_none()); // nothing open yet
+    t.on_state("ev1", 1_000, Some(dec!(0.5))); // first sight, positive: left-censored
+    assert!(t.open_censor("ev1").unwrap().left);
+
+    let mut t = EpisodeTracker::new(30_000);
+    t.on_state("ev1", 1_000, None); // first sight, not positive
+    t.on_state("ev1", 2_000, Some(dec!(0.5))); // opens on the second, non-first sight
+    assert!(!t.open_censor("ev1").unwrap().left);
+}

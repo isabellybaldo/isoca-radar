@@ -104,10 +104,7 @@ struct OpenEp {
     stale: bool,
     suspect: bool,
     n_updates: i32,
-    /// Whether this key was seen for the first time when this episode opened (spec censor_left).
-    /// `EpisodeTracker` tracks this internally but doesn't surface it on `EpisodeEvent::Open`, so
-    /// the engine mirrors the tracker's own `seen` set (insert/remove/clear at the same call
-    /// sites) purely to recover this flag for the row.
+    /// From `EpisodeTracker::open_censor` at open time (spec censor_left).
     censor_left: bool,
     peak: Snap,
 }
@@ -140,9 +137,6 @@ pub struct Engine {
     suspect_until: Vec<i64>,
     msgs: HashMap<String, u64>,
     pending_drift: Vec<PendingDrift>,
-    /// Mirrors `EpisodeTracker`'s private `seen` set so the engine can recover `first_sight`
-    /// (censor_left) for open/peak rows; see `OpenEp::censor_left`.
-    seen: HashSet<String>,
 }
 
 fn kind_str(k: Kind) -> &'static str {
@@ -205,7 +199,6 @@ impl Engine {
             suspect_until: Vec::new(),
             msgs: HashMap::new(),
             pending_drift: Vec::new(),
-            seen: HashSet::new(),
         }
     }
 
@@ -252,7 +245,6 @@ impl Engine {
             .collect();
         gone.sort();
         for (_, key) in gone {
-            self.seen.remove(&key);
             for e in self.tracker.on_disconnect(&key, ts_ms) {
                 self.close_episode(e, &mut out);
             }
@@ -465,9 +457,6 @@ impl Engine {
                 Det::No => detect_no_basket(&self.groups[g]),
             };
             let key = Self::key(&self.universe.groups[g], det);
-            // Mirrors `EpisodeTracker::on_state`'s own `seen.insert`, so we can recover
-            // `first_sight` for `censor_left` (not surfaced on `EpisodeEvent::Open`).
-            let first_sight = self.seen.insert(key.clone());
             let pnl = sig
                 .as_ref()
                 .filter(|s| s.net_positive())
@@ -483,7 +472,7 @@ impl Engine {
                 match e {
                     EpisodeEvent::Open { id, .. } => {
                         if let Some(s) = &sig {
-                            self.open_episode(id, &key, at, s, first_sight, out);
+                            self.open_episode(id, &key, at, s, out);
                             opened = true;
                         }
                     }
@@ -551,16 +540,11 @@ impl Engine {
         }
     }
 
-    fn open_episode(
-        &mut self,
-        id: u64,
-        key: &str,
-        at: At,
-        s: &Signal,
-        censor_left: bool,
-        out: &mut Vec<Out>,
-    ) {
+    fn open_episode(&mut self, id: u64, key: &str, at: At, s: &Signal, out: &mut Vec<Out>) {
         let lag = at.recv_ms - at.ts;
+        // The tracker has already inserted the open episode by the time it returns the Open
+        // event, so `open_censor` reads back the `left` flag it just decided (spec censor_left).
+        let censor_left = self.tracker.open_censor(key).is_some_and(|c| c.left);
         let ep = OpenEp {
             episode_id: format!("{}-{}-{:08}", self.ctx.source, self.ctx.run_id, id),
             key: key.to_string(),
@@ -755,7 +739,6 @@ impl Engine {
             }
             for det in [Det::Yes, Det::No] {
                 let key = Self::key(&self.universe.groups[g], det);
-                self.seen.remove(&key);
                 for e in self.tracker.on_disconnect(&key, ts_ms) {
                     self.close_episode(e, &mut out);
                 }
@@ -769,8 +752,6 @@ impl Engine {
         for e in self.tracker.close_all(ts_ms) {
             self.close_episode(e, &mut out);
         }
-        // `EpisodeTracker::close_all` clears its own `seen` set entirely; mirror that.
-        self.seen.clear();
         out
     }
 
