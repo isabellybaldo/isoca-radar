@@ -34,8 +34,9 @@ docker run --rm -v probe-data:/data cute-probe report --dir /data/run-50
 docker run --rm -v probe-data:/data cute-probe report --dir /data/run-500
 docker run --rm -v probe-data:/data cute-probe report --dir /data/run-5000
 
-# 6. copy the small outputs to the repo (raw captures stay in the volume)
-docker run --rm -v probe-data:/data -v "${PWD}/spikes/probe/results:/out" debian:bookworm-slim sh -c "cp /data/universe.json /data/conncap.csv /data/mirror.csv /out/ && for d in /data/run-*; do mkdir -p /out/\$(basename \$d); cp \$d/report.md \$d/shards.csv \$d/errors.jsonl /out/\$(basename \$d)/; done"
+# 6. copy the small outputs to spikes/probe/results (git-ignored; raw captures stay in the volume)
+#    single quotes: PowerShell must not expand the $(...) meant for sh
+docker run --rm -v probe-data:/data -v "${PWD}/spikes/probe/results:/out" debian:bookworm-slim sh -c 'cp /data/universe.json /data/conncap.csv /data/mirror.csv /out/ && for d in /data/run-*; do mkdir -p /out/$(basename $d); cp $d/report.md $d/shards.csv $d/errors.jsonl /out/$(basename $d)/; done'
 ```
 
 Then fill in `spikes/probe/RESULTS.md` (or paste the outputs to Claude, which will fill it in).
