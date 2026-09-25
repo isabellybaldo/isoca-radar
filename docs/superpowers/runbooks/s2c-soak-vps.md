@@ -74,4 +74,17 @@ sh scripts/disk-budget.sh
 ```
 
 ## Results
-(fill in: dates, START/CUTOFF, CPU at 30 min, minutes, drops, reconnects, parked, lag p99, drop/budget integrity rows, episode counts by kind, replay comparison numbers)
+
+### Run 1: 2026-09-25, stopped after 89 min, NOT a Phase 2 pass
+- LIVE=1, START=1790340348680 (12:45:48 UTC). Image built at commit c6c0fb7 (S2c). KVM 2: 2 vCPU, 8 GB.
+- **Resources:** the scanner used 150–370 % CPU (load average 2.9–4.1 on 2 vCPU) and 1.2–1.3 GB RAM. Capture ran ~1.95 GB/h (hour 13), about 47 GB/day, over Phase 0's 33 GB/day estimate. Disk peaked at 6.1 GB.
+- **Feed:** drops 0. Lag p50 was 72–85 ms in normal minutes (better than the PC's ~290 ms). p99 lag had a median of 1.9 s and a maximum of 24.3 s, with spikes when the CPU saturated.
+- **Reconnects:** 136 in total. 40 at a time at every retier (13:24, 13:59): a full re-plan moved every shard. Parked max 1 near the end.
+- **Integrity:** normal rate ~10 top_mismatch/min until 13:31. Then **one token** (market 4689155, "Bitcoin price on September 25?", shard 1) looped: 20,240 top_mismatch rows in 35 min.
+  - The cause was a phantom bid level: ours sat 0.01–0.02 above the server's best bid.
+  - REST resnapshots were rejected as older than the ws-advanced book, so the book was never repaired, and the resnapshot flood starved the REST budget.
+  - crossed_book 289, drift 66, mirror_mismatch 31.
+- **Store:** one `refresh persist` statement timeout. The universe upsert hit scanner_rw's 5 s statement_timeout under load.
+- **Episodes (at 76 min):** yes_basket_incomplete 271 (137 stale), no_basket 72, yes_basket 9.
+- **Fixes:** S3a Task 4 (stop changed slots before start; idle slots) and **Task 8** (repair phantom levels from the stream's top; throttle integrity rows and resnapshots; 60 s universe-save timeout). Also noted for Phase 8: KVM 2 CPU headroom for the full universe plus the sim.
+- The replay prefix was deleted: after Task 8 the replay would diverge from this live run by design. Redeploy after S3a and restart the soak with a fresh prefix.
