@@ -5,17 +5,17 @@
 **Goal:** Run the pure `sim::PaperTrader` (S3b) inside the scanner, both live and in `scanner replay`. It writes every intent, fill, ledger entry, markout and mark to new `paper_*` tables. Markets settle from Gamma's payout vector. Live accounts survive restarts, and two replays of one capture produce identical ledgers (spec §19 Phase 3 exit: "Deterministic replay; equity identity holds").
 
 **Architecture:**
-- The engine owns an optional `PaperTrader` and lends it its own YES books through a zero-copy `Books` impl, built from split field borrows. It follows the S3b call contract: `on_frame` before a frame's events, `on_level`/`on_snapshot` after each applied change, `on_open` at each episode Open.
+- The engine owns an optional `PaperTrader` and lends it its own YES books through a zero-copy `Books` impl, built from split field borrows. It follows the S3b call contract: `on_frame` before a frame's events (so before any delta, deferred top-check or phantom-level trim of that frame), `on_level` after each applied delta **and for each level S3a's `Book::trim_to_top` removes** (a trim is a removal the consumed-liquidity ledger must see), `on_snapshot` after each applied ws snapshot and each accepted REST snapshot, `on_open` at each episode Open (wherever it happens: a frame, a deferred check's re-evaluation, a REST snapshot).
 - Paper rows leave the engine as `Out::Paper`. Live, they go through the existing batching writer. In replay they go straight into the replay batch. Both paths use one mapping function, `paper::push_sim`.
 - Resolutions reach the engine only as capture control lines (`Ctl::Resolved`), so replay settles exactly as live did. A live resolver task asks Gamma's read-only `/markets` route about the markets the trader holds.
 
 **Tech Stack:** Rust 1.98.1 (pinned), tokio 1.x, `sim` (S3b), `store` (sqlx 0.8, Postgres 17), `pm-api` (reqwest via its own client), `arb-core` (`stats::{parse_rfc3339_ms, days_to_end, annualized}` from S3b Task 1). No new external crates.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-arb-scanner-design.md`: §5.5 (lock-up figures), §5.6 (accounting, payout vector), §8.2/§8.3 (paper trader beside the engine, same core for live and replay), §10 (storage, roles, zero is a measurement), §11 (policies, pre-registration hash, replay), §15 (sim/replay golden tests, role tests), §16 (route table), §18 Q19 (non-binary payouts), §19 (Phase 3 exit). Earlier plans that land **before** this one:
-- `docs/superpowers/plans/2026-09-25-s3a-scanner-hardening.md`: migration 0003 (explicit grants), store `build.rs`, `mark_suspect(event_id, until_ms, now_ms) -> Vec<Out>`, the `VecDeque` writer, and the single shutdown deadline (`by_deadline`, `SHUTDOWN_BUDGET`).
-- `docs/superpowers/plans/2026-09-25-s3b-sim.md`: the `sim` crate, `config/policies.toml`, and the call contract.
+- `docs/superpowers/plans/2026-09-25-s3a-scanner-hardening.md` (**landed**: commits `4b68be2..088c43d` on `refactor`): migration 0003 (explicit grants; `unit_oversize` kind), store `build.rs` (`rerun-if-changed=migrations`), `SET LOCAL statement_timeout = '60s'` in the universe transactions, `mark_suspect(event_id, until_ms, now_ms) -> Vec<Out>`, deferred top-checks (`pending_tops`, `resolve_pending(token, recv_ms, out)`, `check_book(conn, token, ts, recv_ms, server, out)`), the phantom-level trim (`Book::trim_to_top`) and per-(kind, token) integrity throttle (`EngineCtx.issue_throttle_ms`), held-closed episodes and `suspect(g, until, since, out)`, `close_all`'s flush of suppressed throttle counts, sticky shards, REST classes (`Limiter::new(per_sec, reserved)`, `run_rechecks(.., max_in_flight, ..)`), the `VecDeque` writer, and the single shutdown deadline (`SHUTDOWN_BUDGET`, `by_deadline`, `wait_thread`).
+- `docs/superpowers/plans/2026-09-25-s3b-sim.md`: the `sim` crate, `config/policies.toml`, and the call contract. Its interfaces are used exactly as that plan writes them.
 
-Every "current code" anchor below refers to the tree **after** S3a and S3b.
+Every "current code" anchor below was checked against the tree at `088c43d` (S3a landed) plus the S3b plan text. Refreshed 2026-09-25 after S3a: see rulings 14–18.
 
 ## Global Constraints
 
@@ -25,7 +25,7 @@ Every "current code" anchor below refers to the tree **after** S3a and S3b.
 - Exact decimals only. No `f32`/`f64`. The workspace clippy config denies `float_arithmetic`, `unwrap_used` and `expect_used`. Test files (and `#[cfg(test)]` modules) start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
 - Money, sizes and prices in the new tables use **unconstrained `NUMERIC`** (the house deviation from §10's `NUMERIC(20,6)`, S2b plan: a 6 dp price × a 6 dp size has 12 dp, and a scaled column would round silently).
 - **Zero is a measurement** (§10): `NULL` = not measured, `0` = measured zero. `Option<Decimal>` stays `Option` all the way to Postgres.
-- After migration 0003, `scanner_rw` has **no** default INSERT/UPDATE: every new table needs an explicit `GRANT` in its own migration. `analyze_ro` only ever reads.
+- After migration 0003, `scanner_rw` has **no** default INSERT/UPDATE (nor sequence USAGE): every new table needs an explicit `GRANT` in its own migration. Default SELECT (0001) still applies to both roles, but 0004 grants it explicitly too. `analyze_ro` only ever reads. The paper migration is **0004**, after 0003.
 - `paper_state` is **live only**. Replay never reads it and never writes it: each replay starts every account fresh.
 - The whole graceful stop, including the paper close and the state save, fits S3a's `SHUTDOWN_BUDGET` (20 s) inside compose's 30 s `stop_grace_period`.
 - Disk budget: the project stays under 30 GB. Debug `cargo test`/`clippy` only: no `--release`, no `docker build` in this plan.
@@ -40,6 +40,8 @@ Every "current code" anchor below refers to the tree **after** S3a and S3b.
 3. **A restart after `policies.toml` changed an account** (same id, different `per_trade`). The saved account must not continue under the new spec. It is a different pre-registered experiment, so it starts fresh, with a log line. A corrupt saved state is an error, never a silent reset. Pinned in Task 3 (`a_saved_account_whose_spec_changed_starts_fresh`).
 4. **The same thing arriving twice.** A resolution can come from both the ws hint and the periodic poll. The writer can retry a batch whose commit actually succeeded. Neither may double a settlement or a row. Pinned in Task 4 (`a_repeated_resolution_settles_once`) and Task 1 (`paper_rows_round_trip_exactly_and_a_rewrite_changes_nothing`).
 5. **A Postgres outage long enough to hit `max_pending_rows`.** It must never evict paper rows: a gap in `paper_ledger` breaks the equity identity. Pinned in Task 6 (`paper_rows_are_never_evicted_by_the_cap`).
+6. **A phantom level (S3a soak) that an account already consumed.** When S3a's stream repair trims it, the account's consumed amount at that price must clear, as for any removal; otherwise every later episode on that leg fills short forever. Pinned in Task 4 (`a_trimmed_phantom_level_clears_consumed_liquidity`).
+7. **An episode opened by a REST snapshot.** `rest_snapshot` evaluates with `recv_ms = server ts` (often minutes old), so an execution clock taken from it would fill "in the past". Pinned in Task 4 (`an_episode_opened_by_a_rest_snapshot_executes_after_the_latest_frame`).
 
 ---
 
@@ -68,7 +70,7 @@ config/scanner.toml                          MODIFY: [paper] section
 docker/rust.Dockerfile                       MODIFY: copy policies.toml into the image
 bins/scanner/src/paper.rs                    NEW: policies + hash, SimOut → rows, state rows + restore, resolver loop
 bins/scanner/src/lib.rs                      MODIFY: pub mod paper
-bins/scanner/src/engine.rs                   MODIFY: PaperTrader field, EngineBooks, call contract, OpenCtx, lock-up fields, on_resolution
+bins/scanner/src/engine.rs                   MODIFY: PaperTrader field, EngineBooks, call contract (incl. S3a trims), OpenCtx, lock-up fields, on_resolution
 bins/scanner/tests/engine_paper.rs           NEW: engine ↔ trader wiring
 bins/scanner/src/capture.rs                  MODIFY: Ctl::Resolved
 bins/scanner/src/replay.rs                   MODIFY: replay_dir_paper; Resolved; paper close
@@ -89,7 +91,7 @@ docs/superpowers/runbooks/s3-paper.md        NEW: Phase 3 exit runbook
 - Modify (compile fix only): `bins/scanner/src/writer.rs` (`Pending::take`)
 
 **Interfaces:**
-- Consumes: S3a's `crates/store/build.rs` (new migration files are picked up) and 0003's revoked default privileges.
+- Consumes: S3a's `crates/store/build.rs` (`cargo:rerun-if-changed=migrations`, so `sqlx::migrate!` embeds the new 0004 file without a clean build) and 0003's revoked default INSERT/UPDATE for `scanner_rw` (a table created after 0003 is not writable by the scanner until granted; see `roles.rs::a_table_created_after_0003_is_not_writable_by_scanner_but_its_own_tables_are`). The current `Batch` (rows.rs) has exactly `episodes, observations, integrity, health` and `is_empty()`; `Table` (batch.rs) has `Observations, IntegrityEvents, Health, EpisodeLegs`.
 - Produces:
   - `store::{PaperAccountRow, PaperIntentRow, PaperExecRow, PaperFillRow, PaperLedgerRow, PaperMarkoutRow, PaperMarkRow, PaperStateRow}`, with the fields shown in Step 3.
   - `Batch` gains `paper_accounts, paper_intents, paper_execs, paper_fills, paper_ledger, paper_markouts, paper_marks, paper_state` (all `Vec`).
@@ -459,9 +461,10 @@ async fn scanner_appends_paper_rows_and_upserts_state_but_analyze_only_reads() {
         "UPDATE paper_ledger SET qty = qty",
         "DELETE FROM paper_ledger",
         "UPDATE paper_accounts SET bankroll = bankroll",
+        "DELETE FROM paper_state",
     ] {
         let e = scanner.raw_exec(sql).await.unwrap_err();
-        assert!(is_permission_denied(&e), "history is append-only: {sql}: {e}");
+        assert!(is_permission_denied(&e), "history is append-only, state never deleted: {sql}: {e}");
     }
     let analyze = db.role("analyze_ro").await;
     assert_eq!(analyze.paper_ledger_for_run(run).await.expect("analyze reads").len(), 1);
@@ -735,8 +738,10 @@ impl Batch {
 -- runs each write under their own run_id, so two replays of one capture compare with EXCEPT.
 -- Money, sizes and prices are unconstrained NUMERIC (house rule since S2b: exact, never rounded on
 -- insert). Timestamps are BIGINT ms; *_at columns are for humans.
--- Grants are explicit (0003): the scanner may only APPEND history (ON CONFLICT DO NOTHING needs
--- no UPDATE) and upsert paper_state. analyze_ro reads everything.
+-- Grants are explicit (0003 revoked the scanner's default INSERT/UPDATE and sequence USAGE on
+-- every table created after it): the scanner may only APPEND history (ON CONFLICT DO NOTHING needs
+-- no UPDATE) and upsert paper_state. No DELETE anywhere. Every key is natural, so there are no
+-- sequences to grant. analyze_ro reads everything (its default SELECT still applies; spelled out).
 
 CREATE TABLE paper_accounts (
     run_id           BIGINT  NOT NULL REFERENCES runs (run_id),
@@ -870,6 +875,7 @@ GRANT SELECT ON
 TO analyze_ro;
 
 -- Q19: a resolution whose payout vector is not {1,0}/{0,1} (UMA 50-50, voided leg) is a flagged risk class.
+-- The list is 0003's (which added unit_oversize) plus non_binary_payout.
 ALTER TABLE integrity_events DROP CONSTRAINT IF EXISTS integrity_events_kind_check;
 ALTER TABLE integrity_events ADD CONSTRAINT integrity_events_kind_check CHECK (kind IN (
     'crossed_book', 'mirror_mismatch', 'top_mismatch', 'drift',
@@ -1147,13 +1153,13 @@ impl Table {
     }
 }
 ```
-- In `write_batch`, directly before `tx.commit().await?;`, add:
+- In `write_batch`, directly before its final `tx.commit().await?;` (after the health upsert's `qb.build().execute(&mut *tx).await?;`), add:
 ```rust
         crate::paper::write_paper(&mut tx, b).await?;
 ```
-(`&mut tx` is a `&mut Transaction`, which derefs to `&mut PgConnection`. If the compiler asks for it explicitly, write `&mut *tx`.)
+(`tx` is a `Transaction<'_, Postgres>`, whose `DerefMut` target is `PgConnection`; the existing inserts in `write_batch` pass `&mut *tx`. If deref coercion does not kick in, write `crate::paper::write_paper(&mut *tx, b)`.) `write_batch` returns early on `b.is_empty()`, which Step 3 redefines as `rows() == 0`, so a batch carrying only `paper_state` rows is written.
 
-- [ ] **Step 6: Keep the scanner compiling.** S3a's `Pending::take` in `bins/scanner/src/writer.rs` builds `Batch { episodes, observations, integrity, health }` field by field. Add `..Batch::default()` as the last line of that literal. Task 6 replaces this function.
+- [ ] **Step 6: Keep the scanner compiling.** S3a's `Pending::take` in `bins/scanner/src/writer.rs` builds `Batch { episodes, observations, integrity, health }` field by field (the three queues via `std::mem::take(&mut self.…).into()`). Add `..Batch::default()` as the last line of that literal. Task 6 replaces this function. No other scanner code builds a `Batch` without `..Batch::default()` (`quarantine` and `replay_cmd` already use it or push into a default batch).
 
 - [ ] **Step 7: Run the tests to verify they pass.**
 Run: `set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" && cargo test -p store && cargo check -p scanner --all-targets`
@@ -1690,7 +1696,7 @@ mod tests {
 ```
 Add `sim = { path = "../../crates/sim" }` to `[dependencies]` in `bins/scanner/Cargo.toml` (after `store`), and add `pub mod paper;` to `bins/scanner/src/lib.rs` (after `pub mod metrics;`).
 
-In `bins/scanner/src/config.rs` `mod tests`, extend `repo_config_parses_with_a_stable_hash` with the lines below (before its closing brace), and add one test:
+In `bins/scanner/src/config.rs` `mod tests`, extend `repo_config_parses_with_a_stable_hash` with the lines below (after S3a's `(max_in_flight, resnapshot_reserved_per_sec) == (32, 3)` assertion, before its closing brace), and add one test:
 ```rust
         assert!(cfg.paper.enabled);
         assert_eq!(cfg.paper.policies, "/etc/cute-trading/policies.toml");
@@ -1725,7 +1731,7 @@ pub struct PaperCfg {
     pub state_save_every_secs: u64,
 }
 ```
-and at the end of `validate` (before `Ok(())`):
+and at the end of `validate` (after S3a's `engine.issue_throttle_ms` check, before `Ok(())`):
 ```rust
         anyhow::ensure!(
             self.paper.resolver_every_secs >= 60,
@@ -2048,6 +2054,12 @@ git commit -m "scanner: [paper] config, policies hash, SimOut→row mapping, sta
 
 **Interfaces:**
 - Consumes: `sim::trader::{PaperTrader, Books, TraderState}`, `sim::policy::{OpenCtx, LegInfo}`, `sim::rows::SimOut`, `sim::types::BookSide`; `arb_core::stats::{parse_rfc3339_ms, days_to_end, annualized}`; `arb_core::fill::BasketQuote`. The S3b call contract: `on_frame(recv_ms, books)` BEFORE a frame's events, `on_level`/`on_snapshot` AFTER each applied change, `on_open` at each Open.
+- The S3a engine this task hooks into (current code, `bins/scanner/src/engine.rs`):
+  - `on_frame(conn, recv_ms, events)` applies snapshots immediately (their crossed check runs at frame end via `check_book(conn, token, ts, recv_ms, None, out)`, no trim) and defers every delta's top-check into `pending_tops`. A deferred check is settled by `resolve_pending(token, recv_ms, out)` either mid-frame (a later-ts delta for the same token arrives, BEFORE that delta is applied) or at frame end (same conn, `p.ts + 1_000 < ts`).
+  - `check_book(conn, token, ts, recv_ms, server: Option<(Option<Price>, Option<Price>)>, out)`: on a top mismatch it calls `Book::trim_to_top(best_bid, best_ask) -> bool` on the token's book (bids strictly above the server's best bid and asks strictly below its best ask are removed), throttles the integrity row per (kind, token) (`issue_throttle_ms`), marks the group suspect via `suspect(g, until, since, out)`, and, if the trim changed the book, re-evaluates the group at `max(ts, group_last_ts)` with the resolving frame's `recv_ms`. **A trim is a book mutation outside the delta path: the paper trader must hear about each removed level.**
+  - `rest_snapshot(token, book)` replaces a group leg's book when `book.server_ts_ms() >= ours`, drops its pending check, and evaluates with `recv_ms = eval_ts` (a server timestamp, not a receive time).
+  - `open_episode(id, key, at, s, out)` is reached from `evaluate`, which runs from frame ends, `check_book` re-evaluations and `rest_snapshot`.
+  - `close_all(ts)` also flushes suppressed throttle counts as integrity rows; `mark_suspect` and held-closed re-flags only re-emit episode rows.
 - Produces:
   - `PaperTrader::held_markets(&self) -> BTreeSet<String>` (sim): markets with a position or returned YES in any account.
   - `Out::Paper(Box<SimOut>)` and `Out::ResolvedHint`.
@@ -2055,6 +2067,7 @@ git commit -m "scanner: [paper] config, policies hash, SimOut→row mapping, sta
   - `Engine::paper_held_markets(&self) -> Vec<String>` (sorted), `Engine::paper_state(&self) -> Option<TraderState>`, `Engine::paper_close(&mut self, t_ms: i64) -> Vec<Out>`.
   - `Engine::on_resolution(&mut self, t_ms: i64, market_id: &str, payout_yes: Decimal, payout_no: Decimal) -> Vec<Out>`. A non-binary vector also yields an `Out::Integrity` of kind `non_binary_payout`.
   - `EpisodeRow.days_to_end / annualized_return / post_end` are now filled when an end date is known.
+  - Private: `Engine.last_recv_ms` (latest frame receive time seen) and the free fn `gone_levels(bids_before, asks_before, now: &Book) -> Vec<(BookSide, Decimal)>` (levels a trim removed).
 
 - [ ] **Step 1: Write the failing sim test.** Append to `crates/sim/tests/lifecycle.rs`:
 ```rust
@@ -2101,7 +2114,7 @@ Expected: PASS (7).
 ```rust
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
-use arb_core::book::Side;
+use arb_core::book::{Book, Side};
 use arb_core::stats::{annualized, days_to_end};
 use common::*;
 use pm_api::ws::MarketEvent;
@@ -2251,6 +2264,60 @@ fn an_emptied_level_clears_consumed_liquidity() {
     assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(51.2), dec!(48.8), dec!(48.8)));
 }
 
+/// A YES-bid delta whose message reports the server's final best bid (S3a deferred top-check).
+fn bid_top(token: &str, ts: i64, price: &str, size: &str, best_bid: &str) -> MarketEvent {
+    MarketEvent::Delta {
+        token: token.into(),
+        server_ts_ms: ts,
+        side: Side::Bid,
+        price: p(price),
+        size: sh(size),
+        best_bid: Some(p(best_bid)),
+        best_ask: None,
+    }
+}
+
+#[test]
+fn a_trimmed_phantom_level_clears_consumed_liquidity() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    open_no_basket(&mut e);
+    assert_eq!(fills(&quiet(&mut e, 2_300)), all3(dec!(51.2), dec!(51.2), dec!(51.2)));
+    // The server says leg 0's best bid is 0.30: our 0.40 (the level we consumed) is a phantom,
+    // a removal we never received. The check is deferred until the update is complete...
+    let outs = e.on_frame(0, 2_400, &[bid_top("e1-y0", 2_400, "0.30", "100", "0.30")]);
+    assert!(!outs.iter().any(|o| matches!(o, Out::Integrity(_))), "deferred, not yet checked");
+    // ...which the next update on the token proves: S3a trims 0.40 (the basket closes), then
+    // this frame's delta re-adds 0.40 with fresh size (episode 2 opens at recv 2 500).
+    let outs = e.on_frame(0, 2_500, &[bid_top("e1-y0", 2_500, "0.40", "100", "0.40")]);
+    assert!(outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")));
+    assert!(episodes(&outs).iter().any(|r| r.closed_server_ms.is_some()));
+    assert!(episodes(&outs).iter().any(|r| r.episode_id == "live-7-00000002"));
+    // The trim reached on_level as a removal: leg 0's consumed 51.2 cleared, exactly as for a
+    // size-0 delta. Without it, leg 0 would fill 48.8 (a re-added size is not a shrink).
+    assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(51.2), dec!(48.8), dec!(48.8)));
+}
+
+#[test]
+fn an_episode_opened_by_a_rest_snapshot_executes_after_the_latest_frame() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    books(&mut e, 1_100, 1_000, ["0.30", "0.30", "0.30"]); // ΣNO 2.10: nothing
+    quiet(&mut e, 5_000); // the engine has now seen a frame received at 5 000
+    // A REST snapshot (server ts 1 500, accepted: newer than our 1 000) lifts leg 0's YES bid to
+    // 0.50: NO asks 0.50 / 0.70 / 0.70, Σ 1.90 < 2, so a NO basket opens from rest_snapshot.
+    let mut b = Book::default();
+    b.apply_snapshot(&[(p("0.50"), sh("100"))], &[(p("0.55"), sh("100"))], 1_500);
+    let outs = e.rest_snapshot("e1-y0", b);
+    assert_eq!(episodes(&outs).len(), 1);
+    let intents: Vec<_> = sims(&outs)
+        .into_iter()
+        .filter_map(|s| if let SimOut::Intent(i) = s { Some(i) } else { None })
+        .collect();
+    assert_eq!(intents.len(), 1);
+    // rest_snapshot evaluates with recv = the REST book's server ts (1 500); the trader's clock
+    // is never behind the latest frame the engine received (5 000), plus match_ms 100.
+    assert_eq!(intents[0].exec_ms, Some(5_100));
+}
+
 /// P3 buys a YES basket (asks 0.30/0.35/0.30, size 10) and holds it to resolution.
 fn yes_basket_held() -> Engine {
     let mut e = paper_engine(PolicyKind::P3Naive);
@@ -2366,7 +2433,7 @@ use sim::rows::SimOut;
 use sim::trader::{Books, PaperTrader, TraderState};
 use sim::types::BookSide;
 ```
-(`arb_core::fill::{BasketRule, BuyLeg, walk}` is already imported. Add `BasketQuote` to that line instead if you prefer.)
+(`arb_core::fill::{BasketRule, BuyLeg, walk}`, `arb_core::book::Book` and `arb_core::money::{Price, Shares}` are already imported. Add `BasketQuote` to the `fill` line instead if you prefer.)
 
 Add two variants at the end of `pub enum Out`:
 ```rust
@@ -2380,10 +2447,13 @@ Add one field to `struct OpenEp` (after `censor_left`):
     /// Latest endDate over the group's live legs at open (spec §5.5 lock-up estimate).
     end_ms: Option<i64>,
 ```
-Add one field to `pub struct Engine` (last), and `paper: None,` to the struct literal in `Engine::new`:
+Add two fields to `pub struct Engine` (after S3a's `issue_throttle`), and `paper: None, last_recv_ms: i64::MIN,` to the struct literal in `Engine::new` (after `issue_throttle: HashMap::new(),`):
 ```rust
     /// The paper trader (S3c), fed by the S3b call contract. None = scanner only.
     paper: Option<PaperTrader>,
+    /// Latest frame receive time seen (an input, so replay sees the same). The paper trader's
+    /// open clock never runs behind it (see `open_ctx`).
+    last_recv_ms: i64,
 ```
 Add these free items below `fn leg_fee`:
 ```rust
@@ -2412,9 +2482,32 @@ fn lockup_annualized(q: &BasketQuote, days: Decimal) -> Option<Decimal> {
     }
     annualized(q.pnl.checked_div(q.cost)?, days)
 }
+
+/// The levels present before a `Book::trim_to_top` and absent from `now` (a trim only removes),
+/// as (side, price): each is a removal the paper trader's consumed-liquidity ledger must see.
+fn gone_levels(
+    bids_before: &[(Price, Shares)],
+    asks_before: &[(Price, Shares)],
+    now: &Book,
+) -> Vec<(BookSide, Decimal)> {
+    let (bids_now, asks_now) = (now.bids_best_first(), now.asks_best_first());
+    let mut gone = Vec::new();
+    for (side, before, after) in [
+        (BookSide::Bid, bids_before, &bids_now),
+        (BookSide::Ask, asks_before, &asks_now),
+    ] {
+        for (p, _) in before {
+            if !after.iter().any(|(q, _)| q == p) {
+                gone.push((side, p.get()));
+            }
+        }
+    }
+    gone
+}
 ```
-In `on_frame`, directly after `let mut frame_tokens: Vec<String> = Vec::new();` (before `for ev in events`):
+In `on_frame`, directly after `let mut frame_tokens: Vec<String> = Vec::new();` (before `for ev in events`). This runs before ANY book change of the frame: its snapshots and deltas, and the deferred top-checks (with their phantom trims) that its deltas or its end settle.
 ```rust
+        self.last_recv_ms = self.last_recv_ms.max(recv_ms);
         // S3b call contract: work due at or before this frame runs on the books as they were
         // just BEFORE it (the state at its due time).
         if let Some(t) = self.paper.as_mut() {
@@ -2422,7 +2515,7 @@ In `on_frame`, directly after `let mut frame_tokens: Vec<String> = Vec::new();` 
             paper_outs(t.on_frame(recv_ms, &books), &mut out);
         }
 ```
-In the `MarketEvent::Snapshot` arm, inside `if self.on_book(...) { … }`, after the `frame_tokens` push block:
+In the `MarketEvent::Snapshot` arm, inside `if self.on_book(token, &mut touched, |b| b.apply_snapshot(bids, asks, ts)) { … }`, after the `frame_tokens` push block (`on_book` also returns true for canary tokens, hence the `token_ix` lookup):
 ```rust
                         if let (Some(t), Some(&(g, l))) =
                             (self.paper.as_mut(), self.token_ix.get(token.as_str()))
@@ -2430,7 +2523,7 @@ In the `MarketEvent::Snapshot` arm, inside `if self.on_book(...) { … }`, after
                             t.on_snapshot(token, &self.groups[g].legs[l].book);
                         }
 ```
-In the `MarketEvent::Delta` arm, after the `if found { self.pending_tops.insert(…); }` block:
+In the `MarketEvent::Delta` arm, after the `if found { self.pending_tops.insert(token.clone(), PendingTop { … }); }` block. (`side`, `price` and `size` are the copied locals of `let (side, price, size) = (*side, *price, *size);`. Any `resolve_pending` this delta triggered ran BEFORE `on_book`, and reports its own trim through `check_book` below.)
 ```rust
                     if found
                         && self.token_ix.contains_key(token.as_str())
@@ -2439,6 +2532,49 @@ In the `MarketEvent::Delta` arm, after the `if found { self.pending_tops.insert(
                         t.on_level(token, BookSide::from_core(side), price.get(), size.get());
                     }
 ```
+In `check_book`, inside `if let Some(mut detail) = mismatch { … }`, replace S3a's trim block
+```rust
+            let (sb, sa) = server.unwrap_or((None, None));
+            let mut changed = false;
+            let repaired = self.book_mut(token).is_some_and(|b| {
+                changed = b.trim_to_top(sb, sa);
+                let t = b.top();
+                (sb.is_none() || sb == t.best_bid.map(|(x, _)| x))
+                    && (sa.is_none() || sa == t.best_ask.map(|(x, _)| x))
+            });
+```
+with (same trim, plus the removal report; canary tokens have no `group` and are skipped):
+```rust
+            let (sb, sa) = server.unwrap_or((None, None));
+            // S3c: a trimmed level is a removal the paper trader's consumed-liquidity ledger must
+            // see, exactly like a size-0 delta. Remember the levels before the trim (group legs
+            // only, and only when a trader is attached: this path is rare, the copy is cheap).
+            let before = match (group, self.paper.is_some()) {
+                (Some(_), true) => self
+                    .book_of(token)
+                    .map(|b| (b.bids_best_first(), b.asks_best_first())),
+                _ => None,
+            };
+            let mut changed = false;
+            let repaired = self.book_mut(token).is_some_and(|b| {
+                changed = b.trim_to_top(sb, sa);
+                let t = b.top();
+                (sb.is_none() || sb == t.best_bid.map(|(x, _)| x))
+                    && (sa.is_none() || sa == t.best_ask.map(|(x, _)| x))
+            });
+            if changed && let Some((bids, asks)) = before {
+                let gone = self
+                    .book_of(token)
+                    .map(|b| gone_levels(&bids, &asks, b))
+                    .unwrap_or_default();
+                if let Some(t) = self.paper.as_mut() {
+                    for (side, price) in gone {
+                        t.on_level(token, side, price, Decimal::ZERO);
+                    }
+                }
+            }
+```
+The rest of `check_book` (throttled `top_mismatch` row, `Resnapshot` when not repaired, `suspect`, re-evaluation when `changed`, crossed check) is unchanged. The removal is reported BEFORE the re-evaluation, so an episode that re-opens on the trimmed book is decided against a ledger that already forgot the phantom.
 Replace the `MarketEvent::Resolved { .. } | MarketEvent::NewMarket { .. } => out.push(Out::UniverseChanged)` arm with:
 ```rust
                 MarketEvent::Resolved { .. } => {
@@ -2516,7 +2652,10 @@ Split `snap` so the open context can reuse its levels. Replace `fn snap` with:
         OpenCtx {
             episode_id: ep.episode_id.clone(),
             event_id: meta.event_id.clone(),
-            r_open_ms: at.recv_ms,
+            // A frame (or a deferred check it settled) passes its own recv; `rest_snapshot`
+            // passes the REST book's SERVER ts, which can be far behind. Never start the paper
+            // clock before the latest frame the engine received (ruling 15).
+            r_open_ms: at.recv_ms.max(self.last_recv_ms),
             signal: s.clone(),
             legs: meta
                 .legs
@@ -2556,7 +2695,7 @@ and replace the three `None` lines:
             annualized_return: days.and_then(|d| lockup_annualized(q, d)),
             post_end: days.map(|d| d < Decimal::ZERO),
 ```
-In `rest_snapshot`, directly after `self.groups[g].legs[l].book = book;`:
+In `rest_snapshot`, in the group-leg branch, directly after `self.groups[g].legs[l].book = book;` (i.e. only for an ACCEPTED snapshot: an older one returned early above; the canary branch is not a group leg):
 ```rust
             if let Some(t) = self.paper.as_mut() {
                 t.on_snapshot(token, &self.groups[g].legs[l].book);
@@ -2632,16 +2771,16 @@ Add these methods at the end of `impl Engine`:
         out
     }
 ```
-`Io::route` in `run.rs` matches `Out` exhaustively, so keep the build green now: add these two arms after `Out::Lag(ms) => self.metrics.push_lag(ms),` (Task 7 replaces them with the real routing):
+`Io::route` in `run.rs` matches `Out` exhaustively, so keep the build green now: add this arm after `Out::Lag(ms) => self.metrics.push_lag(ms),` (before S3a's `Out::Drift { .. }` arm; Task 7 replaces it with the real routing). `replay_cmd` and the `Drift` arm's `mark_suspect` loop use `_ =>`/`if let` and need no change:
 ```rust
                 Out::Paper(_) | Out::ResolvedHint => {} // routed in S3c Task 7
 ```
 
 - [ ] **Step 7: Run the tests to verify they pass.**
 Run: `cargo test -p scanner --test engine_paper`
-Expected: PASS (8). If a fill quantity differs, recompute it from the fixture before touching the code. The per-trade budget is 100 / 1.95 → 51.2 (sizes must keep price × size at ≤ 2 dp for limits 0.60/0.65/0.70). The second episode sees 100 − 51.2 = 48.8 on the legs whose consumption did not clear.
+Expected: PASS (10). If a fill quantity differs, recompute it from the fixture before touching the code. The per-trade budget is 100 / 1.95 → 51.2 (sizes must keep price × size at ≤ 2 dp for limits 0.60/0.65/0.70). The second episode sees 100 − 51.2 = 48.8 on the legs whose consumption did not clear. In `a_trimmed_phantom_level_clears_consumed_liquidity`, first confirm the top_mismatch row and the episode-2 open (S3a's path); only then look at the fills: 48.8 on leg 0 means the trim never reached `on_level`.
 Run: `cargo test -p scanner && cargo test -p sim`
-Expected: PASS. The existing engine, engine_checks and replay tests are unchanged: without a paper trader the engine emits exactly what it did before, plus `ResolvedHint` on `market_resolved`.
+Expected: PASS. The existing engine, engine_checks and replay tests are unchanged: without a paper trader the engine emits exactly what it did before, plus `ResolvedHint` on `market_resolved` (`last_recv_ms` only feeds the paper clock; the `before` copy in `check_book` is skipped when no trader is attached).
 
 - [ ] **Step 8: Lint and commit.**
 Run: `cargo fmt --all --check && cargo clippy -p scanner -p sim --all-targets -- -D warnings`
@@ -2660,7 +2799,7 @@ git commit -m "scanner/engine: paper trader on the engine's own books (call cont
 - Test: `bins/scanner/tests/replay.rs`
 
 **Interfaces:**
-- Consumes: `Engine::{set_paper, on_resolution, paper_close}` (Task 4); `paper::{push_sim, account_rows, with_policies, Policies}` (Task 3); `Batch::rows` (Task 1). S3a's replay `Ctl::Suspect` arm (`engine.mark_suspect(&event_id, until_ms, ms)` returning rows).
+- Consumes: `Engine::{set_paper, on_resolution, paper_close}` (Task 4); `paper::{push_sim, account_rows, with_policies, Policies}` (Task 3); `Batch::rows` (Task 1). S3a's replay: the `Ctl::Suspect` arm (`out.outs.extend(engine.mark_suspect(&event_id, until_ms, ms))`), the `Ctl::Shutdown` arm (`out.outs.extend(engine.close_all(ms)); shut_down = true;`, which now also flushes suppressed throttle counts) and the crash close `engine.close_all(last_ms)`. The test file's `ctx()` already sets S3a's `issue_throttle_ms: 5_000`.
 - Produces:
   - `capture::Ctl::Resolved { market_id: String, payout_yes: String, payout_no: String }`. The decimals are exact strings, like `RestSnapshot`, serialized as `{"kind":"resolved",…}`.
   - `replay::replay_dir_paper(dir: &Path, ctx: EngineCtx, paper: Option<PaperTrader>) -> anyhow::Result<ReplayOut>`. `replay_dir(dir, ctx)` is unchanged and equals `replay_dir_paper(dir, ctx, None)`.
@@ -3176,7 +3315,7 @@ git commit -m "scanner/writer: paper rows ride the batching writer, never evicte
 - Test: `mod tests` in `run.rs`
 
 **Interfaces:**
-- Consumes: everything above. From S3a: `by_deadline`, the `deadline` local and the shutdown block of `run_live`.
+- Consumes: everything above. From S3a (current `run.rs`): `SHUTDOWN_BUDGET` (20 s) + `END_RUN_TIMEOUT` (5 s) < compose's 30 s; `by_deadline(deadline, step, fut)` (a ready step still completes after the deadline, a stuck one is skipped); `wait_thread`; and `run_live`'s stop block, in this order: `let deadline = …; drop(plan_tx); supervisor_task.abort(); refresher_task.abort(); let t = now_ms(); io.ctl(0, Ctl::Shutdown, t); close_all(t) → by_deadline("close episodes"); Flush → by_deadline("writer flush"); abort health/rechecks/resnapshots/samplers; drop(io), drop(capture_tx), drop(writer_tx); by_deadline("writer exit", writer_task); wait_thread(capture)`. `Io` today has exactly `writer, capture, recheck, resnap, refresh, metrics, run_id, l1_window_ms, suspect_window_ms`.
 - Produces:
   - `run::run(cfg: Config, cfg_hash: String, policies: Option<Policies>)`.
   - `Io` gains `resolve_hint: Arc<Notify>`. `Io::route` sends `Out::Paper` to the writer as `WriterMsg::Paper` (rows stamped with the run id) and turns `Out::ResolvedHint` into a resolver wake-up.
@@ -3213,6 +3352,7 @@ git commit -m "scanner/writer: paper rows ride the batching writer, never evicte
             suspect_window_ms: 60_000,
             l1_suspect_window_ms: 3_600_000,
             drift_settle_ms: 2_000,
+            issue_throttle_ms: 5_000,
         });
         let mark = sim::rows::AccountRow {
             account: "P0-converter/sp-idle".into(),
@@ -3377,10 +3517,20 @@ async fn run_live(
                 });
             }
 ```
-- in S3a's shutdown block, directly after `let _ = by_deadline(deadline, "close episodes", io.route(&mut engine, outs)).await;`, add:
+- in S3a's shutdown block (all of it runs under the ONE `deadline = now + SHUTDOWN_BUDGET`):
+  - directly after `refresher_task.abort();` (step 1, "stop taking new inputs"), add:
 ```rust
-    // Paper (S3c): complete pending conversions and mark at `t` (replay does the same on
-    // Ctl::Shutdown), then save the accounts BEFORE the flush so both land in the last batch.
+    // No resolution may arrive after the Shutdown line below (replay must see what live saw).
+    if let Some(r) = &resolver_task {
+        r.abort();
+    }
+```
+  - directly after `let _ = by_deadline(deadline, "close episodes", io.route(&mut engine, outs)).await;` and BEFORE the `WriterMsg::Flush` step, add:
+```rust
+    // Paper (S3c): complete pending conversions and mark at `t`, the Ctl::Shutdown instant (replay
+    // does the same after close_all on that line), then queue the account state. Both go BEFORE
+    // the flush, so the final flush commits them, inside the same deadline. `paper_close` is pure
+    // CPU (15 accounts); the two sends are the only waits and are bounded like every other step.
     let outs = engine.paper_close(t);
     let _ = by_deadline(deadline, "close paper", io.route(&mut engine, outs)).await;
     if let Some(st) = engine.paper_state() {
@@ -3397,12 +3547,8 @@ async fn run_live(
         }
     }
 ```
-  and directly after `samplers_task.abort();`, add:
-```rust
-    if let Some(r) = &resolver_task {
-        r.abort();
-    }
-```
+  - update S3a's order comment above `let deadline` to: `// 1. stop taking new shards/universes/resolutions; 2. close every open episode, then the paper trader (final marks + state); 3. flush the writer; 4. …` (the rest unchanged).
+  If the deadline is already spent when the paper steps run, `by_deadline` still completes a READY step (a `send` into a writer channel with room is ready at once), so the state normally still reaches the writer; a stuck writer skips it with a log line, and the next start restores the previous periodic save (at most `state_save_every_secs` old). That loss is bounded and logged, never silent (ruling 17).
 In `bins/scanner/src/main.rs`, replace the `Cmd::Run` arm with:
 ```rust
         Cmd::Run => {
@@ -3570,7 +3716,18 @@ git commit -m "scanner/run: live paper trading (restore, resolver, state saves, 
     - No parseable end date → all three NULL.
 11. **Paper rows are never evicted by the writer cap** (like episodes). Their volume is bounded: 15 accounts × 2 rows per minute of marks, plus trades.
 12. **Held markets include returned YES** from conversions, since their settlement books a windfall.
-13. **`on_level` is called only for group-leg tokens**, not canaries. A refresh that blanks a disconnected group's books does not call `on_snapshot`: the next ws snapshot for that token does. `on_frame` runs for every parsed frame, before its events, whatever the frame contains.
+13. **`on_level` is called only for group-leg tokens**, not canaries: after each applied delta, and (S3a refresh) for each level a phantom trim removed. A refresh that blanks a disconnected group's books does not call `on_snapshot`: the next ws snapshot for that token does. `on_frame` runs for every parsed frame, before its events and before any deferred top-check the frame settles, whatever the frame contains.
+
+Added when this plan was refreshed against the landed S3a (2026-09-25):
+
+14. **A phantom-level trim is reported to the trader as removals.** S3a's `check_book` trims levels the server's top disproves (`Book::trim_to_top`). Each removed level becomes `on_level(token, side, price, 0)`, reported right after the trim and before the re-evaluation. The removed set is a before/after diff (`gone_levels`), not a re-statement of `trim_to_top`'s rule, so arb-core is untouched and a future change to the trim rule stays covered. Without this, a consumed phantom would stay consumed forever (a re-added size is not a shrink), and every later fill on that leg would come up short.
+15. **The paper open clock is `max(recv of the opening input, latest frame recv)`.** `rest_snapshot` evaluates with `recv_ms = server ts` (S3a kept this for episode rows). Used as the trader's `r_open_ms`, that would schedule t_x in the past and execute at the next frame with no latency. `Engine.last_recv_ms` is an input (frames), so replay reproduces it. Episode rows keep S3a's `open_lag_ms`/`stale` semantics unchanged.
+16. **Policies do not see `engine_suspect`.** S3b's `OpenCtx` has no such field, and a group can turn suspect after open (held-closed re-flags, late `mark_suspect`). A trade on an episode opened over a phantom is still decided, but it fills at t_x against the book as it then is (trimmed), never against the phantom. Analysis separates the two by joining `paper_intents` to `episodes.engine_suspect` on `episode_id`. Changing the decision would need an S3b `OpenCtx` field: out of scope here.
+17. **Shutdown order under S3a's one deadline:** the resolver is aborted with the refresher (no resolution after the `Shutdown` line). The paper close and the state save are queued after `close_all` and before the writer flush, so the final flush commits them within `SHUTDOWN_BUDGET` (20 s; plus `END_RUN_TIMEOUT` it stays under compose's 30 s). If the writer is stuck, the save is skipped with a log line, and the next start restores the last periodic save (≤ 60 s old).
+18. **Integrity and REST classes:**
+    - `non_binary_payout` bypasses S3a's integrity throttle, which covers only `top_mismatch`/`crossed_book`. Resolutions are rare and each is its own measurement.
+    - The resolver's Gamma `/markets` calls do not go through S3a's CLOB `Limiter`: a different host, at most ⌈held/50⌉ requests per 10 min or per hint.
+    - Migration 0004 spells out every grant under 0003's regime: SELECT+INSERT on the seven history tables, SELECT+INSERT+UPDATE on `paper_state`, no DELETE anywhere, and no sequences.
 
 ## Self-review
 
@@ -3591,6 +3748,13 @@ git commit -m "scanner/run: live paper trading (restore, resolver, state saves, 
   - `Out::{Paper, ResolvedHint}`, `Engine::{set_paper, paper_close, paper_state, paper_held_markets, on_resolution}` (T4) → T5 and T7.
   - `WriterMsg::Paper` (T6) → T7.
   - `Ctl::Resolved` (T5) → T7.
+- **S3a refresh (checked against `088c43d`):**
+  - `EngineCtx` literals carry `issue_throttle_ms` (Task 7 test; the scanner test helpers already do).
+  - Paper hooks cover every book mutation: ws snapshot, delta, trim (in `check_book`), accepted REST snapshot.
+  - `on_frame` runs before any of them.
+  - Migration 0004 comes after 0003, with explicit grants; its kind list extends 0003's.
+  - The writer patch matches the `VecDeque` `Pending`.
+  - The shutdown additions sit inside the `SHUTDOWN_BUDGET` block.
 - **Build stays green between tasks:**
   - T1 patches S3a's `Pending::take` literal.
   - T4 adds a placeholder `Io::route` arm that T7 replaces.
