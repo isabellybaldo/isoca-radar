@@ -337,13 +337,17 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
     }
     let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
     let clob = Arc::new(ClobClient::new()?);
-    let limiter = Arc::new(Limiter::new(cfg.recheck.rest_per_sec));
+    let limiter = Arc::new(Limiter::new(
+        cfg.recheck.rest_per_sec,
+        cfg.recheck.resnapshot_reserved_per_sec,
+    ));
     let rechecks_task = tokio::spawn(checks::run_rechecks(
         recheck_rx,
         u_rx.clone(),
         clob.clone(),
         limiter.clone(),
         cfg.recheck.offsets_ms.clone(),
+        cfg.recheck.max_in_flight,
         writer_tx.clone(),
     ));
     let resnapshots_task = tokio::spawn(checks::run_resnapshots(

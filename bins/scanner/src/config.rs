@@ -67,6 +67,10 @@ pub struct RecheckCfg {
     pub rest_per_sec: usize,
     pub drift_tokens_per_min: usize,
     pub l1_legs_per_min: usize,
+    /// Episodes re-checked at once; more are recorded as skipped (S3a).
+    pub max_in_flight: usize,
+    /// REST requests/s only resnapshots may use (S3a): re-checks can't starve a book repair.
+    pub resnapshot_reserved_per_sec: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -162,6 +166,15 @@ impl Config {
             "recheck.rest_per_sec must be ≥ 1"
         );
         anyhow::ensure!(
+            self.recheck.max_in_flight >= 1,
+            "recheck.max_in_flight must be ≥ 1"
+        );
+        anyhow::ensure!(
+            self.recheck.resnapshot_reserved_per_sec >= 1
+                && self.recheck.resnapshot_reserved_per_sec < self.recheck.rest_per_sec,
+            "recheck.resnapshot_reserved_per_sec must be 1..rest_per_sec (re-checks need a share too)"
+        );
+        anyhow::ensure!(
             self.capture.resume_above_gb > self.capture.pause_below_gb,
             "capture.resume_above_gb must exceed pause_below_gb"
         );
@@ -200,6 +213,13 @@ mod tests {
         assert_eq!(h1.len(), 64);
         assert_eq!(cfg.shards.max_connections, 40);
         assert_eq!(cfg.recheck.offsets_ms, vec![1000, 2000, 5000]);
+        assert_eq!(
+            (
+                cfg.recheck.max_in_flight,
+                cfg.recheck.resnapshot_reserved_per_sec
+            ),
+            (32, 3)
+        );
     }
 
     #[test]
@@ -211,5 +231,15 @@ mod tests {
         assert!(Config::parse(&too_big).is_err());
         let fast = REPO.replace("per_sec = 2", "per_sec = 5");
         assert!(Config::parse(&fast).is_err());
+        let all_reserved = REPO.replace(
+            "resnapshot_reserved_per_sec = 3",
+            "resnapshot_reserved_per_sec = 10",
+        );
+        assert!(
+            Config::parse(&all_reserved).is_err(),
+            "re-checks need a share too"
+        );
+        let no_cap = REPO.replace("max_in_flight = 32", "max_in_flight = 0");
+        assert!(Config::parse(&no_cap).is_err());
     }
 }

@@ -34,6 +34,8 @@ offsets_ms = [1000, 2000, 5000] # spec §8.2 (+ max secondsDelay when > 0)
 rest_per_sec = 10
 drift_tokens_per_min = 100
 l1_legs_per_min = 50
+max_in_flight = 32              # S3a: ~4 REST calls per episode at 7/s shared ≈ 18 s of work queued at most
+resnapshot_reserved_per_sec = 3 # S3a: of rest_per_sec, only resnapshots (known-bad books) may use these
 
 [capture]
 dir = "/data/capture"
