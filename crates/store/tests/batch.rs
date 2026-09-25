@@ -24,8 +24,8 @@ fn episode(id: &str, run_id: i64) -> EpisodeRow {
         incomplete_set: false,
         uncovered_legs: 14,
         opened_server_ms: 1_000,
-        closed_server_ms: Some(2_000),
-        duration_ms: Some(1_000),
+        closed_server_ms: Some(2_300),
+        duration_ms: Some(1_300),
         censor_left: true,
         censor_right: false,
         censor_gap: true,
@@ -41,7 +41,7 @@ fn episode(id: &str, run_id: i64) -> EpisodeRow {
         peak_pnl_net_usd: dec!(6.6),
         peak_pnl_gross_usd: dec!(7.7),
         peak_profit_per_dollar: Some(dec!(8.8)),
-        pnl_net_budget100_usd: Some(dec!(0)),
+        pnl_net_budget100_usd: Some(dec!(11.11)),
         bottleneck_leg_idx: Some(17),
         bottleneck_notional_usd: Some(dec!(9.9)),
         below_min_size: Some(false),
@@ -299,5 +299,47 @@ async fn writing_an_episode_notifies_the_episode_channel() {
     assert_eq!(payload, row.episode_id);
     // The listener holds a pooled connection; Pool::close waits for it, so release it first.
     drop(listener);
+    db.drop(store).await;
+}
+
+/// Bool columns can't all hold distinct values in one row, so write 4 rows where bool column j of row e
+/// is bit e of j: any two bool columns differ in at least one row, so a swapped bind cannot round-trip.
+#[tokio::test]
+async fn bool_columns_round_trip_under_distinct_bit_patterns() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let bit = |j: u32, e: u32| (j >> e) & 1 == 1;
+    let rows: Vec<EpisodeRow> = (0..4u32)
+        .map(|e| {
+            let mut r = episode(&format!("01J00000000000000000000B{e}"), run);
+            r.opened_server_ms = 1_000 + i64::from(e); // keep the read-back order deterministic
+            r.augmented = bit(1, e);
+            r.incomplete_set = bit(2, e);
+            r.censor_left = bit(3, e);
+            r.censor_right = bit(4, e);
+            r.censor_gap = bit(5, e);
+            r.below_min_size = Some(bit(6, e));
+            r.post_end = Some(bit(7, e));
+            r.engine_suspect = bit(8, e);
+            r.stale_transport = bit(9, e);
+            r.oracle_downgraded = Some(bit(10, e));
+            r
+        })
+        .collect();
+    let batch = Batch {
+        episodes: rows
+            .iter()
+            .map(|r| EpisodeWrite {
+                row: r.clone(),
+                legs: vec![],
+            })
+            .collect(),
+        ..Batch::default()
+    };
+    store.write_batch(&batch).await.unwrap();
+    assert_eq!(store.episodes_for_run(run).await.unwrap(), rows);
+    assert_eq!(store.count(Table::EpisodeLegs).await.unwrap(), 0);
     db.drop(store).await;
 }
