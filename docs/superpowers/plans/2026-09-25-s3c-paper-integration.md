@@ -17,6 +17,17 @@
 
 Every "current code" anchor below was checked against the tree at `088c43d` (S3a landed) plus the S3b plan text. Refreshed 2026-09-25 after S3a: see rulings 14–18.
 
+## Carry-over from the S3b final review (do this FIRST, before Task 1)
+
+The S3b final re-review left one open finding in `crates/sim/src/trader.rs` `decide_for` (commit 027485f). Because S3c persists skip reasons into `paper_intents`, it must be fixed before those rows are written.
+- **The problem:** `decide_for` returns `Skip(Consumed)` whenever the consumed-filtered edge is ≤ 0. That includes signals whose RAW edge is already ≤ 0: gross-only episodes the detector emits because `gross.pnl_gross > 0`. It also hides the policy gates: `PairNotApproved` for P2, and `TooLong` / `AnnualizedTooLow` / `NoLockupFigures` for P1.
+- **Controller ruling:** first run `decide(cfg, spec, free_cash, ctx)` on the UNFILTERED ctx. If that returns `NotMine` or `Skip(_)`, return it unchanged. Only when the raw decision is `Take` do you apply the consumed filter, returning `Skip(Consumed)` if the filtered edge ≤ 0 or its depth is 0, and otherwise the filtered `decide`.
+- **Tests:**
+  - A trader-level test with a fee schedule where gross > 0 and net ≤ 0, on a fresh P0 account, must yield skip reason `not_net_positive`, not `consumed`.
+  - A P2 episode with `pair_approved = false` on a consumed book must yield `pair_not_approved`.
+  - The existing e3 `consumed` test must stay unchanged.
+- **Also:** fix the stale `row_from` doc comment in trader.rs (it still says `on_resolution` values positions at 0).
+
 ## Global Constraints
 
 - PAPER TRADING ONLY. No order placement, no wallet, no keys, no signing code. `sim` produces ledger rows and nothing else (spec §16 #5). The scanner reaches the network only through `pm-api`, and Postgres only through `store` (`deny.toml` wrappers).
