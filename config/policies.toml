@@ -1,0 +1,139 @@
+# Paper-trading accounts (spec §11). FROZEN before each evaluation run: its sha256 is recorded with
+# every paper account (pre-registration). Money is written as strings so it parses exactly.
+settle_delay_ms = 2000                  # NO→collateral conversion: bought tokens unspendable ~1–3 s (polybots)
+markout_offsets_ms = [1000, 5000, 30000]
+mark_every_ms = 60000
+burst_window_ms = 10000
+min_order_shares = "5"                  # Q6
+
+[p1]
+min_annualized = "0.10"                 # P1 takes complete YES baskets with annualized ≥ 10 % ...
+max_days_to_end = "30"                  # ... and days_to_end ≤ 30
+
+# Latency (spec §5.6): t_x = r_open + proc + net + match × burst + max secondsDelay (if honored).
+# match_ms priors are third-party and crypto-specific (polybots): a sensitivity band, not a point
+# estimate. Burst thresholds are frames/s over burst_window_ms; recalibrate them from the soak's
+# `health.msgs` before the first evaluation run.
+[[scenarios]]
+name = "colo-idle"
+proc_ms = 1
+net_ms = 1
+match_ms = 50
+honor_seconds_delay = true
+
+[[scenarios]]
+name = "sp-idle"
+proc_ms = 5
+net_ms = 145                            # São Paulo → CLOB, RTT/2 (spec §5.6)
+match_ms = 150
+honor_seconds_delay = true
+
+[[scenarios]]
+name = "sp-burst"
+proc_ms = 5
+net_ms = 145
+match_ms = 300
+honor_seconds_delay = true
+burst = [
+  { frames_per_s_above = 2000, multiplier = 3 },
+  { frames_per_s_above = 6000, multiplier = 10 },
+]
+
+[[scenarios]]
+name = "sp-idle-nodelay"                # Q1 sensitivity: secondsDelay ignored
+proc_ms = 5
+net_ms = 145
+match_ms = 150
+honor_seconds_delay = false
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "colo-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "sp-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "sp-burst"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "sp-idle-nodelay"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]                            # Q4: V2 adapter feeBips unknown → sensitivity
+policy = "P0-converter"
+scenario = "sp-idle"
+bankroll = "1000"
+per_trade = "100"
+fee_bips = "10"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "sp-idle"
+bankroll = "1000"
+per_trade = "100"
+fee_bips = "50"
+
+[[accounts]]
+policy = "P1-settlement"
+scenario = "colo-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P1-settlement"
+scenario = "sp-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P1-settlement"
+scenario = "sp-burst"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]                            # dormant until approved pairs exist (S5)
+policy = "P2-combo"
+scenario = "colo-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P2-combo"
+scenario = "sp-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P2-combo"
+scenario = "sp-burst"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]                            # control group: ignores fees and completeness
+policy = "P3-naive"
+scenario = "colo-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P3-naive"
+scenario = "sp-idle"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P3-naive"
+scenario = "sp-burst"
+bankroll = "1000"
+per_trade = "100"

@@ -3,6 +3,7 @@
 //! entries only; there is no code path to an exchange (spec §16 #5).
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod types;
 
 use thiserror::Error;
