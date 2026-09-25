@@ -5,7 +5,7 @@
 //! oldest health, then integrity, then observation rows are dropped and counted (episodes never are,
 //! except a single episode row Postgres itself rejects).
 use crate::metrics::Metrics;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -22,9 +22,14 @@ pub enum WriterMsg {
     Flush(oneshot::Sender<()>),
 }
 
+/// Rows waiting for the next flush. Episodes are deduplicated by id (latest version wins);
+/// the other rows are FIFO queues, so the cap evicts the oldest in O(1).
 #[derive(Debug, Default)]
 pub struct Pending {
-    batch: Batch,
+    episodes: Vec<EpisodeWrite>,
+    observations: VecDeque<ObservationRow>,
+    integrity: VecDeque<IntegrityRow>,
+    health: VecDeque<HealthRow>,
     ep_index: HashMap<String, usize>,
     max_rows: usize,
     pub dropped: u64,
@@ -39,23 +44,20 @@ impl Pending {
     }
 
     pub fn rows(&self) -> usize {
-        self.batch.episodes.len()
-            + self.batch.observations.len()
-            + self.batch.integrity.len()
-            + self.batch.health.len()
+        self.episodes.len() + self.observations.len() + self.integrity.len() + self.health.len()
     }
 
     fn upsert_episode(&mut self, w: EpisodeWrite, overwrite: bool) {
         match self.ep_index.get(&w.row.episode_id) {
             Some(&i) => {
                 if overwrite {
-                    self.batch.episodes[i] = w;
+                    self.episodes[i] = w;
                 }
             }
             None => {
                 self.ep_index
-                    .insert(w.row.episode_id.clone(), self.batch.episodes.len());
-                self.batch.episodes.push(w);
+                    .insert(w.row.episode_id.clone(), self.episodes.len());
+                self.episodes.push(w);
             }
         }
     }
@@ -63,23 +65,22 @@ impl Pending {
     pub fn push(&mut self, m: WriterMsg) {
         match m {
             WriterMsg::Episode(w) => self.upsert_episode(w, true),
-            WriterMsg::Observation(o) => self.batch.observations.push(o),
-            WriterMsg::Integrity(i) => self.batch.integrity.push(i),
-            WriterMsg::Health(h) => self.batch.health.push(h),
+            WriterMsg::Observation(o) => self.observations.push_back(o),
+            WriterMsg::Integrity(i) => self.integrity.push_back(i),
+            WriterMsg::Health(h) => self.health.push_back(h),
             WriterMsg::Flush(_) => {}
         }
         self.enforce_cap();
     }
 
+    /// Over the cap, drop the oldest health, then integrity, then observation rows (episodes
+    /// never), counting each.
     fn enforce_cap(&mut self) {
         while self.rows() > self.max_rows {
-            if !self.batch.health.is_empty() {
-                self.batch.health.remove(0);
-            } else if !self.batch.integrity.is_empty() {
-                self.batch.integrity.remove(0);
-            } else if !self.batch.observations.is_empty() {
-                self.batch.observations.remove(0);
-            } else {
+            let evicted = self.health.pop_front().is_some()
+                || self.integrity.pop_front().is_some()
+                || self.observations.pop_front().is_some();
+            if !evicted {
                 break; // only episodes left: never dropped
             }
             self.dropped += 1;
@@ -88,7 +89,12 @@ impl Pending {
 
     pub fn take(&mut self) -> Batch {
         self.ep_index.clear();
-        std::mem::take(&mut self.batch)
+        Batch {
+            episodes: std::mem::take(&mut self.episodes),
+            observations: std::mem::take(&mut self.observations).into(),
+            integrity: std::mem::take(&mut self.integrity).into(),
+            health: std::mem::take(&mut self.health).into(),
+        }
     }
 
     /// Put back a batch whose write failed. It is OLDER than anything pushed since, so newer
@@ -101,14 +107,13 @@ impl Pending {
         for w in newer.episodes {
             self.upsert_episode(w, true);
         }
-        // fix ordering: older episode versions were inserted first, newer overwrote them in place
-        self.batch.observations = older
+        self.observations = older
             .observations
             .into_iter()
             .chain(newer.observations)
             .collect();
-        self.batch.integrity = older.integrity.into_iter().chain(newer.integrity).collect();
-        self.batch.health = older.health.into_iter().chain(newer.health).collect();
+        self.integrity = older.integrity.into_iter().chain(newer.integrity).collect();
+        self.health = older.health.into_iter().chain(newer.health).collect();
         self.enforce_cap();
     }
 }
@@ -372,6 +377,25 @@ mod tests {
             b.integrity.iter().map(|i| i.ts_ms).collect::<Vec<_>>(),
             vec![3, 4],
             "oldest dropped"
+        );
+    }
+
+    #[test]
+    fn evicting_a_large_backlog_is_fast_and_keeps_the_newest_rows() {
+        // 60,000 evictions from a 30,000-row queue: Vec::remove(0) shifted ~1.8e9 rows here.
+        let started = std::time::Instant::now();
+        let mut p = Pending::new(30_000);
+        for t in 0..90_000 {
+            p.push(integ(t));
+        }
+        assert_eq!((p.rows(), p.dropped), (30_000, 60_000));
+        let b = p.take();
+        assert_eq!(b.integrity.first().map(|i| i.ts_ms), Some(60_000));
+        assert_eq!(b.integrity.last().map(|i| i.ts_ms), Some(89_999));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "eviction must be O(1) per row: {:?}",
+            started.elapsed()
         );
     }
 }
