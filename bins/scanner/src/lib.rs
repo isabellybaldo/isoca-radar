@@ -3,6 +3,8 @@
 
 pub mod config;
 pub mod guard;
+pub mod shards;
+pub mod universe;
 
 /// Wall-clock milliseconds (our receive clock).
 pub fn now_ms() -> i64 {
