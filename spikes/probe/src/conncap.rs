@@ -42,18 +42,12 @@ pub async fn conncap(
                 break;
             }
         }
-        tokio::time::sleep(Duration::from_millis(spacing_ms.max(500))).await;
+        drain_for(&mut conns, Duration::from_millis(spacing_ms.max(500))).await;
     }
-    // Hold, draining every receiver so no connection ends on a full channel (ApiError::Dropped).
+    // Hold; receivers are drained here and while spacing, so none ends on ApiError::Dropped.
     // run_connection pings every 10 s and returns ApiError::Stale after 30 s of silence,
     // so a connection still running after the hold is alive.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(hold_secs);
-    while tokio::time::Instant::now() < deadline {
-        for (_, rx) in &mut conns {
-            while rx.try_recv().is_ok() {}
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    drain_for(&mut conns, Duration::from_secs(hold_secs)).await;
     let alive = conns.iter().filter(|(h, _)| !h.is_finished()).count();
     for (h, _) in &conns {
         h.abort();
@@ -62,4 +56,20 @@ pub async fn conncap(
     std::fs::write(out, lines.join("\n") + "\n")?;
     println!("opened={} alive_after_hold={alive}", conns.len());
     Ok(())
+}
+
+/// Wait `dur`, draining every open receiver about once a second so no connection
+/// ends on a full channel (`ApiError::Dropped`) while we wait.
+async fn drain_for(conns: &mut [Conn], dur: Duration) {
+    let deadline = tokio::time::Instant::now() + dur;
+    loop {
+        for (_, rx) in conns.iter_mut() {
+            while rx.try_recv().is_ok() {}
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_secs(1))).await;
+    }
 }
