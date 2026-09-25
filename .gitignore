@@ -214,3 +214,5 @@ backend/.env
 .env
 
 .idea
+
+spikes/probe/results/
