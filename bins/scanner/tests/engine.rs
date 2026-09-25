@@ -205,3 +205,27 @@ fn an_event_leaving_the_universe_closes_its_episode_right_censored() {
     assert!(closed[0].censor_right);
     assert_eq!(e.open_episodes(), 0);
 }
+
+#[test]
+fn a_server_top_of_zero_means_an_empty_side_not_a_mismatch() {
+    let mut e = engine();
+    seed(&mut e); // asks only: our bid side is empty
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[MarketEvent::Delta {
+            token: "e1-y0".into(),
+            server_ts_ms: 2_000,
+            side: Side::Ask,
+            price: p("0.40"),
+            size: sh("12"),
+            best_bid: Some(p("0")), // Polymarket's encoding of "no bids"
+            best_ask: Some(p("0.40")),
+        }],
+    );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+}

@@ -356,7 +356,14 @@ impl Engine {
                     best_ask,
                 } => {
                     bump(&mut frame_ts, *server_ts_ms);
-                    let (ts, bb, ba) = (*server_ts_ms, *best_bid, *best_ask);
+                    // Polymarket reports an EMPTY side as "0" (live smoke test 2026-09-25), not as a
+                    // missing field; no real order rests at price 0, so 0 means "no level".
+                    let empty_is_none = |p: Option<Price>| p.filter(|x| x.get() != Decimal::ZERO);
+                    let (ts, bb, ba) = (
+                        *server_ts_ms,
+                        empty_is_none(*best_bid),
+                        empty_is_none(*best_ask),
+                    );
                     let (side, price, size) = (*side, *price, *size);
                     self.on_book(conn, token, ts, &mut touched, &mut out, |b| {
                         let _ = b.apply_delta(side, price, size, ts);
@@ -810,6 +817,9 @@ impl Engine {
             let Some(ours) = self.book_of(&p.token) else {
                 continue;
             };
+            if ours.server_ts_ms() == 0 {
+                continue; // never received a snapshot (unsubscribed / dropped group): nothing to compare
+            }
             if ours.server_ts_ms() > p.rest.server_ts_ms() {
                 continue; // we moved on after the REST snapshot: inconclusive
             }

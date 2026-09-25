@@ -107,3 +107,10 @@ fn rates_count_frames_per_event_and_reset() {
     assert_eq!(r.get("e1"), Some(&4)); // 3 snapshots + 1 delta
     assert!(e.rates().is_empty());
 }
+
+#[test]
+fn drift_is_never_reported_for_a_book_that_never_received_data() {
+    let mut e = engine(); // no snapshot for e1-y2 yet (e.g. its group was dropped by the budget)
+    e.drift_check("e1-y2", book(1_500, "0.41"), 10_000);
+    assert!(e.tick(12_000).is_empty());
+}
