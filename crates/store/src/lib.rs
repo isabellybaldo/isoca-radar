@@ -9,8 +9,6 @@ mod runs;
 mod universe;
 
 pub use error::StoreError;
-// rows.rs is empty until Tasks 3-4 add row types; allow so `-D warnings` doesn't fail the build.
-#[allow(unused_imports)]
 pub use rows::*;
 pub use sqlx::postgres::PgConnectOptions;
 
