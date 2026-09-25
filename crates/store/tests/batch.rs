@@ -297,5 +297,7 @@ async fn writing_an_episode_notifies_the_episode_channel() {
         .expect("notification within 5 s")
         .unwrap();
     assert_eq!(payload, row.episode_id);
+    // The listener holds a pooled connection; Pool::close waits for it, so release it first.
+    drop(listener);
     db.drop(store).await;
 }

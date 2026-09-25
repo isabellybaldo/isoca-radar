@@ -325,7 +325,8 @@ impl Store {
         Ok(sqlx::query_scalar(&sql).fetch_one(self.pool()).await?)
     }
 
-    /// LISTEN on `channel` (the api's SSE bridge uses "episode").
+    /// LISTEN on `channel` (the api's SSE bridge uses "episode"). The listener holds one pooled
+    /// connection: drop it before `Store::close`, which waits for every checked-out connection.
     pub async fn listen(&self, channel: &str) -> Result<Listener, StoreError> {
         let mut l = PgListener::connect_with(self.pool()).await?;
         l.listen(channel).await?;
