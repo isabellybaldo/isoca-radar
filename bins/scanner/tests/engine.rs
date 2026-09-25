@@ -229,3 +229,132 @@ fn a_server_top_of_zero_means_an_empty_side_not_a_mismatch() {
             .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
     );
 }
+
+fn delta(
+    token: &str,
+    ts: i64,
+    side: Side,
+    price: &str,
+    size: &str,
+    bb: Option<&str>,
+    ba: Option<&str>,
+) -> MarketEvent {
+    MarketEvent::Delta {
+        token: token.into(),
+        server_ts_ms: ts,
+        side,
+        price: p(price),
+        size: sh(size),
+        best_bid: bb.map(p),
+        best_ask: ba.map(p),
+    }
+}
+
+#[test]
+fn the_top_check_uses_the_servers_top_after_the_whole_frame() {
+    let mut e = engine();
+    seed(&mut e); // e1-y0 ask 0.40
+    // one message: add 0.42, then remove 0.40. Each item carries the FINAL top (0.42): after the
+    // first item alone ours is still 0.40, which must not be flagged.
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[
+            delta("e1-y0", 2_000, Side::Ask, "0.42", "10", None, Some("0.42")),
+            delta("e1-y0", 2_000, Side::Ask, "0.40", "0", None, Some("0.42")),
+        ],
+    );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")),
+        "{outs:?}"
+    );
+    // a real disagreement at the end of the frame is still flagged
+    let outs = e.on_frame(
+        0,
+        3_100,
+        &[delta(
+            "e1-y0",
+            3_000,
+            Side::Ask,
+            "0.45",
+            "5",
+            None,
+            Some("0.41"),
+        )],
+    );
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+}
+
+#[test]
+fn a_server_ask_of_one_means_an_empty_ask_side() {
+    let mut e = engine();
+    // bids only on y0: our ask side is empty
+    e.on_frame(0, 1_100, &[snap("e1-y0", 1_000, &[("0.30", "10")], &[])]);
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[delta(
+            "e1-y0",
+            2_000,
+            Side::Bid,
+            "0.30",
+            "12",
+            Some("0.30"),
+            Some("1"),
+        )],
+    );
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch"))
+    );
+}
+
+#[test]
+fn a_book_crossed_only_mid_frame_is_not_flagged() {
+    let mut e = engine();
+    seed(&mut e); // e1-y0 ask 0.40
+    // bid 0.45 appears (crossed vs ask 0.40) but the same frame lifts the ask to 0.50
+    let outs = e.on_frame(
+        0,
+        2_100,
+        &[
+            delta(
+                "e1-y0",
+                2_000,
+                Side::Bid,
+                "0.45",
+                "5",
+                Some("0.45"),
+                Some("0.50"),
+            ),
+            delta(
+                "e1-y0",
+                2_000,
+                Side::Ask,
+                "0.50",
+                "10",
+                Some("0.45"),
+                Some("0.50"),
+            ),
+            delta(
+                "e1-y0",
+                2_000,
+                Side::Ask,
+                "0.40",
+                "0",
+                Some("0.45"),
+                Some("0.50"),
+            ),
+        ],
+    );
+    assert!(
+        !outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "crossed_book" || i.kind == "top_mismatch")),
+        "{outs:?}"
+    );
+}

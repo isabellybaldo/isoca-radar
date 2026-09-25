@@ -330,6 +330,11 @@ impl Engine {
         let mut out = Vec::new();
         let mut touched: BTreeSet<usize> = BTreeSet::new();
         let mut frame_ts: Option<i64> = None;
+        // Integrity checks run once per token AFTER the whole frame (like evaluation, spec 5.5):
+        // Polymarket's per-item best_bid/best_ask describe the book after the WHOLE message, so a
+        // check after each item flags in-between states that never existed (live smoke 2026-09-25).
+        let mut frame_tokens: Vec<String> = Vec::new();
+        let mut expected: HashMap<String, (Option<Price>, Option<Price>)> = HashMap::new();
         for ev in events {
             match ev {
                 MarketEvent::Snapshot {
@@ -341,10 +346,10 @@ impl Engine {
                 } => {
                     bump(&mut frame_ts, *server_ts_ms);
                     let ts = *server_ts_ms;
-                    self.on_book(conn, token, ts, &mut touched, &mut out, |b| {
+                    self.on_book(token, &mut touched, &mut frame_tokens, |b| {
                         b.apply_snapshot(bids, asks, ts);
-                        None
                     });
+                    expected.remove(token.as_str()); // a snapshot supersedes earlier deltas' tops
                 }
                 MarketEvent::Delta {
                     token,
@@ -358,21 +363,17 @@ impl Engine {
                     bump(&mut frame_ts, *server_ts_ms);
                     // Polymarket reports an EMPTY side as "0" (live smoke test 2026-09-25), not as a
                     // missing field; no real order rests at price 0, so 0 means "no level".
-                    let empty_is_none = |p: Option<Price>| p.filter(|x| x.get() != Decimal::ZERO);
+                    // Likewise an EMPTY ask side arrives as "1": no real order rests at 1 either.
                     let (ts, bb, ba) = (
                         *server_ts_ms,
-                        empty_is_none(*best_bid),
-                        empty_is_none(*best_ask),
+                        best_bid.filter(|x| x.get() != Decimal::ZERO),
+                        best_ask.filter(|x| x.get() != Decimal::ONE),
                     );
                     let (side, price, size) = (*side, *price, *size);
-                    self.on_book(conn, token, ts, &mut touched, &mut out, |b| {
+                    self.on_book(token, &mut touched, &mut frame_tokens, |b| {
                         let _ = b.apply_delta(side, price, size, ts);
-                        let top = b.top();
-                        let ours_bid = top.best_bid.map(|(p, _)| p);
-                        let ours_ask = top.best_ask.map(|(p, _)| p);
-                        let bad = (bb.is_some() && bb != ours_bid) || (ba.is_some() && ba != ours_ask);
-                        bad.then(|| format!("server bid {bb:?} ask {ba:?}; ours bid {ours_bid:?} ask {ours_ask:?}"))
                     });
+                    expected.insert(token.clone(), (bb, ba)); // last item for this token wins
                 }
                 MarketEvent::LastTrade { server_ts_ms, .. }
                 | MarketEvent::TickSize { server_ts_ms, .. } => {
@@ -387,6 +388,15 @@ impl Engine {
         let Some(ts) = frame_ts else {
             return out;
         };
+        for token in &frame_tokens {
+            self.check_book(
+                conn,
+                token,
+                ts,
+                expected.get(token.as_str()).copied(),
+                &mut out,
+            );
+        }
         out.push(Out::Lag(recv_ms - ts));
         for g in touched {
             self.evaluate(g, ts, recv_ms, &mut out);
@@ -394,33 +404,56 @@ impl Engine {
         out
     }
 
+    /// Apply one book change; remember the token (once, in frame order) for end-of-frame checks.
     fn on_book<F>(
         &mut self,
-        conn: usize,
         token: &str,
-        ts: i64,
         touched: &mut BTreeSet<usize>,
-        out: &mut Vec<Out>,
+        frame_tokens: &mut Vec<String>,
         f: F,
     ) where
-        F: FnOnce(&mut Book) -> Option<String>,
+        F: FnOnce(&mut Book),
     {
-        let (mismatch, crossed, group) = if let Some(&(g, l)) = self.token_ix.get(token) {
-            let b = &mut self.groups[g].legs[l].book;
-            let m = f(b);
-            let crossed = b.is_crossed();
+        if let Some(&(g, l)) = self.token_ix.get(token) {
+            f(&mut self.groups[g].legs[l].book);
             touched.insert(g);
             *self
                 .msgs
                 .entry(self.universe.groups[g].event_id.clone())
                 .or_insert(0) += 1;
-            (m, crossed, Some(g))
         } else if let Some(b) = self.canary.get_mut(token) {
-            let m = f(b);
-            (m, b.is_crossed(), None)
+            f(b);
         } else {
             return;
+        }
+        if !frame_tokens.iter().any(|t| t == token) {
+            frame_tokens.push(token.to_string());
+        }
+    }
+
+    /// End-of-frame integrity for one token: crossed book, and the server's final top vs ours.
+    fn check_book(
+        &mut self,
+        conn: usize,
+        token: &str,
+        ts: i64,
+        server: Option<(Option<Price>, Option<Price>)>,
+        out: &mut Vec<Out>,
+    ) {
+        let group = self.token_ix.get(token).map(|&(g, _)| g);
+        let Some(book) = self.book_of(token) else {
+            return;
         };
+        let crossed = book.is_crossed();
+        let top = book.top();
+        let ours_bid = top.best_bid.map(|(p, _)| p);
+        let ours_ask = top.best_ask.map(|(p, _)| p);
+        let mismatch = server.and_then(|(bb, ba)| {
+            let bad = (bb.is_some() && bb != ours_bid) || (ba.is_some() && ba != ours_ask);
+            bad.then(|| {
+                format!("server bid {bb:?} ask {ba:?}; ours bid {ours_bid:?} ask {ours_ask:?}")
+            })
+        });
         let event_id = group.map(|g| self.universe.groups[g].event_id.clone());
         if let Some(detail) = mismatch {
             out.push(self.integrity(
