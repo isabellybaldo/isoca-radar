@@ -35,6 +35,7 @@ struct Pending {
     kind: Kind,
     planned: Planned,
     t_exec: i64,
+    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ struct Unwind {
     fee: FeeSchedule,
     qty: Decimal,
     due_ms: i64,
+    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,7 @@ struct Conversion {
     complements: Vec<LegKey>,
     q: Decimal,
     due_ms: i64,
+    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +68,30 @@ struct Markout {
     vwap: Decimal,
     offset_ms: i64,
     due_ms: i64,
+    seq: u64,
+}
+
+/// Where an item sorts among others due at the same millisecond (spec §5.6): a mark always comes
+/// last, so it never sees a same-ms execution that hasn't happened yet from the mark's own point of
+/// view — but an execution due at an EARLIER ms than the mark's boundary still sorts before it by
+/// `due_ms` alone, and a LATER one sorts after, which is the actual fix for the review finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Pending,
+    Unwind,
+    Conversion,
+    Markout,
+    Mark,
+}
+
+/// The next not-yet-processed item, identified by its queue + index (or the pending mark).
+#[derive(Debug, Clone, Copy)]
+enum Which {
+    Pending(usize),
+    Unwind(usize),
+    Conversion(usize),
+    Markout(usize),
+    Mark,
 }
 
 pub struct PaperTrader {
@@ -78,15 +105,12 @@ pub struct PaperTrader {
     markouts: Vec<Markout>,
     rate: FrameRate,
     next_mark_ms: Option<i64>,
+    next_seq: u64,
 }
 
-/// Remove the items due at `now`, ordered by due time (stable: insertion order breaks ties).
-fn drain_due<T>(v: &mut Vec<T>, now: i64, due: impl Fn(&T) -> i64) -> Vec<T> {
-    let (mut ready, rest): (Vec<T>, Vec<T>) =
-        std::mem::take(v).into_iter().partition(|x| due(x) <= now);
-    *v = rest;
-    ready.sort_by_key(|x| due(x));
-    ready
+/// The next minute-mark boundary strictly after `t`.
+fn mark_boundary_after(every: i64, t: i64) -> i64 {
+    (t.div_euclid(every) + 1) * every
 }
 
 /// The bid we could sell `leg` into now (NO bid = 1 − YES ask).
@@ -137,6 +161,7 @@ impl PaperTrader {
             conversions: Vec::new(),
             markouts: Vec::new(),
             next_mark_ms: None,
+            next_seq: 0,
         })
     }
 
@@ -147,6 +172,13 @@ impl PaperTrader {
     fn delay(&self, acct: usize, seconds_delay: Option<i32>) -> i64 {
         let sc = &self.cfg.scenarios[self.scenario_ix[acct]];
         exec_delay_ms(sc, seconds_delay, self.rate.per_second())
+    }
+
+    /// A fresh, strictly increasing tie-breaker for the global due-work ordering.
+    fn alloc_seq(&mut self) -> u64 {
+        let s = self.next_seq;
+        self.next_seq += 1;
+        s
     }
 
     pub fn on_open(&mut self, ctx: &OpenCtx) -> Vec<SimOut> {
@@ -186,12 +218,14 @@ impl PaperTrader {
                         reserve: Some(planned.reserve),
                     }));
                     self.accounts[a].reserved += planned.reserve;
+                    let seq = self.alloc_seq();
                     self.pending.push(Pending {
                         acct: a,
                         episode_id: ctx.episode_id.clone(),
                         kind: ctx.signal.kind,
                         planned,
                         t_exec,
+                        seq,
                     });
                 }
             }
@@ -199,32 +233,121 @@ impl PaperTrader {
         out
     }
 
-    /// Call BEFORE applying the frame at `recv_ms`: runs everything due at or before it.
+    /// The earliest item due at or before `recv_ms`, across every queue and the pending minute
+    /// mark, ordered by (due_ms, kind_rank, seq): one global timeline instead of queue-by-queue
+    /// (spec §5.6; review finding on Task 8). `None` once nothing more is due.
+    fn earliest_due(&self, recv_ms: i64, mark_at: Option<i64>) -> Option<Which> {
+        let mut best: Option<(i64, Rank, u64, Which)> = None;
+        macro_rules! consider {
+            ($due:expr, $rank:expr, $seq:expr, $w:expr) => {
+                if $due <= recv_ms {
+                    let key = ($due, $rank, $seq);
+                    if best.is_none_or(|(d, r, s, _)| key < (d, r, s)) {
+                        best = Some(($due, $rank, $seq, $w));
+                    }
+                }
+            };
+        }
+        if let Some((i, p)) = self
+            .pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| (p.t_exec, p.seq))
+        {
+            consider!(p.t_exec, Rank::Pending, p.seq, Which::Pending(i));
+        }
+        if let Some((i, u)) = self
+            .unwinds
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, u)| (u.due_ms, u.seq))
+        {
+            consider!(u.due_ms, Rank::Unwind, u.seq, Which::Unwind(i));
+        }
+        if let Some((i, c)) = self
+            .conversions
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, c)| (c.due_ms, c.seq))
+        {
+            consider!(c.due_ms, Rank::Conversion, c.seq, Which::Conversion(i));
+        }
+        if let Some((i, m)) = self
+            .markouts
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, m)| (m.due_ms, m.seq))
+        {
+            consider!(m.due_ms, Rank::Markout, m.seq, Which::Markout(i));
+        }
+        if let Some(at) = mark_at {
+            consider!(at, Rank::Mark, 0u64, Which::Mark);
+        }
+        best.map(|(_, _, _, w)| w)
+    }
+
+    /// If a minute mark is due at or before `now`, the boundary to stamp it at (spec §5.6: at most
+    /// one mark per call, at the latest boundary ≤ `now`, however long the input gap was).
+    fn mark_due_at(&self, now: i64) -> Option<i64> {
+        let next = self.next_mark_ms?;
+        if now < next {
+            return None;
+        }
+        Some(now.div_euclid(self.cfg.mark_every_ms) * self.cfg.mark_every_ms)
+    }
+
+    /// Call BEFORE applying the frame at `recv_ms`: runs everything due at or before it, in one
+    /// global due-time order (see `earliest_due`). Loops so that anything queued while draining
+    /// (e.g. a 0 ms delay) is picked up in its correct place within this same call.
     pub fn on_frame(&mut self, recv_ms: i64, books: &impl Books) -> Vec<SimOut> {
         self.rate.push(recv_ms);
         let mut out = Vec::new();
-        for p in drain_due(&mut self.pending, recv_ms, |p| p.t_exec) {
-            self.execute(p, books, &mut out);
+
+        if self.next_mark_ms.is_none() {
+            self.next_mark_ms = Some(mark_boundary_after(self.cfg.mark_every_ms, recv_ms));
         }
-        for u in drain_due(&mut self.unwinds, recv_ms, |u| u.due_ms) {
-            self.unwind(u, books, &mut out);
+        let mut mark_at = self.mark_due_at(recv_ms);
+        let mark_was_due = mark_at.is_some();
+
+        loop {
+            match self.earliest_due(recv_ms, mark_at) {
+                None => break,
+                Some(Which::Pending(i)) => {
+                    let p = self.pending.remove(i);
+                    self.execute(p, books, &mut out);
+                }
+                Some(Which::Unwind(i)) => {
+                    let u = self.unwinds.remove(i);
+                    self.unwind(u, books, &mut out);
+                }
+                Some(Which::Conversion(i)) => {
+                    let c = self.conversions.remove(i);
+                    self.convert(c, &mut out);
+                }
+                Some(Which::Markout(i)) => {
+                    let m = self.markouts.remove(i);
+                    let mid = mid_of(books, &m.leg);
+                    out.push(SimOut::Markout(MarkoutRow {
+                        account: self.accounts[m.acct].id.clone(),
+                        episode_id: m.episode_id,
+                        leg: m.leg,
+                        fill_vwap: m.vwap,
+                        offset_ms: m.offset_ms,
+                        mid,
+                        markout: mid.map(|x| x - m.vwap),
+                    }));
+                }
+                Some(Which::Mark) => {
+                    if let Some(at) = mark_at.take() {
+                        self.mark_all(at, books, &mut out);
+                    }
+                }
+            }
         }
-        for c in drain_due(&mut self.conversions, recv_ms, |c| c.due_ms) {
-            self.convert(c, &mut out);
+
+        if mark_was_due {
+            self.next_mark_ms = Some(mark_boundary_after(self.cfg.mark_every_ms, recv_ms));
         }
-        for m in drain_due(&mut self.markouts, recv_ms, |m| m.due_ms) {
-            let mid = mid_of(books, &m.leg);
-            out.push(SimOut::Markout(MarkoutRow {
-                account: self.accounts[m.acct].id.clone(),
-                episode_id: m.episode_id,
-                leg: m.leg,
-                fill_vwap: m.vwap,
-                offset_ms: m.offset_ms,
-                mid,
-                markout: mid.map(|x| x - m.vwap),
-            }));
-        }
-        self.marks_due(recv_ms, books, &mut out);
         out
     }
 
@@ -274,6 +397,13 @@ impl PaperTrader {
 
     fn execute(&mut self, p: Pending, books: &impl Books, out: &mut Vec<SimOut>) {
         let a = p.acct;
+        debug_assert!(
+            self.accounts[a].reserved >= p.planned.reserve,
+            "account {}: reserved {} < this intent's reserve {}",
+            self.accounts[a].id,
+            self.accounts[a].reserved,
+            p.planned.reserve
+        );
         self.accounts[a].reserved =
             (self.accounts[a].reserved - p.planned.reserve).max(Decimal::ZERO);
         let pnl_at_tx = self.pnl_now(&p, books);
@@ -319,6 +449,7 @@ impl PaperTrader {
             if excess > Decimal::ZERO {
                 leg_risk += excess;
                 let due_ms = p.t_exec + self.delay(a, leg.seconds_delay);
+                let seq = self.alloc_seq();
                 self.unwinds.push(Unwind {
                     acct: a,
                     episode_id: p.episode_id.clone(),
@@ -326,10 +457,13 @@ impl PaperTrader {
                     fee: leg.fee,
                     qty: excess,
                     due_ms,
+                    seq,
                 });
             }
             if let Some(vwap) = f.vwap() {
-                for &off in &self.cfg.markout_offsets_ms {
+                let offsets = self.cfg.markout_offsets_ms.clone();
+                for off in offsets {
+                    let seq = self.alloc_seq();
                     self.markouts.push(Markout {
                         acct: a,
                         episode_id: p.episode_id.clone(),
@@ -337,6 +471,7 @@ impl PaperTrader {
                         vwap,
                         offset_ms: off,
                         due_ms: p.t_exec + off,
+                        seq,
                     });
                 }
             }
@@ -344,6 +479,7 @@ impl PaperTrader {
         if q_eff > Decimal::ZERO
             && let Hold::Convert { complements } = &p.planned.hold
         {
+            let seq = self.alloc_seq();
             self.conversions.push(Conversion {
                 acct: a,
                 episode_id: p.episode_id.clone(),
@@ -351,6 +487,7 @@ impl PaperTrader {
                 complements: complements.clone(),
                 q: q_eff,
                 due_ms: p.t_exec + self.cfg.settle_delay_ms,
+                seq,
             });
         }
         out.push(SimOut::Exec(ExecRow {
@@ -424,21 +561,5 @@ impl PaperTrader {
             out.push(SimOut::Ledger(e));
             out.push(SimOut::Account(self.account_row(a, t_ms, books)));
         }
-    }
-
-    fn marks_due(&mut self, now: i64, books: &impl Books, out: &mut Vec<SimOut>) {
-        let every = self.cfg.mark_every_ms;
-        let aligned_after = |t: i64| (t.div_euclid(every) + 1) * every;
-        let Some(next) = self.next_mark_ms else {
-            self.next_mark_ms = Some(aligned_after(now));
-            return;
-        };
-        if now < next {
-            return;
-        }
-        // One mark at the latest boundary ≤ now, however long the input gap was.
-        let at = now.div_euclid(every) * every;
-        self.mark_all(at, books, out);
-        self.next_mark_ms = Some(aligned_after(now));
     }
 }

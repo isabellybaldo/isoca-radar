@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 use arb_core::book::{Book, Side};
-use arb_core::detect::detect_no_basket;
+use arb_core::detect::{Group, GroupLeg, LegStatus, detect_no_basket, detect_yes_basket};
 use arb_core::fee::FeeSchedule;
-use common::{ctx, d, no_group, p};
+use common::{book, ctx, d, no_group, p};
 use rust_decimal::Decimal;
 use sim::config::{AccountSpec, P1Params, PolicyKind, Scenario, SimConfig};
 use sim::rows::SimOut;
@@ -291,4 +291,165 @@ fn markouts_record_the_mid_after_each_offset() {
         (m.offset_ms, m.mid, m.markout),
         (1000, Some(d("0.48")), Some(d("-0.12")))
     );
+}
+
+/// A YES-basket whose leg 0 has both a bid (0.40, 30 shares) and an ask (0.45), and leg 1 an ask
+/// only (0.50, thinned to 40 later). Buying YES on both legs is net positive: payoff 1 − (0.45 +
+/// 0.50) = 0.05 > 0.
+fn yes_group_for_ordering() -> Group {
+    Group {
+        legs: vec![
+            GroupLeg {
+                status: LegStatus::Live,
+                book: book(&[("0.40", "30")], &[("0.45", "100")]),
+                fee: FeeSchedule::ZERO,
+            },
+            GroupLeg {
+                status: LegStatus::Live,
+                book: book(&[], &[("0.50", "100")]),
+                fee: FeeSchedule::ZERO,
+            },
+        ],
+        augmented: false,
+    }
+}
+
+/// A standalone NO-basket group used only to build episode 2's `OpenCtx` (never fed to
+/// `books_of`): leg 0 shares leg 0's bid above (0.40, 30) so its sizing matches the real shared
+/// book; leg 1's bid (0.85) only needs to make the pair net positive on its own — nothing in the
+/// shared books ever reads it, since episode 2's leg 1 buy targets the mirrored "y1" book, which
+/// has no bid at all and so simply fills 0 there, harmlessly.
+fn no_group_for_ordering() -> Group {
+    Group {
+        legs: vec![
+            GroupLeg {
+                status: LegStatus::Live,
+                book: book(&[("0.40", "30")], &[]),
+                fee: FeeSchedule::ZERO,
+            },
+            GroupLeg {
+                status: LegStatus::Live,
+                book: book(&[("0.85", "100")], &[]),
+                fee: FeeSchedule::ZERO,
+            },
+        ],
+        augmented: false,
+    }
+}
+
+/// Review finding (Task 8, round 1): `on_frame` used to drain its four queues one at a time, so an
+/// earlier-due unwind and a later-due pending buy competed for the SAME book level in reverse time
+/// order whenever both were due by the same (delayed) frame. This reproduces it directly:
+///
+/// - Episode 1 (YES-basket, `y0`+`y1`) buys YES on both legs; `y1`'s ask thins from 100 to 40
+///   before t_x, so leg 0 over-fills (to 99.80, per venue rounding) leaving ~60 shares of leg-risk.
+///   The unwind that flattens it SELLS YES on leg 0, hitting its YES-BID level (0.40, 30 shares) —
+///   due at t_x + 100 = 1200.
+/// - Episode 2 (NO-basket, same account) later buys NO on leg 0 too: buying NO also hits the SAME
+///   YES-BID level (0.40, 30) via the L1 mirror. Its t_x is 1250.
+/// - A single `on_frame(1300, ..)` call must run both. Due-time order says the unwind (1200) goes
+///   first and takes the level's only 30 shares; episode 2's buy then finds nothing left. The old
+///   queue-by-queue order ran the pending buy first instead (wrongly, since 1250 > 1200), letting
+///   it grab the 30 shares and leaving the earlier unwind with 0 — the reverse of what should
+///   happen.
+#[test]
+fn an_earlier_due_unwind_wins_the_book_level_over_a_later_due_buy() {
+    let g1 = yes_group_for_ordering();
+    let g2 = no_group_for_ordering();
+    let mut books = books_of(&g1);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P3Naive, "1000")])).unwrap();
+    let yes2 = [Outcome::Yes, Outcome::Yes];
+    let no2 = [Outcome::No, Outcome::No];
+
+    t.on_open(&ctx(
+        "e1",
+        1000,
+        &g1,
+        detect_yes_basket(&g1).unwrap(),
+        &yes2,
+    ));
+    // y1's ask thins from 100 to 40 before t_x (1100): leg 0 fills 100, leg 1 only 40.
+    books.get_mut("y1").unwrap().apply_delta(
+        Side::Ask,
+        p("0.50"),
+        arb_core::money::Shares::parse("40").unwrap(),
+        1050,
+    );
+    t.on_level("y1", BookSide::Ask, d("0.50"), d("40"));
+    let outs = t.on_frame(1100, &books);
+    let exec = outs
+        .iter()
+        .find_map(|o| {
+            if let SimOut::Exec(e) = o {
+                Some(e.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    // Leg 0 doesn't fill the full 100: venue rounding (order_size) shrinks q_target off 100 to the
+    // largest size whose cost has ≤ 2 dp at both limits (0.45 and 0.50), landing at 99.80. Leg 1
+    // fills 40 (thinned), so leg-risk on leg 0 is 99.80 − 40 = 59.80 — still far past the unwind
+    // level's 30-share cap, which is all this test needs.
+    assert_eq!((exec.q_eff, exec.leg_risk_qty), (d("40"), d("59.80")));
+
+    // Episode 2 opens after episode 1's execution but before its unwind is due; its own t_x (1250)
+    // is later than the unwind's due time (1200), so both are due by on_frame(1300, ..).
+    t.on_open(&ctx("e2", 1150, &g2, detect_no_basket(&g2).unwrap(), &no2));
+    let outs = t.on_frame(1300, &books);
+
+    let sell_m0 = outs
+        .iter()
+        .find_map(|o| match o {
+            SimOut::Fill(f) if f.side == "sell" && f.leg.market_id == "m0" => Some(f.filled),
+            _ => None,
+        })
+        .unwrap();
+    let buy_m0_e2 = outs
+        .iter()
+        .find_map(|o| match o {
+            SimOut::Fill(f)
+                if f.side == "buy" && f.leg.market_id == "m0" && f.episode_id == "e2" =>
+            {
+                Some(f.filled)
+            }
+            _ => None,
+        })
+        .unwrap();
+    // The earlier-due unwind takes the level's only 30 shares fully; the later-due buy gets 0.
+    assert_eq!(sell_m0, d("30"));
+    assert_eq!(buy_m0_e2, d("0"));
+}
+
+/// Review finding (Task 8, round 1): the minute mark used to run AFTER the whole frame's due work,
+/// so a mark stamped at boundary `at` could include cash changes from executions due strictly
+/// after `at` but still within the same (delayed) call. This reproduces it: episode e1's t_x
+/// (60_050) falls just after the 60_000 mark boundary, and both are due in one `on_frame(60_050,
+/// ..)` call. The mark at 60_000 must see the PRE-execution cash; the execution still happens
+/// within the same call, just correctly ordered after the mark.
+#[test]
+fn a_mark_at_its_boundary_does_not_see_a_later_due_execution_in_the_same_frame() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    // Establishes next_mark_ms = 60_000 without firing anything (first-frame initialisation).
+    t.on_frame(100, &books);
+    t.on_open(&ctx("e1", 59_950, &g, detect_no_basket(&g).unwrap(), &NO3));
+    let outs = t.on_frame(60_050, &books);
+
+    let mark = outs
+        .iter()
+        .find_map(|o| match o {
+            SimOut::Account(a) if a.t_ms == 60_000 => Some(a.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(mark.cash, d("1000"), "the mark predates e1's execution");
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, SimOut::Fill(f) if f.side == "buy")),
+        "the execution still runs within the same call, just after the mark"
+    );
+    // Same fill as `no_basket_executes_at_t_x_then_converts`: 51.2 shares at 1.95 total.
+    assert_eq!(t.accounts()[0].cash, d("900.16"));
 }
