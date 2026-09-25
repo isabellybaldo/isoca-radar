@@ -210,21 +210,38 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
         }
         Some((total, limits))
     };
-    let Some((cost_open, _)) = at(q_open) else {
+    let Some((_cost_open, _)) = at(q_open) else {
         return Decision::Skip(SkipReason::BadInput);
     };
-    let Some(unit_cost) = cost_open.checked_div(q_open).filter(|u| *u > Decimal::ZERO) else {
-        return Decision::Skip(SkipReason::BadInput);
+    let budget = spec.per_trade.min(free_cash);
+    // Bisect to find largest q <= q_open such that walked cost <= budget.
+    // Use 60 iterations for Decimal precision.
+    let mut q_max = q_open;
+    let mut q_min = Decimal::ZERO;
+    for _ in 0..60 {
+        let q_mid = (q_min + q_max) / Decimal::from(2);
+        let Some((cost, _)) = at(q_mid) else {
+            q_max = q_mid;
+            continue;
+        };
+        if cost <= budget {
+            q_min = q_mid;
+        } else {
+            q_max = q_mid;
+        }
+    }
+    let q_want = q_min;
+    // Check NoCash: can we afford even min_order_shares?
+    let Some((cost_min, _)) = at(cfg.min_order_shares) else {
+        return Decision::Skip(SkipReason::NoCash);
     };
-    let afford = free_cash / unit_cost;
-    if afford < cfg.min_order_shares {
+    if cost_min > free_cash {
         return Decision::Skip(SkipReason::NoCash);
     }
-    let q_want = q_open.min(spec.per_trade / unit_cost).min(afford);
     let Some((_, limits)) = at(q_want) else {
         return Decision::Skip(SkipReason::BadInput);
     };
-    let q = order_size(&limits, q_want, cfg.min_order_shares);
+    let mut q = order_size(&limits, q_want, cfg.min_order_shares);
     if q <= Decimal::ZERO {
         return Decision::Skip(SkipReason::BelowMinSize);
     }
@@ -243,11 +260,28 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
             seconds_delay: info.seconds_delay,
         })
         .collect();
-    let reserve = legs
+    let mut reserve = legs
         .iter()
         .map(|l| (l.limit.get() + l.fee.phi(l.limit)) * q)
         .sum::<Decimal>()
         + Decimal::new(1, 3);
+    // If reserve exceeds free cash, shrink q and recalculate.
+    if reserve > free_cash {
+        q = q * free_cash / reserve;
+        let Some((_, new_limits)) = at(q) else {
+            return Decision::Skip(SkipReason::BadInput);
+        };
+        q = order_size(&new_limits, q, cfg.min_order_shares);
+        if q <= Decimal::ZERO {
+            return Decision::Skip(SkipReason::NoCash);
+        }
+        reserve = infos
+            .iter()
+            .zip(&new_limits)
+            .map(|(info, &limit)| (limit.get() + info.fee.phi(limit)) * q)
+            .sum::<Decimal>()
+            + Decimal::new(1, 3);
+    }
     let hold = if kind == Kind::NoBasket {
         Hold::Convert {
             complements: ctx

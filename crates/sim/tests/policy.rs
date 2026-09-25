@@ -6,7 +6,7 @@ use arb_core::stats::annualized;
 use common::{ctx, d, fee, live, no_group, p};
 use rust_decimal::Decimal;
 use sim::config::{AccountSpec, P1Params, PolicyKind, SimConfig};
-use sim::policy::{Decision, Hold, SkipReason, decide};
+use sim::policy::{Decision, Hold, SkipReason, decide, walk_cost};
 use sim::types::{LegKey, Outcome};
 
 fn cfg() -> SimConfig {
@@ -214,5 +214,48 @@ fn p2_needs_an_approved_pair_and_buys_no_a_yes_b() {
     assert_eq!(
         pl.legs.iter().map(|l| l.key.outcome).collect::<Vec<_>>(),
         vec![Outcome::No, Outcome::Yes]
+    );
+}
+
+#[test]
+fn multi_level_books_never_size_past_the_budget() {
+    // The key issue: with a tight budget and multi-level books, average cost can
+    // underestimate actual cost. Use a scenario where per_trade is tight.
+    // Build a NO basket with limited budget.
+    let g = no_group(FeeSchedule::ZERO);
+    let sig = detect_no_basket(&g).unwrap();
+    let c = ctx(
+        "e1",
+        1000,
+        &g,
+        sig,
+        &[Outcome::No, Outcome::No, Outcome::No],
+    );
+
+    // Set per_trade = 20 and free_cash = 30. The old algorithm might have sized beyond budget
+    // because it used average cost. The new bisection approach should respect the actual cost.
+    let Decision::Take(pl) = decide(&cfg(), &acct(PolicyKind::P0Converter, "20"), d("30"), &c)
+    else {
+        panic!("expected take with tight budget")
+    };
+
+    // Verify walked cost does not exceed per_trade budget (20).
+    let mut total_cost = Decimal::ZERO;
+    for (levels, leg) in c.open_levels.iter().zip(&pl.legs) {
+        let (cost, _) = walk_cost(levels, pl.q_target, leg.fee, false)
+            .expect("walked cost should succeed for taken q");
+        total_cost += cost;
+    }
+    assert!(
+        total_cost <= d("20"),
+        "walked cost {} should be <= per_trade budget 20",
+        total_cost
+    );
+
+    // Verify reserve does not exceed free_cash (30).
+    assert!(
+        pl.reserve <= d("30"),
+        "reserve {} should be <= free_cash 30",
+        pl.reserve
     );
 }
