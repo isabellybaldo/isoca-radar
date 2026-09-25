@@ -214,7 +214,10 @@ impl Universe {
     }
 
     pub fn from_json(s: &str) -> anyhow::Result<Universe> {
-        Ok(serde_json::from_str(s)?)
+        let mut u: Universe = serde_json::from_str(s)?;
+        // group_by_event binary-searches by event_id: never trust the stored order.
+        u.groups.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+        Ok(u)
     }
 
     /// NegRisk groups only (canaries are an integrity sample, not persisted as events).
