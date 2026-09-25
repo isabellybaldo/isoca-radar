@@ -28,8 +28,46 @@ services:
     logging: *logging
     networks: [internal]
 
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/rust.Dockerfile
+    image: cute-trading/rust:dev
+    profiles: ["core"]
+    command: ["migrate"]
+    environment:
+      OWNER_DATABASE_URL: postgres://ct_owner:${POSTGRES_PASSWORD}@postgres:5432/cute_trading
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    logging: *logging
+    networks: [internal]
+
+  scanner:
+    image: cute-trading/rust:dev
+    profiles: ["core"]
+    command: ["run"]
+    environment:
+      DATABASE_URL: postgres://scanner_rw:${SCANNER_DB_PASSWORD}@postgres:5432/cute_trading
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: on-failure:5          # spec §8.1.2: a safe-mode exit 0 is NOT restarted
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - data:/data
+    logging: *logging
+    networks: [internal, egress]
+
 volumes:
   pgdata: {}
+  data: {}
 
 networks:
   internal: {}
+  egress: {}
