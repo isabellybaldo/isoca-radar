@@ -146,6 +146,68 @@ pub fn walk_cost(
     worst.map(|w| (cost, w))
 }
 
+/// A `settle` failure: either the walk itself can't be quoted at `q` (should only happen for a
+/// `q` past what `q_open` already validated), or the venue-rounded size fell below `min`.
+enum Settle {
+    BadInput,
+    TooSmall,
+}
+
+/// Re-quotes the walk at `q` and rounds it down to venue precision (`order_size`), repeating
+/// because rounding can cross a book breakpoint — which changes the worst price touched, which
+/// can change the rounded size again (spec §5.6). Bounded so a pathological book can't loop
+/// forever; on return, `limits` always matches the settled `q` exactly.
+fn settle(
+    at: &impl Fn(Decimal) -> Option<(Decimal, Vec<Price>)>,
+    mut q: Decimal,
+    min: Decimal,
+) -> Result<(Decimal, Vec<Price>), Settle> {
+    for _ in 0..20 {
+        let (_, limits) = at(q).ok_or(Settle::BadInput)?;
+        let q2 = order_size(&limits, q, min);
+        if q2 < min {
+            return Err(Settle::TooSmall);
+        }
+        if q2 == q {
+            return Ok((q, limits));
+        }
+        q = q2;
+    }
+    let (_, limits) = at(q).ok_or(Settle::BadInput)?;
+    Ok((q, limits))
+}
+
+/// Builds the intent legs and their worst-case reserve (fees included, plus a conservative
+/// epsilon) for `q` shares at `limits`, one per used leg in `infos`' order.
+fn plan_legs(
+    infos: &[&LegInfo],
+    kind: Kind,
+    limits: &[Price],
+    q: Decimal,
+) -> (Vec<IntentLeg>, Decimal) {
+    let legs: Vec<IntentLeg> = infos
+        .iter()
+        .zip(limits)
+        .enumerate()
+        .map(|(pos, (info, &limit))| IntentLeg {
+            key: LegKey {
+                market_id: info.market_id.clone(),
+                yes_token: info.yes_token.clone(),
+                outcome: outcome_for(kind, pos),
+            },
+            limit,
+            fee: info.fee,
+            seconds_delay: info.seconds_delay,
+        })
+        .collect();
+    let reserve = legs
+        .iter()
+        .map(|l| (l.limit.get() + l.fee.phi(l.limit)) * q)
+        .sum::<Decimal>()
+        + Decimal::new(1, 3);
+    (legs, reserve)
+}
+
 pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &OpenCtx) -> Decision {
     let kind = ctx.signal.kind;
     if !takes_kind(spec.policy, kind) {
@@ -210,126 +272,54 @@ pub fn decide(cfg: &SimConfig, spec: &AccountSpec, free_cash: Decimal, ctx: &Ope
         }
         Some((total, limits))
     };
-    let Some((_cost_open, _)) = at(q_open) else {
+    if at(q_open).is_none() {
         return Decision::Skip(SkipReason::BadInput);
-    };
+    }
+    // Cash can't even cover the venue minimum: no point sizing further.
+    match at(cfg.min_order_shares) {
+        Some((cost_min, _)) if cost_min <= free_cash => {}
+        _ => return Decision::Skip(SkipReason::NoCash),
+    }
+
+    // Largest q <= q_open whose walked cost stays within the trade/cash budget (60 iterations:
+    // plenty of Decimal precision).
     let budget = spec.per_trade.min(free_cash);
-    // Bisect to find largest q <= q_open such that walked cost <= budget.
-    // Use 60 iterations for Decimal precision.
-    let mut q_max = q_open;
-    let mut q_min = Decimal::ZERO;
+    let mut q_lo = Decimal::ZERO;
+    let mut q_hi = q_open;
     for _ in 0..60 {
-        let q_mid = (q_min + q_max) / Decimal::from(2);
-        let Some((cost, _)) = at(q_mid) else {
-            q_max = q_mid;
-            continue;
-        };
-        if cost <= budget {
-            q_min = q_mid;
-        } else {
-            q_max = q_mid;
+        let q_mid = (q_lo + q_hi) / Decimal::from(2);
+        match at(q_mid) {
+            Some((cost, _)) if cost <= budget => q_lo = q_mid,
+            _ => q_hi = q_mid,
         }
     }
-    let q_want = q_min;
-    // Check NoCash: can we afford even min_order_shares?
-    let Some((cost_min, _)) = at(cfg.min_order_shares) else {
-        return Decision::Skip(SkipReason::NoCash);
+
+    let (mut q, mut limits) = match settle(&at, q_lo, cfg.min_order_shares) {
+        Ok(settled) => settled,
+        Err(Settle::TooSmall) => return Decision::Skip(SkipReason::BelowMinSize),
+        Err(Settle::BadInput) => return Decision::Skip(SkipReason::BadInput),
     };
-    if cost_min > free_cash {
-        return Decision::Skip(SkipReason::NoCash);
-    }
-    let Some((_, mut limits)) = at(q_want) else {
-        return Decision::Skip(SkipReason::BadInput);
-    };
-    let mut q = order_size(&limits, q_want, cfg.min_order_shares);
-    if q <= Decimal::ZERO {
-        return Decision::Skip(SkipReason::BelowMinSize);
-    }
-    let mut legs: Vec<IntentLeg> = infos
-        .iter()
-        .zip(&limits)
-        .enumerate()
-        .map(|(pos, (info, &limit))| IntentLeg {
-            key: LegKey {
-                market_id: info.market_id.clone(),
-                yes_token: info.yes_token.clone(),
-                outcome: outcome_for(kind, pos),
-            },
-            limit,
-            fee: info.fee,
-            seconds_delay: info.seconds_delay,
-        })
-        .collect();
-    let mut reserve = legs
-        .iter()
-        .map(|l| (l.limit.get() + l.fee.phi(l.limit)) * q)
-        .sum::<Decimal>()
-        + Decimal::new(1, 3);
-    // If reserve exceeds free cash, solve directly for q.
-    // Compute C = Σ(limit + φ(limit)), the per-unit worst case.
-    let mut c: Decimal = legs
-        .iter()
-        .map(|l| l.limit.get() + l.fee.phi(l.limit))
-        .sum();
+    let (mut legs, mut reserve) = plan_legs(&infos, kind, &limits, q);
+
+    // The settled size can still cost more than we actually have (a `per_trade` cap wider than
+    // free cash, or fees): shrink to the largest size the reserve allows and settle again.
     if reserve > free_cash {
-        // Solve: C·q + 0.001 = free_cash → q = (free_cash - 0.001) / C
-        let q_target_exact = (free_cash - Decimal::new(1, 3)) / c;
-        if q_target_exact <= Decimal::ZERO {
-            return Decision::Skip(SkipReason::NoCash);
-        }
-        q = order_size(&limits, q_target_exact, cfg.min_order_shares);
-        if q < cfg.min_order_shares {
-            return Decision::Skip(SkipReason::NoCash);
-        }
-        // Refresh limits: the shrink may cross below a book level, requiring updated limits.
-        // Loop at most 5 times until limits stabilize.
-        for _ in 0..5 {
-            let Some((_, new_limits)) = at(q) else {
-                return Decision::Skip(SkipReason::BadInput);
-            };
-            let q2 = order_size(&new_limits, q, cfg.min_order_shares);
-            if q2 < cfg.min_order_shares {
-                return Decision::Skip(SkipReason::NoCash);
-            }
-            if q2 == q {
-                limits = new_limits;
-                break;
-            }
-            q = q2;
-        }
-        // Rebuild per-leg limits and C from final limits.
-        c = limits
+        let per_unit: Decimal = legs
             .iter()
-            .enumerate()
-            .map(|(i, &limit)| {
-                let fee = infos
-                    .get(i)
-                    .map(|info| info.fee)
-                    .unwrap_or(FeeSchedule::ZERO);
-                limit.get() + fee.phi(limit)
-            })
+            .map(|l| l.limit.get() + l.fee.phi(l.limit))
             .sum();
-        reserve = c * q + Decimal::new(1, 3);
-        // Defensive check: if recomputed reserve is still > free_cash, bail out.
+        let q_shrunk = (free_cash - Decimal::new(1, 3)) / per_unit;
+        if q_shrunk <= Decimal::ZERO {
+            return Decision::Skip(SkipReason::NoCash);
+        }
+        (q, limits) = match settle(&at, q_shrunk, cfg.min_order_shares) {
+            Ok(settled) => settled,
+            Err(_) => return Decision::Skip(SkipReason::NoCash),
+        };
+        (legs, reserve) = plan_legs(&infos, kind, &limits, q);
         if reserve > free_cash {
             return Decision::Skip(SkipReason::NoCash);
         }
-        // Rebuild legs with updated limits.
-        legs = infos
-            .iter()
-            .zip(&limits)
-            .enumerate()
-            .map(|(pos, (info, &limit))| IntentLeg {
-                key: LegKey {
-                    market_id: info.market_id.clone(),
-                    yes_token: info.yes_token.clone(),
-                    outcome: outcome_for(kind, pos),
-                },
-                limit,
-                fee: info.fee,
-                seconds_delay: info.seconds_delay,
-            })
-            .collect();
     }
     let hold = if kind == Kind::NoBasket {
         Hold::Convert {
