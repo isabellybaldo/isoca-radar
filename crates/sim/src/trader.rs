@@ -1,7 +1,7 @@
 //! The paper trader (spec §5.6, §11): one account per `policies.toml` entry, each with its own
 //! consumed-liquidity ledger. Pure: time arrives on the inputs (see the call contract in the plan).
 use crate::SimError;
-use crate::account::Account;
+use crate::account::{Account, Valuation};
 use crate::config::SimConfig;
 use crate::consumed::ConsumedLiquidity;
 use crate::latency::{FrameRate, exec_delay_ms};
@@ -378,19 +378,7 @@ impl PaperTrader {
             // the next minute mark revalues them at the bid.
             let acct = &self.accounts[a];
             let v = acct.valuation(|_| None);
-            out.push(SimOut::Account(AccountRow {
-                account: acct.id.clone(),
-                t_ms,
-                cash: acct.cash,
-                equity: acct.cash + v.marks,
-                realized: acct.realized,
-                unrealized: v.unrealized(),
-                fees_paid: acct.fees_paid,
-                locked: v.basis_open,
-                max_drawdown: acct.max_drawdown,
-                n_positions: i64::try_from(acct.positions.len() + acct.returned.len())
-                    .unwrap_or(i64::MAX),
-            }));
+            out.push(SimOut::Account(Self::row_from(acct, t_ms, v)));
         }
         out
     }
@@ -407,6 +395,13 @@ impl PaperTrader {
         }
         for p in std::mem::take(&mut self.pending) {
             let a = &mut self.accounts[p.acct];
+            debug_assert!(
+                a.reserved >= p.planned.reserve,
+                "account {}: reserved {} < this intent's reserve {}",
+                a.id,
+                a.reserved,
+                p.planned.reserve
+            );
             a.reserved = (a.reserved - p.planned.reserve).max(Decimal::ZERO);
         }
         self.unwinds.clear();
@@ -430,14 +425,15 @@ impl PaperTrader {
         let accounts = cfg
             .accounts
             .iter()
-            .map(|spec| {
-                saved.remove(&spec.id()).map_or_else(
-                    || Account::new(spec.clone()),
-                    |mut a| {
-                        a.reserved = Decimal::ZERO;
-                        a
-                    },
-                )
+            .map(|spec| match saved.remove(&spec.id()) {
+                // Same id, unchanged settings: keep the saved account, reservations released.
+                Some(mut a) if a.spec == *spec => {
+                    a.reserved = Decimal::ZERO;
+                    a
+                }
+                // No saved account, or its settings changed (e.g. bankroll, per_trade): start
+                // fresh, consistent with the S3c plan's ruling for a changed account.
+                _ => Account::new(spec.clone()),
             })
             .collect();
         Self::with_accounts(cfg, accounts)
@@ -632,6 +628,12 @@ impl PaperTrader {
     fn account_row(&self, a: usize, t_ms: i64, books: &impl Books) -> AccountRow {
         let acct = &self.accounts[a];
         let v = acct.valuation(|l| bid_of(books, l));
+        Self::row_from(acct, t_ms, v)
+    }
+
+    /// Builds an `AccountRow` from an account and an already-computed valuation: shared by
+    /// `account_row` (valued at the bid) and `on_resolution` (valued at 0; no books there).
+    fn row_from(acct: &Account, t_ms: i64, v: Valuation) -> AccountRow {
         AccountRow {
             account: acct.id.clone(),
             t_ms,

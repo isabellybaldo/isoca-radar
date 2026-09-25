@@ -172,6 +172,39 @@ fn state_round_trips_and_restores_by_account_id() {
 }
 
 #[test]
+fn restore_starts_fresh_when_the_saved_spec_changed() {
+    let (t, _) = converted();
+    let json = serde_json::to_string(&t.state()).unwrap();
+    let mut changed = cfg(&[PolicyKind::P0Converter]);
+    changed.accounts[0].per_trade = d("200"); // same id, different spec field
+    let r = PaperTrader::restore(changed, serde_json::from_str(&json).unwrap()).unwrap();
+    assert_eq!(
+        r.accounts()[0].cash,
+        d("1000"),
+        "a changed spec starts fresh at the new bankroll, not the saved cash"
+    );
+    assert_eq!(r.accounts()[0].spec.per_trade, d("200"));
+}
+
+#[test]
+fn close_before_t_x_releases_the_reservation_without_a_fill() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[PolicyKind::P0Converter])).unwrap();
+    t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3)); // t_exec = 1100
+    assert!(
+        t.accounts()[0].reserved > Decimal::ZERO,
+        "the intent reserved cash on open"
+    );
+    let outs = t.close(1050, &books); // before t_exec: the intent is still pending
+    assert!(
+        !outs.iter().any(|o| matches!(o, SimOut::Fill(_))),
+        "a still-pending intent never executes, so it never fills"
+    );
+    assert_eq!(t.accounts()[0].reserved, Decimal::ZERO);
+}
+
+#[test]
 fn same_inputs_same_outputs() {
     let run = || {
         let g = no_group(FeeSchedule::ZERO);
