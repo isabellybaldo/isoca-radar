@@ -9,10 +9,10 @@ use crate::shards::Plan;
 use pm_api::backoff::{Backoff, ConnectBudget};
 use pm_api::ws::{Frame, run_connection};
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 #[derive(Debug)]
@@ -81,6 +81,28 @@ fn take_budget(budget: &Mutex<ConnectBudget>) -> bool {
         .try_take(now_ms())
 }
 
+/// The `Down` reason for one finished session: "stopped" wins over whatever `run_connection`
+/// returned, since a deliberate stop is not a transport failure (Review Focus, fix round 1).
+fn session_reason(stopping: bool, result: &Result<(), pm_api::ApiError>) -> String {
+    if stopping {
+        "stopped".to_string()
+    } else {
+        match result {
+            Ok(()) => "closed".to_string(),
+            Err(e) => e.to_string(),
+        }
+    }
+}
+
+/// One websocket shard. `stop` is watched everywhere the shard could otherwise block (budget
+/// wait, the connection itself, the backoff sleep) so a caller can ask it to end its current
+/// session and return WITHOUT ever aborting the task: dropping the `run_connection` future drops
+/// its `ftx`, the forwarder then drains and exits, and only after that does the shard send its
+/// own `Down` — so `Down` always follows the shard's last frame (fix round 1, ordering flaw).
+/// A closed `stop` channel (sender dropped, `changed()` returning `Err`) is treated exactly like
+/// an explicit `true`: `tokio::select!`'s `_ = stop.changed()` arm fires on either outcome, so
+/// dropping the `Supervisor` stops every shard even without calling `abort_all`.
+#[allow(clippy::too_many_arguments)] // only `Supervisor` calls this; each parameter is load-bearing
 pub fn spawn_shard(
     conn: usize,
     tokens: Vec<String>,
@@ -89,6 +111,8 @@ pub fn spawn_shard(
     cfg: ConnectCfg,
     capacity: usize,
     metrics: Arc<Metrics>,
+    mut stop: watch::Receiver<bool>,
+    parked_flag: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut backoff = Backoff::new(
@@ -99,8 +123,15 @@ pub fn spawn_shard(
         let mut parking = Parking::new(cfg.park_after_failures, cfg.park_window_secs * 1000);
         let mut attempt: u32 = 0;
         loop {
-            while !take_budget(&budget) {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+            loop {
+                if take_budget(&budget) {
+                    break;
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    // Not connected yet: nothing to drain, nothing to report.
+                    _ = stop.changed() => return,
+                }
             }
             let started = now_ms();
             backoff.on_connected(started);
@@ -116,35 +147,55 @@ pub fn spawn_shard(
                     }
                 }
             });
-            let result = run_connection(conn, tokens.clone(), ftx).await;
+            let mut stopping = false;
+            let result = tokio::select! {
+                r = run_connection(conn, tokens.clone(), ftx) => r,
+                // Dropping this branch's `ftx` (via the future above being cancelled) is what
+                // makes the forwarder see a closed channel and drain below.
+                _ = stop.changed() => {
+                    stopping = true;
+                    Ok(())
+                }
+            };
             let _ = fwd.await; // all of this session's frames are in `shared` before Down
             let ended = now_ms();
             if matches!(result, Err(pm_api::ApiError::Dropped { .. })) {
                 metrics.drops.fetch_add(1, Ordering::Relaxed);
             }
             metrics.reconnects.fetch_add(1, Ordering::Relaxed);
-            let reason = match &result {
-                Ok(()) => "closed".to_string(),
-                Err(e) => e.to_string(),
-            };
+            let reason = session_reason(stopping, &result);
             if shared.send(FeedMsg::Down { conn, reason }).await.is_err() {
+                return;
+            }
+            if stopping {
                 return;
             }
             let failed = result.is_err() || ended - started < cfg.healthy_session_ms;
             if failed && parking.record(ended) {
                 metrics.parked.fetch_add(1, Ordering::Relaxed);
+                parked_flag.store(true, Ordering::Relaxed);
                 let _ = shared.send(FeedMsg::Parked { conn }).await;
                 return;
             }
             let delay = backoff.on_disconnected(ended);
             attempt = attempt.saturating_add(1);
-            tokio::time::sleep(Duration::from_millis(jittered(delay, conn, attempt))).await;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(jittered(delay, conn, attempt))) => {}
+                _ = stop.changed() => return,
+            }
         }
     })
 }
 
+type Slot = (
+    Vec<String>,
+    JoinHandle<()>,
+    watch::Sender<bool>,
+    Arc<AtomicBool>,
+);
+
 pub struct Supervisor {
-    handles: Vec<(Vec<String>, JoinHandle<()>)>,
+    handles: Vec<Slot>,
     shared: mpsc::Sender<FeedMsg>,
     budget: Arc<Mutex<ConnectBudget>>,
     cfg: ConnectCfg,
@@ -170,44 +221,51 @@ impl Supervisor {
         }
     }
 
+    /// Ask a shard to stop, wait (bounded) for it to drain and send its own `Down`, and only
+    /// then return — so the caller never spawns a replacement for `conn` before the old task is
+    /// gone. Falls back to `abort()` only if the shard doesn't end within the timeout (logged:
+    /// that shard's `Down`, if any, may be missing or arrive late).
+    async fn stop_slot(&self, conn: usize, slot: Slot) {
+        let (_, mut handle, tx, parked) = slot;
+        let _ = tx.send(true);
+        if tokio::time::timeout(Duration::from_secs(5), &mut handle)
+            .await
+            .is_err()
+        {
+            eprintln!("feed: shard {conn} did not stop within 5s; aborting");
+            handle.abort();
+        }
+        if parked.load(Ordering::Relaxed) {
+            let _ = self
+                .metrics
+                .parked
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
+                    Some(p.saturating_sub(1))
+                });
+        }
+    }
+
     pub async fn apply(&mut self, plan: &Plan) {
         while self.handles.len() > plan.shards.len() {
-            if let Some((_, h)) = self.handles.pop() {
-                let running = !h.is_finished();
-                h.abort();
-                if running {
-                    let conn = self.handles.len();
-                    let _ = self
-                        .shared
-                        .send(FeedMsg::Down {
-                            conn,
-                            reason: "shard removed".into(),
-                        })
-                        .await;
-                }
+            if let Some(slot) = self.handles.pop() {
+                let conn = self.handles.len();
+                self.stop_slot(conn, slot).await;
             }
         }
-        let parked_before = self.handles.iter().filter(|(_, h)| h.is_finished()).count() as u64;
         for (i, s) in plan.shards.iter().enumerate() {
             let (old, finished) = match self.handles.get(i) {
-                Some((t, h)) => (Some(t.as_slice()), h.is_finished()),
+                Some((t, h, _, _)) => (Some(t.as_slice()), h.is_finished()),
                 None => (None, false),
             };
             if !needs_restart(old, finished, &s.tokens) {
                 continue;
             }
-            if let Some((_, h)) = self.handles.get(i)
-                && !h.is_finished()
-            {
-                h.abort();
-                let _ = self
-                    .shared
-                    .send(FeedMsg::Down {
-                        conn: i,
-                        reason: "resharded".into(),
-                    })
-                    .await;
+            if i < self.handles.len() {
+                let slot = self.handles.remove(i);
+                self.stop_slot(i, slot).await;
             }
+            let (tx, stop) = watch::channel(false);
+            let parked = Arc::new(AtomicBool::new(false));
             let h = spawn_shard(
                 i,
                 s.tokens.clone(),
@@ -216,19 +274,16 @@ impl Supervisor {
                 self.cfg.clone(),
                 self.capacity,
                 self.metrics.clone(),
+                stop,
+                parked.clone(),
             );
+            let slot = (s.tokens.clone(), h, tx, parked);
             if i < self.handles.len() {
-                self.handles[i] = (s.tokens.clone(), h);
+                self.handles.insert(i, slot);
             } else {
-                self.handles.push((s.tokens.clone(), h));
+                self.handles.push(slot);
             }
         }
-        let _ = self
-            .metrics
-            .parked
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {
-                Some(p.saturating_sub(parked_before))
-            });
         self.metrics
             .shards
             .store(plan.shards.len() as u64, Ordering::Relaxed);
@@ -240,9 +295,13 @@ impl Supervisor {
             .store(plan.dropped.len() as u64, Ordering::Relaxed);
     }
 
+    /// Signal every shard to stop and detach: the tasks drain and send their own `Down` (or exit
+    /// silently if never connected) without this call waiting for them. Non-async by design —
+    /// dropping the `Supervisor` itself (e.g. on process shutdown) has the same effect, since
+    /// dropping `self.handles` drops every `watch::Sender`, closing each shard's stop channel.
     pub fn abort_all(&mut self) {
-        for (_, h) in self.handles.drain(..) {
-            h.abort();
+        for (_, _, tx, _) in self.handles.drain(..) {
+            let _ = tx.send(true);
         }
     }
 }
@@ -284,6 +343,21 @@ mod tests {
         assert!(
             needs_restart(Some(&a), true, &a),
             "finished (parked) shards are retried"
+        );
+    }
+
+    #[test]
+    fn session_reason_prefers_stopped_over_the_transport_result() {
+        assert_eq!(session_reason(true, &Ok(())), "stopped");
+        assert_eq!(session_reason(false, &Ok(())), "closed");
+        assert_eq!(
+            session_reason(true, &Err(pm_api::ApiError::Timeout("connect"))),
+            "stopped",
+            "a deliberate stop is not a transport failure"
+        );
+        assert_eq!(
+            session_reason(false, &Err(pm_api::ApiError::Timeout("connect"))),
+            "timed out: connect"
         );
     }
 }
