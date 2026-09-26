@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use cards::HOUR_MS as H;
 use cards::cells::*;
+use cards::edge::EdgeCell;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -219,4 +220,41 @@ fn cells_add_subtract_and_round_trip_through_json() {
     );
     assert!(DurCell::AREAS.contains(&"censoring") && !G1Cell::AREAS.contains(&"censoring"));
     assert!(G4Cell::AREAS.contains(&"depth"));
+}
+
+/// Task 8: Edge capture's cell is merge-exact on every *summed* field (table, n, captured, lat) —
+/// add then subtract returns exactly to the starting cell, and subtracting twice zeroes it out,
+/// same as the other families above. `max_capital`/`biggest` are deliberately excluded from that
+/// equality: they're the one part of `EdgeCell` `add`/`sub` never touch (a whole-window maximum
+/// can't be subtracted out of a sum), so they're carried instead through `EdgeMax`/`merge_max` —
+/// checked for exactness by the `edge_cells_sum_to_the_direct_figures_and_the_max_is_a_whole_window_sweep`
+/// proptest in `tests/edge.rs`, against a direct whole-window sweep.
+#[test]
+fn edge_cell_is_merge_exact_on_every_summed_field() {
+    let eps = vec![ep("ea", Side::No, 0, H - 1), ep("eb", Side::Yes, 5, 10)];
+    let input = HourInput {
+        hour_ms: 0,
+        episodes: &eps,
+        latency_ms: &[150, 200],
+        equity_deltas: &[("sp-idle".to_string(), dec!(1.5))],
+    };
+    let e = EdgeCell::build(&input);
+    let mut sum = EdgeCell::default();
+    sum.add(&e);
+    sum.add(&e);
+    sum.sub(&e);
+    assert_eq!(sum.table, e.table);
+    assert_eq!(sum.n, e.n);
+    assert_eq!(sum.captured, e.captured);
+    assert_eq!(sum.lat, e.lat);
+    sum.sub(&e);
+    assert_eq!(sum.table, PerSide::default());
+    assert_eq!(sum.n, PerSide::default());
+    assert!(sum.captured.is_empty(), "subtraction removes zero entries");
+    assert!(sum.lat.is_empty(), "subtraction removes zero entries");
+    // max_capital/biggest are default the whole time: `apply` never touches them.
+    assert_eq!(sum, EdgeCell::default());
+    assert_eq!(EdgeCell::from_json(&e.to_json().unwrap()).unwrap(), e);
+    assert_eq!(EdgeCell::FAMILY, "edge");
+    assert!(EdgeCell::AREAS.contains(&"host") && EdgeCell::AREAS.contains(&"sim"));
 }

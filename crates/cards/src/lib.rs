@@ -5,6 +5,7 @@
 
 pub mod body;
 pub mod cells;
+pub mod edge;
 pub mod gebele;
 pub mod papers;
 pub mod stats;
