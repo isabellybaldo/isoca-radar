@@ -5,6 +5,8 @@ import { FakeToggle } from './components/FakeToggle';
 import { LiveDot } from './components/LiveDot';
 import { EpisodeDetail } from './pages/EpisodeDetail';
 import { Episodes } from './pages/Episodes';
+import { Health } from './pages/Health';
+import { Paper } from './pages/Paper';
 import { Radar } from './pages/Radar';
 
 const NAV = [
@@ -45,6 +47,8 @@ export function App() {
           <Route path="/" element={<Radar />} />
           <Route path="/episodes" element={<Episodes />} />
           <Route path="/episodes/:id" element={<EpisodeDetail />} />
+          <Route path="/paper" element={<Paper />} />
+          <Route path="/health" element={<Health />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

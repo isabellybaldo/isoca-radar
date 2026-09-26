@@ -1,4 +1,6 @@
-import type { EpisodeDetail, EpisodeSummary, HealthNow, Today } from '../api/types';
+import type {
+  EpisodeDetail, EpisodeSummary, HealthNow, HealthPoint, LedgerEntry, PaperAccount, Position, Today,
+} from '../api/types';
 
 export function healthFixture(o: Partial<HealthNow> = {}): HealthNow {
   return {
@@ -51,5 +53,38 @@ export function episodeDetailFixture(o: Partial<EpisodeDetail['episode']> = {}):
       { offset_ms: 3000, source: 'rest', observed_ms: opened + 3000, skipped: false, skip_reason: null, edge: '-0.0008', q_star: '0', pnl: '0', still_profitable: false, fill_at_original_size: false },
       { offset_ms: 5000, source: 'rest', observed_ms: null, skipped: true, skip_reason: 'recheck capacity', edge: null, q_star: null, pnl: null, still_profitable: null, fill_at_original_size: null },
     ],
+  };
+}
+
+export function accountFixture(o: Partial<PaperAccount> = {}): PaperAccount {
+  return {
+    account_id: 'P0-converter/sp-idle', policy: 'P0-converter', scenario: 'sp-idle', fee_bips: '0', bankroll: '1000',
+    run_id: 3, marked_ms: 1_790_000_000_000, cash: '900', equity: '1002.56', realized: '2.56', unrealized: '0',
+    fees_paid: '0.21', locked: '0', max_drawdown: '0.4', n_positions: 0,
+    ...o,
+  };
+}
+
+export function positionFixture(o: Partial<Position> = {}): Position {
+  return {
+    account_id: 'P3-naive/sp-idle', market_id: 'm1', outcome: 'yes', qty: '40', basis: '18', returned: false,
+    event_title: 'Fed decision in October?',
+    ...o,
+  };
+}
+
+export function ledgerFixture(o: Partial<LedgerEntry> = {}): LedgerEntry {
+  return {
+    run_id: 3, account_id: 'P0-converter/sp-idle', seq: 1, t_ms: Date.UTC(2026, 8, 25, 1, 12, 4), kind: 'buy',
+    episode_id: 'live-1-00000001', market_id: 'm1', outcome: 'no', qty: '51.2', price: '0.62', cash_delta: '-99.84',
+    fees: '0.21', realized_delta: '0', cash_after: '900.16', equity: null,
+    ...o,
+  };
+}
+
+export function healthPointFixture(minute_ms: number, reconnects: number): HealthPoint {
+  return {
+    minute_ms, run_id: 3, msgs: 258_000, drops: 0, reconnects, lag_p50_ms: 78, lag_p99_ms: 1900, shards: 40,
+    parked_shards: 0, capture_paused: false,
   };
 }
