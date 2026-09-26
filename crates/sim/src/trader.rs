@@ -16,7 +16,7 @@ use arb_core::fill::{BasketRule, BuyLeg, walk};
 use arb_core::money::{Price, Shares};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Read access to the engine's YES books.
 pub trait Books {
@@ -36,7 +36,6 @@ struct Pending {
     kind: Kind,
     planned: Planned,
     t_exec: i64,
-    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +46,6 @@ struct Unwind {
     fee: FeeSchedule,
     qty: Decimal,
     due_ms: i64,
-    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +56,6 @@ struct Conversion {
     complements: Vec<LegKey>,
     q: Decimal,
     due_ms: i64,
-    seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -68,8 +65,6 @@ struct Markout {
     leg: LegKey,
     vwap: Decimal,
     offset_ms: i64,
-    due_ms: i64,
-    seq: u64,
 }
 
 /// Where an item sorts among others due at the same millisecond (spec §5.6): a mark always comes
@@ -85,14 +80,15 @@ enum Rank {
     Mark,
 }
 
-/// The next not-yet-processed item, identified by its queue + index (or the pending mark).
-#[derive(Debug, Clone, Copy)]
-enum Which {
-    Pending(usize),
-    Unwind(usize),
-    Conversion(usize),
-    Markout(usize),
-    Mark,
+/// One item of due work, however it was queued. `due` (S3c fix round 1) keys these by
+/// `(due_ms, Rank, seq)` in a single `BTreeMap`, so the earliest item across every kind is always
+/// its first entry — no per-call scan of four separate queues, and no `Vec::remove(i)` shifting.
+#[derive(Debug, Clone)]
+enum Due {
+    Pending(Pending),
+    Unwind(Unwind),
+    Conversion(Conversion),
+    Markout(Markout),
 }
 
 /// What survives a restart: the accounts. Pending intents, unwinds and markouts are dropped at
@@ -107,10 +103,11 @@ pub struct PaperTrader {
     accounts: Vec<Account>,
     scenario_ix: Vec<usize>,
     consumed: Vec<ConsumedLiquidity>,
-    pending: Vec<Pending>,
-    unwinds: Vec<Unwind>,
-    conversions: Vec<Conversion>,
-    markouts: Vec<Markout>,
+    /// Every not-yet-processed pending intent, unwind, conversion and markout, keyed by
+    /// `(due_ms, Rank, seq)`: the map's own key order IS the global due-time order (S3c fix
+    /// round 1). `seq` alone is already unique across every kind (one shared counter), so no two
+    /// entries ever collide on a key.
+    due: BTreeMap<(i64, Rank, u64), Due>,
     rate: FrameRate,
     next_mark_ms: Option<i64>,
     next_seq: u64,
@@ -183,10 +180,7 @@ impl PaperTrader {
             accounts,
             scenario_ix,
             consumed: vec![ConsumedLiquidity::default(); n],
-            pending: Vec::new(),
-            unwinds: Vec::new(),
-            conversions: Vec::new(),
-            markouts: Vec::new(),
+            due: BTreeMap::new(),
             next_mark_ms: None,
             next_seq: 0,
         })
@@ -204,13 +198,6 @@ impl PaperTrader {
             .flat_map(|a| a.positions.keys().chain(a.returned.keys()))
             .map(|k| k.market_id.clone())
             .collect()
-    }
-
-    /// Does any account hold consumed liquidity at all? The engine calls `on_level` for every
-    /// applied delta and `on_snapshot` for every applied snapshot: with nothing consumed (the
-    /// common case between trades) both return before allocating a key or copying a book.
-    fn any_consumed(&self) -> bool {
-        self.consumed.iter().any(|c| !c.is_empty())
     }
 
     fn delay(&self, acct: usize, seconds_delay: Option<i32>) -> i64 {
@@ -263,71 +250,38 @@ impl PaperTrader {
                     }));
                     self.accounts[a].reserved += planned.reserve;
                     let seq = self.alloc_seq();
-                    self.pending.push(Pending {
-                        acct: a,
-                        episode_id: ctx.episode_id.clone(),
-                        kind: ctx.signal.kind,
-                        planned,
-                        t_exec,
-                        seq,
-                    });
+                    self.due.insert(
+                        (t_exec, Rank::Pending, seq),
+                        Due::Pending(Pending {
+                            acct: a,
+                            episode_id: ctx.episode_id.clone(),
+                            kind: ctx.signal.kind,
+                            planned,
+                            t_exec,
+                        }),
+                    );
                 }
             }
         }
         out
     }
 
-    /// The earliest item due at or before `recv_ms`, across every queue and the pending minute
-    /// mark, ordered by (due_ms, kind_rank, seq): one global timeline instead of queue-by-queue
-    /// (spec §5.6; review finding on Task 8). `None` once nothing more is due.
-    fn earliest_due(&self, recv_ms: i64, mark_at: Option<i64>) -> Option<Which> {
-        let mut best: Option<(i64, Rank, u64, Which)> = None;
-        macro_rules! consider {
-            ($due:expr, $rank:expr, $seq:expr, $w:expr) => {
-                if $due <= recv_ms {
-                    let key = ($due, $rank, $seq);
-                    if best.is_none_or(|(d, r, s, _)| key < (d, r, s)) {
-                        best = Some(($due, $rank, $seq, $w));
-                    }
-                }
-            };
-        }
-        if let Some((i, p)) = self
-            .pending
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, p)| (p.t_exec, p.seq))
-        {
-            consider!(p.t_exec, Rank::Pending, p.seq, Which::Pending(i));
-        }
-        if let Some((i, u)) = self
-            .unwinds
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, u)| (u.due_ms, u.seq))
-        {
-            consider!(u.due_ms, Rank::Unwind, u.seq, Which::Unwind(i));
-        }
-        if let Some((i, c)) = self
-            .conversions
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, c)| (c.due_ms, c.seq))
-        {
-            consider!(c.due_ms, Rank::Conversion, c.seq, Which::Conversion(i));
-        }
-        if let Some((i, m)) = self
-            .markouts
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, m)| (m.due_ms, m.seq))
-        {
-            consider!(m.due_ms, Rank::Markout, m.seq, Which::Markout(i));
-        }
-        if let Some(at) = mark_at {
-            consider!(at, Rank::Mark, 0u64, Which::Mark);
-        }
-        best.map(|(_, _, _, w)| w)
+    /// The earliest key due at or before `recv_ms`, across `due` and the pending minute mark
+    /// (S3c fix round 1): `due`'s own first key already is its earliest item (one global
+    /// timeline instead of queue-by-queue, spec §5.6; review finding on Task 8), so this is just
+    /// comparing that one key against the mark's virtual `(at, Rank::Mark, 0)` — O(log n), never
+    /// a scan. `None` once nothing more is due. The mark can never tie a real key: `Rank::Mark`
+    /// is never a real item's rank.
+    fn next_due_key(&self, recv_ms: i64, mark_at: Option<i64>) -> Option<(i64, Rank, u64)> {
+        let due_key = self.due.keys().next().copied();
+        let mark_key = mark_at.map(|at| (at, Rank::Mark, 0u64));
+        let best = match (due_key, mark_key) {
+            (Some(a), Some(b)) => Some(if a <= b { a } else { b }),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        best.filter(|k| k.0 <= recv_ms)
     }
 
     /// If a minute mark is due at or before `now`, the boundary to stamp it at (spec §5.6: at most
@@ -341,7 +295,7 @@ impl PaperTrader {
     }
 
     /// Call BEFORE applying the frame at `recv_ms`: runs everything due at or before it, in one
-    /// global due-time order (see `earliest_due`). Loops so that anything queued while draining
+    /// global due-time order (see `next_due_key`). Loops so that anything queued while draining
     /// (e.g. a 0 ms delay) is picked up in its correct place within this same call.
     pub fn on_frame(&mut self, recv_ms: i64, books: &impl Books) -> Vec<SimOut> {
         self.rate.push(recv_ms);
@@ -353,23 +307,21 @@ impl PaperTrader {
         let mut mark_at = self.mark_due_at(recv_ms);
         let mark_was_due = mark_at.is_some();
 
-        loop {
-            match self.earliest_due(recv_ms, mark_at) {
-                None => break,
-                Some(Which::Pending(i)) => {
-                    let p = self.pending.remove(i);
-                    self.execute(p, books, &mut out);
+        while let Some(key) = self.next_due_key(recv_ms, mark_at) {
+            if key.1 == Rank::Mark {
+                if let Some(at) = mark_at.take() {
+                    self.mark_all(at, books, &mut out);
                 }
-                Some(Which::Unwind(i)) => {
-                    let u = self.unwinds.remove(i);
-                    self.unwind(u, books, &mut out);
-                }
-                Some(Which::Conversion(i)) => {
-                    let c = self.conversions.remove(i);
-                    self.convert(c, &mut out);
-                }
-                Some(Which::Markout(i)) => {
-                    let m = self.markouts.remove(i);
+                continue;
+            }
+            let Some(item) = self.due.remove(&key) else {
+                break; // unreachable: `key` was just read from `due` itself, above
+            };
+            match item {
+                Due::Pending(p) => self.execute(p, books, &mut out),
+                Due::Unwind(u) => self.unwind(u, books, &mut out),
+                Due::Conversion(c) => self.convert(c, &mut out),
+                Due::Markout(m) => {
                     let mid = mid_of(books, &m.leg);
                     out.push(SimOut::Markout(MarkoutRow {
                         account: self.accounts[m.acct].id.clone(),
@@ -380,11 +332,6 @@ impl PaperTrader {
                         mid,
                         markout: mid.map(|x| x - m.vwap),
                     }));
-                }
-                Some(Which::Mark) => {
-                    if let Some(at) = mark_at.take() {
-                        self.mark_all(at, books, &mut out);
-                    }
                 }
             }
         }
@@ -426,25 +373,30 @@ impl PaperTrader {
     /// outstanding after that — it does not itself run work that `on_frame` would have.
     pub fn close(&mut self, t_ms: i64, books: &impl Books) -> Vec<SimOut> {
         let mut out = Vec::new();
-        let mut due: Vec<Conversion> = std::mem::take(&mut self.conversions);
-        due.sort_by_key(|c| (c.due_ms, c.seq));
-        for mut c in due {
-            c.due_ms = t_ms;
-            self.convert(c, &mut out);
+        // One pass over `due` in key order: every Conversion's Rank is constant, so their
+        // relative order within this pass is exactly (due_ms, seq) — the same sort the old
+        // per-queue `Vec` used. Releasing pending reservations and dropping unwinds/markouts in
+        // the same pass is equivalent to doing them separately: only conversions push to `out`.
+        for (_, item) in std::mem::take(&mut self.due) {
+            match item {
+                Due::Conversion(mut c) => {
+                    c.due_ms = t_ms;
+                    self.convert(c, &mut out);
+                }
+                Due::Pending(p) => {
+                    let a = &mut self.accounts[p.acct];
+                    debug_assert!(
+                        a.reserved >= p.planned.reserve,
+                        "account {}: reserved {} < this intent's reserve {}",
+                        a.id,
+                        a.reserved,
+                        p.planned.reserve
+                    );
+                    a.reserved = (a.reserved - p.planned.reserve).max(Decimal::ZERO);
+                }
+                Due::Unwind(_) | Due::Markout(_) => {}
+            }
         }
-        for p in std::mem::take(&mut self.pending) {
-            let a = &mut self.accounts[p.acct];
-            debug_assert!(
-                a.reserved >= p.planned.reserve,
-                "account {}: reserved {} < this intent's reserve {}",
-                a.id,
-                a.reserved,
-                p.planned.reserve
-            );
-            a.reserved = (a.reserved - p.planned.reserve).max(Decimal::ZERO);
-        }
-        self.unwinds.clear();
-        self.markouts.clear();
         self.mark_all(t_ms, books, &mut out);
         out
     }
@@ -478,8 +430,17 @@ impl PaperTrader {
         Self::with_accounts(cfg, accounts)
     }
 
+    /// `yes_token` had a delta applied: does any account hold anything consumed on it? A single
+    /// `&str`-keyed, allocation-free check per account (S3c fix round 1) before building a
+    /// `LevelKey` or touching any account's ledger — replaces a global "anything consumed
+    /// anywhere" flag, which stayed true for the rest of the run as soon as any account bought
+    /// anything on ANY token, gating nothing per-token.
+    fn any_consumed(&self, yes_token: &str) -> bool {
+        self.consumed.iter().any(|c| c.has_token(yes_token))
+    }
+
     pub fn on_level(&mut self, yes_token: &str, side: BookSide, price: Decimal, new_size: Decimal) {
-        if !self.any_consumed() {
+        if !self.any_consumed(yes_token) {
             return;
         }
         let key = crate::consumed::LevelKey {
@@ -493,7 +454,7 @@ impl PaperTrader {
     }
 
     pub fn on_snapshot(&mut self, yes_token: &str, book: &Book) {
-        if !self.any_consumed() {
+        if !self.any_consumed(yes_token) {
             return;
         }
         for c in &mut self.consumed {
@@ -658,29 +619,33 @@ impl PaperTrader {
                 leg_risk += excess;
                 let due_ms = p.t_exec + self.delay(a, leg.seconds_delay);
                 let seq = self.alloc_seq();
-                self.unwinds.push(Unwind {
-                    acct: a,
-                    episode_id: p.episode_id.clone(),
-                    leg: leg.key.clone(),
-                    fee: leg.fee,
-                    qty: excess,
-                    due_ms,
-                    seq,
-                });
+                self.due.insert(
+                    (due_ms, Rank::Unwind, seq),
+                    Due::Unwind(Unwind {
+                        acct: a,
+                        episode_id: p.episode_id.clone(),
+                        leg: leg.key.clone(),
+                        fee: leg.fee,
+                        qty: excess,
+                        due_ms,
+                    }),
+                );
             }
             if let Some(vwap) = f.vwap() {
                 let offsets = self.cfg.markout_offsets_ms.clone();
                 for off in offsets {
                     let seq = self.alloc_seq();
-                    self.markouts.push(Markout {
-                        acct: a,
-                        episode_id: p.episode_id.clone(),
-                        leg: leg.key.clone(),
-                        vwap,
-                        offset_ms: off,
-                        due_ms: p.t_exec + off,
-                        seq,
-                    });
+                    let due_ms = p.t_exec + off;
+                    self.due.insert(
+                        (due_ms, Rank::Markout, seq),
+                        Due::Markout(Markout {
+                            acct: a,
+                            episode_id: p.episode_id.clone(),
+                            leg: leg.key.clone(),
+                            vwap,
+                            offset_ms: off,
+                        }),
+                    );
                 }
             }
         }
@@ -688,15 +653,18 @@ impl PaperTrader {
             && let Hold::Convert { complements } = &p.planned.hold
         {
             let seq = self.alloc_seq();
-            self.conversions.push(Conversion {
-                acct: a,
-                episode_id: p.episode_id.clone(),
-                s_legs: p.planned.legs.iter().map(|l| l.key.clone()).collect(),
-                complements: complements.clone(),
-                q: q_eff,
-                due_ms: p.t_exec + self.cfg.settle_delay_ms,
-                seq,
-            });
+            let due_ms = p.t_exec + self.cfg.settle_delay_ms;
+            self.due.insert(
+                (due_ms, Rank::Conversion, seq),
+                Due::Conversion(Conversion {
+                    acct: a,
+                    episode_id: p.episode_id.clone(),
+                    s_legs: p.planned.legs.iter().map(|l| l.key.clone()).collect(),
+                    complements: complements.clone(),
+                    q: q_eff,
+                    due_ms,
+                }),
+            );
         }
         out.push(SimOut::Exec(ExecRow {
             account: self.accounts[a].id.clone(),
