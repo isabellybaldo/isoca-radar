@@ -1,0 +1,124 @@
+# Phase 4 dashboard (spec 2026-09-25-phase4-dashboard-design.md §2–§3). VPS only; needs Traefik's
+# external network `traefik_public`. Kept out of compose.yml so local `docker compose up` never needs it.
+#   docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web oauth2-proxy
+# Every router except oauth2-proxy's own /oauth2/* pages goes through forward-auth (spec §3).
+# No secrets here: RADAR_DOMAIN and OAUTH2_PROXY_* come from the VPS-only .env.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  api:
+    image: cute-trading/rust:dev
+    profiles: ["web"]
+    entrypoint: ["/usr/local/bin/api"]
+    environment:
+      DATABASE_URL: postgres://analyze_ro:${ANALYZE_DB_PASSWORD:?set ANALYZE_DB_PASSWORD in .env}@postgres:5432/cute_trading
+      API_BIND: 0.0.0.0:8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 5s          # open SSE streams keep graceful shutdown waiting
+    read_only: true
+    cpus: "0.25"
+    mem_limit: 128m
+    logging: *logging
+    networks: [internal, traefik_public]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_public
+      - "traefik.http.routers.ct-api.rule=Host(`${RADAR_DOMAIN:?set RADAR_DOMAIN in .env}`) && PathPrefix(`/api/`)"
+      - traefik.http.routers.ct-api.entrypoints=websecure
+      - traefik.http.routers.ct-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.ct-api.middlewares=ct-auth@docker,ct-sec@docker,ct-csp@docker,ct-rl@docker
+      - traefik.http.services.ct-api.loadbalancer.server.port=8081
+
+  web:
+    image: cute-trading/web:dev
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    profiles: ["web"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cpus: "0.1"
+    mem_limit: 32m
+    logging: *logging
+    networks: [traefik_public]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_public
+      - "traefik.http.routers.ct-web.rule=Host(`${RADAR_DOMAIN}`)"
+      - traefik.http.routers.ct-web.entrypoints=websecure
+      - traefik.http.routers.ct-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.ct-web.middlewares=ct-auth@docker,ct-sec@docker,ct-csp@docker,ct-rl@docker
+      - traefik.http.services.ct-web.loadbalancer.server.port=8080
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
+    profiles: ["web"]
+    restart: unless-stopped
+    read_only: true
+    cpus: "0.1"
+    mem_limit: 64m
+    logging: *logging
+    environment:
+      OAUTH2_PROXY_PROVIDER: github
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:?set OAUTH2_PROXY_CLIENT_ID in .env}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:?set OAUTH2_PROXY_CLIENT_SECRET in .env}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:?set OAUTH2_PROXY_COOKIE_SECRET in .env}
+      OAUTH2_PROXY_GITHUB_USERS: isabellybaldo
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_UPSTREAMS: static://202
+      OAUTH2_PROXY_REDIRECT_URL: https://${RADAR_DOMAIN}/oauth2/callback
+      OAUTH2_PROXY_WHITELIST_DOMAINS: ${RADAR_DOMAIN}
+      OAUTH2_PROXY_COOKIE_NAME: _ct_radar
+      OAUTH2_PROXY_COOKIE_DOMAINS: ${RADAR_DOMAIN}
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_COOKIE_HTTPONLY: "true"
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
+      OAUTH2_PROXY_COOKIE_EXPIRE: 168h
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_SILENCE_PING_LOGGING: "true"
+    networks:
+      traefik_public:
+        aliases: [ct-oauth2-proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_public
+      # oauth2-proxy's own pages: the only route that answers without a session
+      - "traefik.http.routers.ct-oauth.rule=Host(`${RADAR_DOMAIN}`) && PathPrefix(`/oauth2/`)"
+      - traefik.http.routers.ct-oauth.entrypoints=websecure
+      - traefik.http.routers.ct-oauth.tls.certresolver=letsencrypt
+      - traefik.http.routers.ct-oauth.middlewares=ct-sec@docker,ct-rl@docker
+      - traefik.http.routers.ct-oauth.service=ct-oauth
+      - traefik.http.services.ct-oauth.loadbalancer.server.port=4180
+      # http → https
+      - "traefik.http.routers.ct-http.rule=Host(`${RADAR_DOMAIN}`)"
+      - traefik.http.routers.ct-http.entrypoints=web
+      - traefik.http.routers.ct-http.middlewares=ct-redirect@docker
+      - traefik.http.routers.ct-http.service=ct-oauth
+      - traefik.http.middlewares.ct-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.ct-redirect.redirectscheme.permanent=true
+      # forward-auth: 202 with a valid session, a redirect to GitHub without one (static://202 mode)
+      - traefik.http.middlewares.ct-auth.forwardauth.address=http://ct-oauth2-proxy:4180/
+      - traefik.http.middlewares.ct-auth.forwardauth.trustForwardHeader=true
+      # hardening (spec §3)
+      - traefik.http.middlewares.ct-sec.headers.stsSeconds=31536000
+      - traefik.http.middlewares.ct-sec.headers.frameDeny=true
+      - traefik.http.middlewares.ct-sec.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.ct-sec.headers.referrerPolicy=same-origin
+      - "traefik.http.middlewares.ct-csp.headers.contentSecurityPolicy=default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+      - traefik.http.middlewares.ct-rl.ratelimit.average=30
+      - traefik.http.middlewares.ct-rl.ratelimit.burst=60
+
+networks:
+  traefik_public:
+    external: true

@@ -27,3 +27,23 @@ jobs:
       - run: cargo test --workspace
       - run: cargo install cargo-deny --locked
       - run: cargo deny check bans advisories
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --env-file .env.example -f compose.yml -f compose.web.yml --profile core --profile web config -q
