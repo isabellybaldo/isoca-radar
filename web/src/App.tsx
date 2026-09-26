@@ -3,6 +3,8 @@ import { useStream } from './api/StreamContext';
 import { EmptyState } from './components/EmptyState';
 import { FakeToggle } from './components/FakeToggle';
 import { LiveDot } from './components/LiveDot';
+import { EpisodeDetail } from './pages/EpisodeDetail';
+import { Episodes } from './pages/Episodes';
 import { Radar } from './pages/Radar';
 
 const NAV = [
@@ -41,6 +43,8 @@ export function App() {
       <main className="body">
         <Routes>
           <Route path="/" element={<Radar />} />
+          <Route path="/episodes" element={<Episodes />} />
+          <Route path="/episodes/:id" element={<EpisodeDetail />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>
