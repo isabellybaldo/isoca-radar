@@ -5,9 +5,7 @@ use crate::account::{Account, Valuation};
 use crate::config::{PolicyKind, SimConfig};
 use crate::consumed::ConsumedLiquidity;
 use crate::latency::{FrameRate, exec_delay_ms};
-use crate::policy::{
-    Decision, Hold, OpenCtx, Planned, SkipReason, decide, outcome_for, takes_kind,
-};
+use crate::policy::{Decision, Hold, OpenCtx, Planned, SkipReason, decide, outcome_for};
 use crate::rows::{AccountRow, ExecRow, FillRow, IntentRow, MarkoutRow, SimOut};
 use crate::types::{BookSide, LegKey, Outcome};
 use crate::venue::{OrderFill, fak_buy, fak_sell, outcome_levels, yes_level};
@@ -499,20 +497,23 @@ impl PaperTrader {
         Some(walk(&legs, rule, None).pnl)
     }
 
-    /// `decide`, but first narrowed to what account `a`'s own consumed liquidity leaves available
-    /// (spec §5.6, controller ruling): a real bot can't refill an order it already took unless the
-    /// feed shows genuine turnover. `decide` stays unaware of consumption — it only ever sees a
-    /// book already reduced by it; this short-circuits to a dedicated skip reason when consumption
-    /// alone kills the edge or the full-set depth, before `decide` would size against it at all.
+    /// `decide` on the raw feed first, then, only for a raw `Take`, narrowed to what account
+    /// `a`'s own consumed liquidity leaves available (spec §5.6, controller rulings): a real bot
+    /// can't refill an order it already took unless the feed shows genuine turnover. Consumption
+    /// can only explain a skip the raw feed would have taken, so every policy verdict
+    /// (`NotMine`, `NotNetPositive`, P1's lock-up gates, `PairNotApproved`, `NoCash`,
+    /// `BelowMinSize`, `BadInput`) keeps its own reason (S3b final review carry-over).
     fn decide_for(&self, a: usize, ctx: &OpenCtx) -> Decision {
         let acct = &self.accounts[a];
-        if !takes_kind(acct.spec.policy, ctx.signal.kind) {
-            return Decision::NotMine;
+        let free = acct.free_cash();
+        let raw = decide(&self.cfg, &acct.spec, free, ctx);
+        if !matches!(raw, Decision::Take(_)) {
+            return raw;
         }
         let Some(fctx) = self.filtered_ctx(a, ctx) else {
-            // A malformed ctx (mismatched lengths, a used leg missing from `ctx.legs`): let
-            // `decide` report `BadInput` on the original, unfiltered ctx as it always has.
-            return decide(&self.cfg, &acct.spec, acct.free_cash(), ctx);
+            // Unreachable after a raw Take: `decide` rejects the same malformed shapes
+            // (mismatched lengths, a used leg missing from `ctx.legs`) as BadInput.
+            return Decision::Skip(SkipReason::BadInput);
         };
         let naive = acct.spec.policy == PolicyKind::P3Naive;
         let quote = if naive {
@@ -530,7 +531,7 @@ impl PaperTrader {
         if edge <= Decimal::ZERO || depth <= Decimal::ZERO {
             return Decision::Skip(SkipReason::Consumed);
         }
-        decide(&self.cfg, &acct.spec, acct.free_cash(), &fctx)
+        decide(&self.cfg, &acct.spec, free, &fctx)
     }
 
     /// `ctx.open_levels` and `signal.{quote,gross}` narrowed to what account `a`'s own consumed
@@ -745,8 +746,8 @@ impl PaperTrader {
         Self::row_from(acct, t_ms, v)
     }
 
-    /// Builds an `AccountRow` from an account and an already-computed valuation: shared by
-    /// `account_row` (valued at the bid) and `on_resolution` (valued at 0; no books there).
+    /// Builds an `AccountRow` from an account and an already-computed valuation. `account_row`
+    /// is its only caller: marks, resolutions and the close all value open positions at the bid.
     fn row_from(acct: &Account, t_ms: i64, v: Valuation) -> AccountRow {
         AccountRow {
             account: acct.id.clone(),

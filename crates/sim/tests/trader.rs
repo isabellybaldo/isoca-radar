@@ -566,3 +566,53 @@ fn a_mark_at_its_boundary_does_not_see_a_later_due_execution_in_the_same_frame()
     // Same fill as `no_basket_executes_at_t_x_then_converts`: 51.2 shares at 1.95 total.
     assert_eq!(t.accounts()[0].cash, d("900.16"));
 }
+
+/// S3b final review carry-over: consumption can only explain a skip the raw feed would have
+/// taken. A gross-positive, net-negative signal on a FRESH account (nothing consumed) is
+/// `not_net_positive`, never `consumed`.
+#[test]
+fn a_fresh_account_skips_a_net_negative_signal_as_not_net_positive() {
+    let g = no_group(common::fee("0.25", 1)); // Σφ ≈ 0.169 > gross edge 0.05
+    let sig = detect_no_basket(&g).unwrap();
+    assert!(sig.gross.pnl_gross > Decimal::ZERO && sig.quote.pnl <= Decimal::ZERO);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    let outs = t.on_open(&ctx("e1", 1000, &g, sig, &NO3));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.as_deref() == Some("not_net_positive")),
+        "{outs:?}"
+    );
+}
+
+/// The policy gate speaks first: an unapproved P2 pair on a book this account already consumed
+/// is `pair_not_approved`, not `consumed`.
+#[test]
+fn an_unapproved_pair_on_a_consumed_book_is_pair_not_approved() {
+    let a = common::live(Some("0.60"), None, FeeSchedule::ZERO); // NO_A ask 0.40 × 100
+    let b = common::live(None, Some("0.55"), FeeSchedule::ZERO); // YES_B ask 0.55 × 100
+    let sig = arb_core::detect::detect_implication(&a, &b).unwrap();
+    let g = Group {
+        legs: vec![a, b],
+        augmented: false,
+    };
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P2Combo, "1000")])).unwrap();
+    // An approved pair trades the whole level on both legs (100 × 0.95 = 95 ≤ per_trade 100)...
+    let mut approved = ctx("e1", 1000, &g, sig.clone(), &[Outcome::No, Outcome::Yes]);
+    approved.pair_approved = true;
+    let outs = t.on_open(&approved);
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.is_none()),
+        "{outs:?}"
+    );
+    assert_eq!(
+        fills(&t.on_frame(1100, &books)),
+        vec![("m0".into(), d("100")), ("m1".into(), d("100"))]
+    );
+    // ...so both levels are now fully consumed by this account. The next, unapproved episode on
+    // the same book is skipped by the policy, whatever consumption says.
+    let outs = t.on_open(&ctx("e2", 1200, &g, sig, &[Outcome::No, Outcome::Yes]));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.as_deref() == Some("pair_not_approved")),
+        "{outs:?}"
+    );
+}
