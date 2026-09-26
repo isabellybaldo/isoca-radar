@@ -177,6 +177,16 @@ impl Store {
             .await?)
     }
 
+    /// Admin/test tooling: backends in this database whose last statement was a LISTEN.
+    pub async fn listen_backends(&self) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
+        )
+        .fetch_one(self.pool())
+        .await?)
+    }
+
     /// Unclosed live episodes of the newest live scanner run only: a crashed run's never-closed
     /// rows are history, not opportunities.
     pub async fn open_episodes(&self) -> Result<Vec<EpisodeSummary>, StoreError> {

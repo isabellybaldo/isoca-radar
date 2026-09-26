@@ -11,6 +11,7 @@ pub mod health;
 pub mod integrity;
 pub mod paper;
 pub mod params;
+pub mod stream;
 
 use axum::Router;
 use axum::response::{IntoResponse, Response};
@@ -87,6 +88,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/paper/equity", get(paper::equity))
         .route("/api/paper/positions", get(paper::positions))
         .route("/api/paper/ledger", get(paper::ledger))
+        .route("/api/stream", get(stream::sse))
         .method_not_allowed_fallback(error::method_not_allowed)
         .fallback(error::not_found)
         .with_state(state)

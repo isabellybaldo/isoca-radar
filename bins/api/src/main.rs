@@ -20,6 +20,11 @@ async fn real_main() -> anyhow::Result<()> {
             .await?;
     api::ensure_read_only(&store).await?;
     let state = api::AppState::new(store.clone());
+    let _bridge = api::stream::spawn_bridge(
+        store.clone(),
+        state.events.clone(),
+        std::time::Duration::from_secs(15),
+    );
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     eprintln!("api: listening on {} (read-only, paper only)", cfg.bind);
     axum::serve(listener, api::router(state))
