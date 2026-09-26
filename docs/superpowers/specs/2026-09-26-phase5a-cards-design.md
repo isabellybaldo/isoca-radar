@@ -294,6 +294,6 @@ Both endpoints read `card_results` and `card_meta` only: one small query each.
 
 ## 11. Open items for the plan
 
-- The exact backfill run-id list, for the owner to approve.
+- **Backfill list, approved 2026-09-26:** soak run 3 onward, i.e. live scanner run `run_id = 7` (image `2c5b84d`) and every later **live** scanner run that exists when 0006 is applied. Replay, safe, census and breaker_reset runs are never backfilled. The plan's migration selects `run_id >= 7 AND service = 'scanner' AND mode = 'live'`.
 - The KM textbook dataset used as the test oracle (e.g. a small published example with ties).
 - The exact thresholds for `thin`, checked against real 7-day volumes after the first deploy.
