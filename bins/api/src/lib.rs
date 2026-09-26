@@ -17,9 +17,12 @@ use axum::Router;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use std::any::Any;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 use store::Store;
-use tokio::sync::{Semaphore, broadcast};
+use tokio::net::TcpListener;
+use tokio::sync::{Semaphore, broadcast, watch};
 use tower_http::catch_panic::CatchPanicLayer;
 
 /// Most concurrent SSE clients (one owner, a few tabs); more get a 503.
@@ -39,15 +42,20 @@ pub struct AppState {
     pub store: Store,
     pub events: broadcast::Sender<StreamEvent>,
     pub stream_slots: Arc<Semaphore>,
+    /// Flips to `true` on graceful shutdown; every open SSE stream watches this and ends itself
+    /// so `axum::serve`'s graceful shutdown (which waits for in-flight connections) can return.
+    pub shutdown_tx: watch::Sender<bool>,
 }
 
 impl AppState {
     pub fn new(store: Store) -> Self {
         let (events, _) = broadcast::channel(256);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             store,
             events,
             stream_slots: Arc::new(Semaphore::new(MAX_STREAMS)),
+            shutdown_tx,
         }
     }
 }
@@ -93,6 +101,48 @@ pub fn router(state: AppState) -> Router {
         .fallback(error::not_found)
         .with_state(state)
         .layer(CatchPanicLayer::custom(handle_panic))
+}
+
+/// Bind `bind` and serve (see `run_on`); also logs the startup line ops tooling greps for.
+pub async fn run(
+    store: Store,
+    bind: &str,
+    health_every: Duration,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(bind).await?;
+    eprintln!("api: listening on {bind} (read-only, paper only)");
+    run_on(listener, store, health_every, shutdown).await
+}
+
+/// Serve `router(AppState::new(store))` on `listener` until `shutdown` resolves, then shut down
+/// cleanly: every open SSE stream watches `AppState::shutdown_tx` and ends itself so
+/// `axum::serve`'s graceful shutdown (which otherwise waits forever for an infinite stream) can
+/// return; only then are the bridge's two tasks aborted and joined (dropping a `JoinHandle`
+/// does NOT stop its task — it must be `abort()`ed) and the store's pool closed. The bridge is
+/// stopped, and its pooled LISTEN connection freed, strictly before `store.close()`, which waits
+/// for every checked-out connection and would otherwise hang forever on that one.
+pub async fn run_on(
+    listener: TcpListener,
+    store: Store,
+    health_every: Duration,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let state = AppState::new(store.clone());
+    let bridge = stream::spawn_bridge(store.clone(), state.events.clone(), health_every);
+    let shutdown_tx = state.shutdown_tx.clone();
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = shutdown_tx.send(true);
+        })
+        .await?;
+    for h in bridge {
+        h.abort();
+        let _ = h.await;
+    }
+    store.close().await;
+    Ok(())
 }
 
 #[cfg(test)]

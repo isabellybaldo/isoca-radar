@@ -19,19 +19,13 @@ async fn real_main() -> anyhow::Result<()> {
         store::Store::connect_read_only(opts, cfg.max_conns, cfg.statement_timeout_ms, None)
             .await?;
     api::ensure_read_only(&store).await?;
-    let state = api::AppState::new(store.clone());
-    let _bridge = api::stream::spawn_bridge(
-        store.clone(),
-        state.events.clone(),
+    api::run(
+        store,
+        &cfg.bind,
         std::time::Duration::from_secs(15),
-    );
-    let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
-    eprintln!("api: listening on {} (read-only, paper only)", cfg.bind);
-    axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(shutdown())
-        .await?;
-    store.close().await;
-    Ok(())
+        shutdown(),
+    )
+    .await
 }
 
 /// SIGTERM (docker stop) or Ctrl-C.

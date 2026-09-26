@@ -7,6 +7,8 @@ use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use store::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 /// Open a stream client and collect everything it receives into a shared string.
@@ -113,13 +115,11 @@ async fn the_bridge_survives_a_killed_listen_connection() {
     );
     let c = client(&app).await;
     notify_until_seen(&owner, "live-9-00000002", std::slice::from_ref(&c)).await;
-    owner
-        .raw_exec(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-             WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
-        )
-        .await
-        .unwrap();
+    assert_eq!(
+        owner.terminate_listen_backends().await.unwrap(),
+        1,
+        "expected to kill exactly one LISTEN backend"
+    );
     notify_until_seen(&owner, "live-9-00000003", &[c]).await;
     db.drop(owner).await;
 }
@@ -139,5 +139,115 @@ async fn clients_past_the_cap_get_a_json_503() {
     let (status, v) = common::get(&app, "/api/stream").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(v["error"], "too_many_streams");
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_dropped_stream_releases_its_slot_for_a_new_client() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (app, _st) = common::app(&db).await;
+    let mut handles = Vec::new();
+    for _ in 0..api::MAX_STREAMS {
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/stream").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        handles.push(tokio::spawn(async move {
+            let mut body = resp.into_body().into_data_stream();
+            while body.next().await.is_some() {}
+        }));
+    }
+    let (status, _) = common::get(&app, "/api/stream").await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "all {} slots should be taken",
+        api::MAX_STREAMS
+    );
+
+    // Drop one held stream (abort its reader task) and give the permit a moment to release.
+    // Note: an SSE body never ends on its own, so probing with `common::get` (which reads the
+    // full body via `to_bytes`) would hang forever on a 200; check the status only and let the
+    // probe response drop immediately, which releases any permit it briefly held.
+    handles.remove(0).abort();
+    let freed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = app
+                .clone()
+                .oneshot(Request::get("/api/stream").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status();
+            if status == StatusCode::OK {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(freed.is_ok(), "a dropped stream never freed its slot");
+
+    for h in handles {
+        h.abort();
+    }
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_ends_open_streams_and_closes_the_store() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let ro = Store::connect_read_only(db.opts.clone(), 4, 5_000, Some("analyze_ro"))
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ro_for_run = ro.clone();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let run = tokio::spawn(async move {
+        api::run_on(listener, ro_for_run, Duration::from_millis(100), async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+
+    // Open one real, held-open SSE client over a real socket (not `oneshot`, so this exercises
+    // the actual `axum::serve` graceful-shutdown path) and confirm it connected.
+    let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+    sock.write_all(
+        format!("GET /api/stream HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf = [0u8; 512];
+    let n = tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(head.contains("200"), "unexpected response head: {head}");
+    assert!(
+        head.contains("text/event-stream"),
+        "not an SSE response: {head}"
+    );
+
+    shutdown_tx.send(()).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(3), run).await;
+    let joined = outcome.expect(
+        "graceful shutdown did not complete within 3s (an open SSE stream or the LISTEN pool \
+         connection is blocking axum::serve/store.close)",
+    );
+    joined
+        .expect("run_on task panicked")
+        .expect("run_on returned an error");
+    assert!(ro.pool().is_closed(), "store pool was not closed by run_on");
+
+    drop(sock);
     db.drop(owner).await;
 }
