@@ -163,6 +163,8 @@ proptest! {
                 *net.entry(stats::centi_bps(e.edge_net)).or_insert(0) += 1;
             }
             prop_assert_eq!(c.net.get(s), &net);
+            let flagged = side_count(&eps, s, |e| e.pnl_net > Decimal::ZERO && e.flagged());
+            prop_assert_eq!(*c.flagged.get(s), flagged);
         }
     }
 }

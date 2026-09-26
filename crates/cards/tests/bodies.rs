@@ -207,6 +207,7 @@ fn g3_share_and_the_one_hour_window_bias() {
         hour_observed: 624,
         hour_long: 366,
         clipped,
+        flagged: PerSide { yes: 7, no: 0 },
         ..DurCell::default()
     };
     let b = g3(&c, &ctx(Status::Live));
@@ -218,6 +219,13 @@ fn g3_share_and_the_one_hour_window_bias() {
     assert_eq!(col(&b, "episodes observed (per hour)").their, s("624"));
     assert!(col(&b, "median bias from one-hour windows").ours.is_some());
     assert_eq!(b.status, Status::Live);
+    assert!(
+        b.notes
+            .iter()
+            .any(|n| n.contains("drops 7 flagged episodes")),
+        "{:?}",
+        b.notes
+    );
 }
 
 #[test]
@@ -237,6 +245,7 @@ fn g4_median_p90_and_bins() {
             yes: net,
             no: CountMap::new(),
         },
+        flagged: PerSide { yes: 4, no: 0 },
     };
     let b = g4(&c, &ctx(Status::Live));
     assert_eq!(col(&b, "YES positive episodes").paper, s("2098"));
@@ -255,6 +264,18 @@ fn g4_median_p90_and_bins() {
         (500, None, 1)
     );
     assert!(b.notes.iter().any(|n| n.contains("figure only")));
+    assert!(
+        b.notes.iter().any(|n| n.starts_with("THEIR METHOD:")),
+        "{:?}",
+        b.notes
+    );
+    assert!(
+        b.notes
+            .iter()
+            .any(|n| n.contains("drops 4 flagged episodes")),
+        "{:?}",
+        b.notes
+    );
 }
 
 #[test]
@@ -300,6 +321,65 @@ fn status_precedence_and_the_hash_inputs() {
             "7d",
             "merge_gaps_ms=0,250,1000;thin_ratio_n=10"
         )
+    );
+}
+
+#[test]
+fn params_strings_are_built_from_the_constants_so_a_constant_change_moves_the_hash() {
+    let c = ctx(Status::Live);
+    let g1 = g1(&G1Cell::default(), &c);
+    let gaps: Vec<String> = MERGE_GAPS_MS.iter().map(i64::to_string).collect();
+    assert_eq!(
+        g1.hash,
+        repro_hash(
+            c.premise_key,
+            c.analyze_version,
+            c.from_ms,
+            c.to_ms,
+            "G1",
+            c.win,
+            &format!(
+                "merge_gaps_ms={};thin_ratio_n={THIN_RATIO_N}",
+                gaps.join(",")
+            )
+        ),
+        "G1's params must be built from MERGE_GAPS_MS and THIN_RATIO_N, not a hardcoded literal"
+    );
+
+    let g3 = g3(&DurCell::default(), &c);
+    assert_eq!(
+        g3.hash,
+        repro_hash(
+            c.premise_key,
+            c.analyze_version,
+            c.from_ms,
+            c.to_ms,
+            "G3",
+            c.win,
+            &format!(
+                "long_ms={LONG_MS};edge_min_ms={EDGE_MINUTES_MS};thin_median_n={THIN_MEDIAN_N}"
+            )
+        ),
+        "G3's params must be built from LONG_MS, EDGE_MINUTES_MS and THIN_MEDIAN_N"
+    );
+
+    let g4 = g4(&G4Cell::default(), &c);
+    assert_eq!(
+        g4.hash,
+        repro_hash(
+            c.premise_key,
+            c.analyze_version,
+            c.from_ms,
+            c.to_ms,
+            "G4",
+            c.win,
+            &format!(
+                "bin_bps={};top_bps={};quantum_bp=0.01;thin_n={THIN_MEDIAN_N}",
+                BIN_CBPS / 100,
+                TOP_CBPS / 100
+            )
+        ),
+        "G4's params must be built from BIN_CBPS and TOP_CBPS"
     );
 }
 

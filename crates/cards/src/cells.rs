@@ -381,6 +381,8 @@ pub struct G4Cell {
     pub net: PerSide<CountMap>,
     /// The same episodes' peak gross edge (the overlay).
     pub gross: PerSide<CountMap>,
+    /// Π_net > 0 and flagged (excluded from OUR METHOD, counted — spec §5).
+    pub flagged: PerSide<i64>,
 }
 
 impl G4Cell {
@@ -388,6 +390,7 @@ impl G4Cell {
         add_i64(&mut self.their, &o.their, s);
         add_cm(&mut self.net, &o.net, s);
         add_cm(&mut self.gross, &o.gross, s);
+        add_i64(&mut self.flagged, &o.flagged, s);
     }
 }
 
@@ -407,6 +410,7 @@ impl CellData for G4Cell {
         for e in opened_in(inp.episodes, inp.hour_ms).filter(|e| e.positive()) {
             *c.their.get_mut(e.side) += 1;
             if e.flagged() {
+                *c.flagged.get_mut(e.side) += 1;
                 continue;
             }
             bump(c.net.get_mut(e.side), stats::centi_bps(e.edge_net));

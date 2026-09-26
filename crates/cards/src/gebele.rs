@@ -4,7 +4,7 @@
 use crate::body::{
     Bar, Bin, BodyCtx, Card, CardBody, Curve, CurvePoint, Parts, Row, Series, make, row,
 };
-use crate::cells::{DurCell, G1Cell, G4Cell, LONG_MS, MERGE_GAPS_MS, Side};
+use crate::cells::{DurCell, EDGE_MINUTES_MS, G1Cell, G4Cell, LONG_MS, MERGE_GAPS_MS, Side};
 use crate::stats::{
     CountMap, bins, dec, dur_total, emp_at, fp_to_dec, km, median_of, merge_sorted, nearest_rank,
     pct, secs, total,
@@ -23,6 +23,10 @@ pub const GRID_MS: [i64; 18] = [
 /// G4 bins: 25 bp wide in 0.01-bp units, the last one open from 500 bp.
 pub const BIN_CBPS: i64 = 2_500;
 pub const TOP_CBPS: i64 = 50_000;
+// `bins()` returns `None` only for a non-positive width. Checked at compile time so a future edit
+// that made `BIN_CBPS` non-positive would fail the build here rather than silently falling back
+// to an empty bin set at runtime (see `binned` below).
+const _: () = assert!(BIN_CBPS > 0);
 
 const PAPER_SAMPLE: &str = "PAPER: CLOB sample, hour-stratified, 14 Apr 2026 00:00 UTC to 19 May 2026 06:00 UTC; \
      an episode is a maximal run with the fee-adjusted edge strictly > 0, taker execution, no flicker merge.";
@@ -39,15 +43,22 @@ fn sides() -> [(&'static str, Side); 2] {
     [("YES", Side::Yes), ("NO", Side::No)]
 }
 
-/// `stats::bins` returns `None` only when `width <= 0`. Every call site here passes a positive
-/// compile-time constant (`BIN_CBPS`), so the `None` arm can never actually run; it exists only
-/// to avoid `unwrap`/`expect` (denied by clippy) while still surfacing a caller bug loudly if one
-/// is ever introduced (e.g. `BIN_CBPS` changed to a non-positive value).
-fn bins_or_panic(m: &CountMap, width: i64, top: i64) -> (i64, Vec<(i64, i64)>) {
-    match bins(m, width, top) {
-        Some(v) => v,
-        None => unreachable!("cards::gebele: bins() called with non-positive width {width}"),
-    }
+/// Built from `MERGE_GAPS_MS` and `THIN_RATIO_N` so a change to either constant always changes
+/// G1's reproducibility hash.
+fn g1_params() -> String {
+    let gaps: Vec<String> = MERGE_GAPS_MS.iter().map(i64::to_string).collect();
+    format!(
+        "merge_gaps_ms={};thin_ratio_n={THIN_RATIO_N}",
+        gaps.join(",")
+    )
+}
+
+/// `stats::bins` returns `None` only when `width <= 0`; the `const _: () = assert!(BIN_CBPS > 0)`
+/// above guarantees every call here passes a positive width, so `unwrap_or_default` never actually
+/// falls back to `(0, vec![])` — it's there so this stays a total function without `unwrap`/
+/// `expect` (denied by clippy).
+fn binned(m: &CountMap, width: i64, top: i64) -> (i64, Vec<(i64, i64)>) {
+    bins(m, width, top).unwrap_or_default()
 }
 
 pub fn g1(c: &G1Cell, ctx: &BodyCtx<'_>) -> CardBody {
@@ -130,7 +141,7 @@ pub fn g1(c: &G1Cell, ctx: &BodyCtx<'_>) -> CardBody {
             card: "G1",
             paper: PAPER_ID,
             title: "G1 · Side asymmetry",
-            params: "merge_gaps_ms=0,250,1000;thin_ratio_n=10".into(),
+            params: g1_params(),
             n: c.their.yes + c.their.no,
             columns,
             series,
@@ -212,12 +223,17 @@ pub fn g2(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
         if n_their > 0 {
             curves.push(Curve {
                 label: format!("{name} · empirical (theirs)"),
+                // `emp_at` returns `None` per point only when its map is empty as a whole (guarded
+                // by `n_their > 0` above, so this never actually fires here); skip rather than
+                // ever writing an empty `s` — never a third state alongside a real decimal string.
                 points: GRID_MS
                     .iter()
                     .zip(emp_at(their, &GRID_MS))
-                    .map(|(t, v)| CurvePoint {
-                        t_ms: *t,
-                        s: v.map(|x| dec(x.round_dp(4))).unwrap_or_default(),
+                    .filter_map(|(t, v)| {
+                        v.map(|x| CurvePoint {
+                            t_ms: *t,
+                            s: dec(x.round_dp(4)),
+                        })
                     })
                     .collect(),
                 median_ms: emp_med.map(dec),
@@ -343,16 +359,21 @@ pub fn g3(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
         "THEIR METHOD: our continuous record cut into clock hours; an episode spanning several hours is observed \
          in each."
             .to_string(),
-        "OUR METHOD: the share of durations ≥ 50 min by Kaplan–Meier (right-censored kept), and the bias one-hour \
-         windows introduce: the median of hour-clipped durations minus the median of true durations."
-            .to_string(),
+        format!(
+            "OUR METHOD: the share of durations ≥ 50 min by Kaplan–Meier (right-censored kept), and the bias \
+             one-hour windows introduce: the median of hour-clipped durations minus the median of true \
+             durations; drops {} flagged episodes.",
+            c.flagged.yes + c.flagged.no
+        ),
     ];
     make(
         Parts {
             card: "G3",
             paper: PAPER_ID,
             title: "G3 · Long-lived share",
-            params: format!("long_ms={LONG_MS};edge_min_ms=300000;thin_median_n={THIN_MEDIAN_N}"),
+            params: format!(
+                "long_ms={LONG_MS};edge_min_ms={EDGE_MINUTES_MS};thin_median_n={THIN_MEDIAN_N}"
+            ),
             n: c.hour_observed,
             columns,
             series: Series::default(),
@@ -366,6 +387,16 @@ pub fn g3(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
 
 fn bps(centi: i64) -> String {
     dec(Decimal::new(centi, 2))
+}
+
+/// Built from `BIN_CBPS` and `TOP_CBPS` (both in 0.01-bp units) so a change to either constant
+/// always changes G4's reproducibility hash.
+fn g4_params() -> String {
+    format!(
+        "bin_bps={};top_bps={};quantum_bp=0.01;thin_n={THIN_MEDIAN_N}",
+        BIN_CBPS / 100,
+        TOP_CBPS / 100
+    )
 }
 
 pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
@@ -411,8 +442,8 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
             None,
             q(90),
         ));
-        let (below, net_bins) = bins_or_panic(net, BIN_CBPS, TOP_CBPS);
-        let (_, gross_bins) = bins_or_panic(c.gross.get(side), BIN_CBPS, TOP_CBPS);
+        let (below, net_bins) = binned(net, BIN_CBPS, TOP_CBPS);
+        let (_, gross_bins) = binned(c.gross.get(side), BIN_CBPS, TOP_CBPS);
         below_all += below;
         for ((lo, k), (_, g)) in net_bins.into_iter().zip(gross_bins) {
             series.bins.push(Bin {
@@ -428,9 +459,15 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
         "PAPER: Figure 2 shows the distributions with insets of positive and negative counts; the text states no \
          units, bins or percentiles, so only the counts are quoted (figure only)."
             .to_string(),
-        "OUR METHOD: peak top-of-book net edge per side, rounded to 0.01 bp; 25 bp bins, the last open from 500 bp; \
-         gross as the overlay; nearest-rank median and p90; flagged episodes dropped."
+        "THEIR METHOD: our raw Π_net > 0 episode counts per side (the same episodes G1 counts), before any are \
+         dropped as flagged."
             .to_string(),
+        format!(
+            "OUR METHOD: peak top-of-book net edge per side, rounded to 0.01 bp; 25 bp bins, the last open from \
+             500 bp; gross as the overlay; nearest-rank median and p90; drops {} flagged episodes (engine_suspect \
+             or stale_transport).",
+            c.flagged.yes + c.flagged.no
+        ),
     ];
     if below_all > 0 {
         notes.push(format!(
@@ -442,7 +479,7 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
             card: "G4",
             paper: PAPER_ID,
             title: "G4 · Net edge by side",
-            params: format!("bin_bps=25;top_bps=500;quantum_bp=0.01;thin_n={THIN_MEDIAN_N}"),
+            params: g4_params(),
             n: c.their.yes + c.their.no,
             columns,
             series,
