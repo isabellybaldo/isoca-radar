@@ -216,3 +216,6 @@ backend/.env
 .idea
 
 spikes/probe/results/
+
+web/node_modules/
+web/dist/

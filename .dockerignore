@@ -8,3 +8,5 @@ backend
 spikes/probe/results
 venv
 .env
+web/node_modules
+web/dist
