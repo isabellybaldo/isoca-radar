@@ -3,7 +3,9 @@
 //! `bins/analyze` reads Postgres through `store` and calls into this crate.
 #![forbid(unsafe_code)]
 
+pub mod cells;
 pub mod stats;
+pub mod window;
 
 pub const HOUR_MS: i64 = 3_600_000;
 pub const DAY_MS: i64 = 86_400_000;

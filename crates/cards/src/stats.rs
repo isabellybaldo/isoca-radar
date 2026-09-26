@@ -149,6 +149,7 @@ where
             // than wrapping to 0. Unreachable for realistic episode counts (s ≤ FP_ONE ≈ 1e28,
             // factor bounded by the at-risk count), so no test exercises this arm.
             s = product.unwrap_or(i128::MAX) / i128::from(at_risk);
+            s = s.max(0); // defence in depth: a corrupted window sum must never yield a negative Ŝ
             if median.is_none() && s.saturating_mul(2) <= FP_ONE {
                 median = Some(t);
             }
