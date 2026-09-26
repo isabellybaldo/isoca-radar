@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::engine::{Engine, EngineCtx, Out, RecheckReq};
 use crate::feed::{FeedMsg, Supervisor};
 use crate::metrics::Metrics;
-use crate::replay::replay_dir;
+use crate::replay::replay_dir_with;
 use crate::shards::{self, Plan};
 use crate::universe::{ConnMap, Universe};
 use crate::writer::{self, WriterMsg};
@@ -875,19 +875,16 @@ pub async fn replay_cmd(
     dry_run: bool,
 ) -> anyhow::Result<()> {
     if dry_run {
-        let r = replay_dir(dir, engine_ctx(cfg, cfg_hash, 0, "replay"))?;
-        let eps: std::collections::HashSet<&str> = r
-            .outs
-            .iter()
-            .filter_map(|o| match o {
-                Out::Episode(w) => Some(w.row.episode_id.as_str()),
-                _ => None,
-            })
-            .collect();
+        let mut eps: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let stats = replay_dir_with(dir, engine_ctx(cfg, cfg_hash, 0, "replay"), |o| {
+            if let Out::Episode(w) = o {
+                eps.insert(w.row.episode_id.clone());
+            }
+        })?;
         println!(
             "frames {} parse_errors {} episodes {}",
-            r.frames,
-            r.parse_errors,
+            stats.frames,
+            stats.parse_errors,
             eps.len()
         );
         return Ok(());
@@ -895,9 +892,17 @@ pub async fn replay_cmd(
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
     let store = Store::connect(&url, 2).await?;
     let run_id = store.start_run(&new_run(cfg_hash, "replay")).await?;
-    let r = replay_dir(dir, engine_ctx(cfg, cfg_hash, run_id, "replay"))?;
+    let mut rows: Vec<Out> = Vec::new();
+    let stats = replay_dir_with(
+        dir,
+        engine_ctx(cfg, cfg_hash, run_id, "replay"),
+        |o| match o {
+            Out::Episode(_) | Out::Integrity(_) => rows.push(o),
+            _ => {}
+        },
+    )?;
     let mut batch = Batch::default();
-    for o in r.outs {
+    for o in rows {
         match o {
             // DEVIATION: unbox, same reason as in Io::route.
             Out::Episode(w) => batch.episodes.push(*w),
@@ -913,12 +918,12 @@ pub async fn replay_cmd(
         .end_run(
             run_id,
             now_ms(),
-            &format!("replay of {} ({} frames)", dir.display(), r.frames),
+            &format!("replay of {} ({} frames)", dir.display(), stats.frames),
         )
         .await?;
     println!(
         "replay run {run_id}: {} frames, {} parse errors",
-        r.frames, r.parse_errors
+        stats.frames, stats.parse_errors
     );
     Ok(())
 }

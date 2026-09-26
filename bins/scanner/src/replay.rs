@@ -15,6 +15,12 @@ pub struct ReplayOut {
     pub parse_errors: u64,
 }
 
+#[derive(Debug)]
+pub struct ReplayStats {
+    pub frames: u64,
+    pub parse_errors: u64,
+}
+
 fn walk(dir: &Path, hours: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let p = entry?.path();
@@ -46,16 +52,19 @@ fn load_universe(dir: &Path, taken_ms: i64, file: &str) -> anyhow::Result<Univer
     serde_json::from_slice(&json).with_context(|| format!("parse {}", p.display()))
 }
 
-pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
+/// Replay a capture directory, delivering every engine output to `sink` in order instead of
+/// collecting them, so a long replay does not have to hold millions of `Out`s in memory.
+pub fn replay_dir_with(
+    dir: &Path,
+    ctx: EngineCtx,
+    mut sink: impl FnMut(Out),
+) -> anyhow::Result<ReplayStats> {
     let mut hours = Vec::new();
     walk(dir, &mut hours)?;
     hours.sort();
     let mut engine = Engine::new(ctx);
-    let mut out = ReplayOut {
-        outs: Vec::new(),
-        frames: 0,
-        parse_errors: 0,
-    };
+    let mut frames = 0_u64;
+    let mut parse_errors = 0_u64;
     let mut last_ms = 0_i64;
     let mut shut_down = false;
     for h in hours {
@@ -70,24 +79,31 @@ pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
             let ms = line.recv_ts_us.div_euclid(1000);
             last_ms = last_ms.max(ms);
             if let Some(raw) = &line.raw {
-                out.frames += 1;
+                frames += 1;
                 match parse_frame(raw) {
                     Ok(evs) => {
-                        out.outs.extend(engine.on_frame(line.shard, ms, &evs));
+                        for o in engine.on_frame(line.shard, ms, &evs) {
+                            sink(o);
+                        }
                         engine.alive(line.shard, ms);
                     }
-                    Err(_) => out.parse_errors += 1,
+                    Err(_) => parse_errors += 1,
                 }
             }
             match line.ctl {
                 None => {}
-                Some(Ctl::Down) => out.outs.extend(engine.disconnect(line.shard, ms)),
+                Some(Ctl::Down) => {
+                    for o in engine.disconnect(line.shard, ms) {
+                        sink(o);
+                    }
+                }
                 Some(Ctl::Universe { taken_ms, file }) => {
                     let rec = load_universe(dir, taken_ms, &file)?;
                     let conn: HashMap<String, usize> =
                         rec.conn_of.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    out.outs
-                        .extend(engine.apply_universe(Arc::new(rec.universe), &conn, ms));
+                    for o in engine.apply_universe(Arc::new(rec.universe), &conn, ms) {
+                        sink(o);
+                    }
                 }
                 Some(Ctl::RestSnapshot {
                     token,
@@ -96,20 +112,41 @@ pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
                     asks,
                 }) => {
                     let b = ctl_book(&bids, &asks, server_ts_ms)?;
-                    out.outs.extend(engine.rest_snapshot(&token, b));
+                    for o in engine.rest_snapshot(&token, b) {
+                        sink(o);
+                    }
                 }
-                Some(Ctl::Suspect { event_id, until_ms }) => out
-                    .outs
-                    .extend(engine.mark_suspect(&event_id, until_ms, ms)),
+                Some(Ctl::Suspect { event_id, until_ms }) => {
+                    for o in engine.mark_suspect(&event_id, until_ms, ms) {
+                        sink(o);
+                    }
+                }
                 Some(Ctl::Shutdown) => {
-                    out.outs.extend(engine.close_all(ms));
+                    for o in engine.close_all(ms) {
+                        sink(o);
+                    }
                     shut_down = true;
                 }
             }
         }
     }
     if !shut_down {
-        out.outs.extend(engine.close_all(last_ms)); // crash: close at the last captured instant
+        for o in engine.close_all(last_ms) {
+            sink(o); // crash: close at the last captured instant
+        }
     }
-    Ok(out)
+    Ok(ReplayStats {
+        frames,
+        parse_errors,
+    })
+}
+
+pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
+    let mut outs = Vec::new();
+    let stats = replay_dir_with(dir, ctx, |o| outs.push(o))?;
+    Ok(ReplayOut {
+        outs,
+        frames: stats.frames,
+        parse_errors: stats.parse_errors,
+    })
 }

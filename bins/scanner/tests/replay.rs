@@ -6,7 +6,7 @@ use scanner::capture::{
     over_budget_hours, stale_universe_files, universe_file_name, universe_path,
 };
 use scanner::engine::{EngineCtx, Out};
-use scanner::replay::replay_dir;
+use scanner::replay::{replay_dir, replay_dir_with};
 use scanner::universe::{ConnMap, GroupMeta, LegMeta, Status, Universe};
 use std::path::PathBuf;
 
@@ -189,6 +189,66 @@ fn replay_reproduces_episodes_and_censoring_byte_for_byte() {
     assert!(second.censor_left);
     assert!(second.censor_right, "closed by shutdown");
     assert_eq!(second.closed_server_ms, Some(t0 + 3_000));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn replay_dir_with_streams_the_same_outputs_as_replay_dir() {
+    let dir = tmp("replay-stream");
+    let u = universe();
+    let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
+    let mut w = Writer::new(dir.clone());
+    let t0 = 1_790_121_600_000_i64;
+    let ufile = universe_file_name(u.taken_ms, 1);
+    let msgs = vec![
+        CaptureMsg::Universe(Box::new(UniverseRecord {
+            universe: u.clone(),
+            conn_of,
+            file: ufile.clone(),
+        })),
+        line(
+            t0,
+            None,
+            Some(Ctl::Universe {
+                taken_ms: u.taken_ms,
+                file: ufile.clone(),
+            }),
+        ),
+        line(
+            t0 + 100,
+            Some(book_frame(t0, ["0.40", "0.35", "0.30"])),
+            None,
+        ),
+        line(
+            t0 + 1_100,
+            Some(book_frame(t0 + 1_000, ["0.30", "0.35", "0.30"])),
+            None,
+        ),
+        line(t0 + 1_500, None, Some(Ctl::Down)),
+        line(
+            t0 + 2_100,
+            Some(book_frame(t0 + 2_000, ["0.30", "0.35", "0.30"])),
+            None,
+        ),
+        line(t0 + 2_200, Some("{broken".into()), None),
+        line(t0 + 3_000, None, Some(Ctl::Shutdown)),
+    ];
+    for m in &msgs {
+        w.write(m).unwrap();
+    }
+    w.finish();
+
+    let collected = replay_dir(&dir, ctx()).unwrap();
+    let mut streamed_outs: Vec<Out> = Vec::new();
+    let stats = replay_dir_with(&dir, ctx(), |o| streamed_outs.push(o)).unwrap();
+
+    let collected_dbg: Vec<String> = collected.outs.iter().map(|o| format!("{o:?}")).collect();
+    let streamed_dbg: Vec<String> = streamed_outs.iter().map(|o| format!("{o:?}")).collect();
+    assert_eq!(collected_dbg, streamed_dbg);
+    assert_eq!(
+        (stats.frames, stats.parse_errors),
+        (collected.frames, collected.parse_errors)
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
