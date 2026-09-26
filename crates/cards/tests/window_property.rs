@@ -216,3 +216,130 @@ fn apply_flags_a_missing_old_for_an_already_applied_hour() {
         assert_eq!(span, &first);
     }
 }
+
+/// Same idea as `apply_expecting_a_debug_panic`, for `advance`'s expiry loop.
+fn advance_expecting_a_debug_panic(
+    w: &mut Windows<G1Cell>,
+    to: i64,
+    stored: &BTreeMap<i64, G1Cell>,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.advance(to, stored)));
+    assert!(
+        result.is_err(),
+        "a fingerprint mismatch on an expiring hour must trip advance()'s debug_assert!"
+    );
+}
+
+/// Fix round 2 (controller finding): the 7d and 30d spans' expiry subtracted `stored.get(&h)`
+/// (also caller-supplied, exactly like `apply`'s `old`) with no fingerprint check at all — the same
+/// trust gap `apply` had before round 1, just one hop later. A wrong cell for an expiring hour must
+/// be flagged and the subtraction skipped, leaving that span's sum unchanged (an intentional
+/// overcount, safer than trusting an unverified value), not silently applied.
+///
+/// h0 is set up to expire from the 24h span first (using correct data, and long enough after that
+/// `recent`'s 48-hour cache no longer holds it), so this test's mismatch is isolated to the 7d
+/// span's own expiry loop specifically — the gap the controller described.
+#[test]
+fn expiry_flags_a_wrong_cell_at_a_7d_boundary_and_leaves_the_span_unchanged() {
+    let h0 = 1_000 * H;
+    let real = cell(3);
+    let mut w: Windows<G1Cell> = Windows::new(h0);
+    w.apply(h0, None, &real);
+
+    // Past the 24h span's boundary and past `recent`'s 48-hour retention (correct data: no
+    // mismatch here). h0 is now only tracked via `all`, the 7d span, and the 30d span.
+    w.advance(h0 + 50 * H, &BTreeMap::from([(h0, real.clone())]));
+    assert!(!w.needs_rebuild());
+    assert_eq!(
+        w.spans[0],
+        G1Cell::default(),
+        "h0 already expired from the 24h span"
+    );
+    assert_eq!(w.spans[1], real, "h0 still counted in the 7d span");
+
+    // Exactly h0's 7d boundary. `recent` no longer has h0 (pruned above), so this reads straight
+    // from `stored` — a wrong cell for it.
+    let wrong = cell(4);
+    advance_expecting_a_debug_panic(&mut w, h0 + 168 * H, &BTreeMap::from([(h0, wrong)]));
+
+    assert!(w.needs_rebuild(), "a wrong cell at expiry must be flagged");
+    assert_eq!(
+        w.now_hour,
+        h0 + 50 * H,
+        "the whole advance() call is abandoned in a debug build, like apply()"
+    );
+    assert_eq!(
+        w.spans[1], real,
+        "the 7d span must keep h0's contribution rather than subtract an unverified cell"
+    );
+    assert_eq!(
+        w.spans[2], real,
+        "the 30d span wasn't even due to expire h0 yet"
+    );
+}
+
+/// Same gap, for a cell that's simply missing from `stored` at expiry (point 1 in the controller's
+/// round-2 finding: "a missing entry for an hour that has a fingerprint... silently overcounts").
+/// This one reaches the 30d boundary instead, to cover that span's own expiry loop too.
+#[test]
+fn expiry_flags_a_missing_cell_at_a_30d_boundary_and_leaves_the_span_unchanged() {
+    let h0 = 1_000 * H;
+    let real = cell(3);
+    let mut w: Windows<G1Cell> = Windows::new(h0);
+    w.apply(h0, None, &real);
+
+    // Past the 24h boundary, `recent`'s retention, and now the 7d boundary too (all correct data).
+    w.advance(h0 + 50 * H, &BTreeMap::from([(h0, real.clone())]));
+    w.advance(h0 + 200 * H, &BTreeMap::from([(h0, real.clone())]));
+    assert!(!w.needs_rebuild());
+    assert_eq!(
+        w.spans[1],
+        G1Cell::default(),
+        "h0 already expired from the 7d span"
+    );
+    assert_eq!(w.spans[2], real, "h0 still counted in the 30d span");
+
+    // Exactly h0's 30d boundary, with no entry at all for h0 in `stored` (a caller that simply
+    // forgot the row, rather than sending a wrong one).
+    advance_expecting_a_debug_panic(&mut w, h0 + 720 * H, &BTreeMap::new());
+
+    assert!(
+        w.needs_rebuild(),
+        "a missing cell at expiry must be flagged, not treated as zero"
+    );
+    assert_eq!(w.now_hour, h0 + 200 * H);
+    assert_eq!(
+        w.spans[2], real,
+        "the 30d span must keep h0's contribution rather than silently drop it"
+    );
+}
+
+/// Controller ruling, fix round 2: an empty (default) cell is the same as an absent one, so a
+/// caller that never stores a row for an all-zero hour is never a mismatch — in `apply` (`old =
+/// None` after an empty cell was "applied") and, by the same rule, in `advance`'s expiry (a missing
+/// `stored` entry for an hour whose applied cell was empty isn't a mismatch either, since no
+/// fingerprint was ever recorded for it).
+#[test]
+fn an_empty_cell_is_the_same_as_an_absent_one() {
+    let mut w: Windows<G1Cell> = Windows::new(100 * H);
+    let hour = 100 * H;
+
+    // Applying an empty cell records no fingerprint.
+    w.apply(hour, None, &G1Cell::default());
+    assert!(!w.needs_rebuild());
+
+    // So a later call with the correct `old = None` (as if no row was ever stored for this
+    // all-zero hour) is not a mismatch, exactly as if `hour` had never been applied at all.
+    let real = cell(3);
+    w.apply(hour, None, &real);
+    assert!(!w.needs_rebuild());
+    assert_eq!(w.all, real);
+
+    // Rebuilding the hour back to empty forgets its fingerprint again.
+    w.apply(hour, Some(&real), &G1Cell::default());
+    assert!(!w.needs_rebuild());
+    assert_eq!(w.all, G1Cell::default());
+    w.apply(hour, None, &real);
+    assert!(!w.needs_rebuild());
+    assert_eq!(w.all, real);
+}
