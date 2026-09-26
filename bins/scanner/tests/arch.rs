@@ -53,4 +53,17 @@ fn crate_graph_matches_spec_9_2() {
             "scanner reaches the network/db only via pm-api/store ({bad})"
         );
     }
+    for bad in [
+        "reqwest",
+        "tokio-tungstenite",
+        "sqlx",
+        "pm-api",
+        "sim",
+        "arb-core",
+    ] {
+        assert!(
+            !d["api"].contains(bad),
+            "api reads Postgres only via store and has no network client or trading code ({bad})"
+        );
+    }
 }
