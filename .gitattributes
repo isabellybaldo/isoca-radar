@@ -1,1 +1,2 @@
 *.sh text eol=lf
+crates/arb-core/premises.lock text eol=lf

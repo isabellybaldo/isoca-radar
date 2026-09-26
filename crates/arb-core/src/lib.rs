@@ -8,4 +8,5 @@ pub mod episode;
 pub mod fee;
 pub mod fill;
 pub mod money;
+pub mod premises;
 pub mod stats;
