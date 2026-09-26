@@ -23,6 +23,7 @@ pub struct Metrics {
     pub capture_paused: AtomicBool,
     pub lags: Mutex<Vec<i64>>,
     pub rest_ms: Mutex<Vec<i64>>,
+    pub rtt_ms: Mutex<Vec<i64>>,
     pub ok: Mutex<Option<bool>>,
 }
 
@@ -56,6 +57,14 @@ impl Metrics {
             .push(v);
     }
 
+    /// One CLOB request's round trip (pm-api's RttSink).
+    pub fn push_rtt(&self, v: i64) {
+        self.rtt_ms
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(v);
+    }
+
     pub fn set_ok(&self, ok: bool) {
         *self.ok.lock().unwrap_or_else(|p| p.into_inner()) = Some(ok);
     }
@@ -63,6 +72,7 @@ impl Metrics {
     pub fn minute_row(&self, run_id: i64, minute_ms: i64) -> HealthRow {
         let lags = take_sorted(&self.lags);
         let rest = take_sorted(&self.rest_ms);
+        let rtt = take_sorted(&self.rtt_ms);
         let p = |v: &[i64], q: usize| {
             percentile(v, q).map(|x| {
                 i32::try_from(x.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
@@ -86,8 +96,8 @@ impl Metrics {
             capture_paused: self.capture_paused.load(Ordering::Relaxed),
             parked_shards: i32_of(self.parked.load(Ordering::Relaxed)),
             dropped_groups: i32_of(self.dropped_groups.load(Ordering::Relaxed)),
-            rest_rtt_p50_ms: None, // Task 4 fills real values
-            rest_rtt_p99_ms: None,
+            rest_rtt_p50_ms: p(&rtt, 50),
+            rest_rtt_p99_ms: p(&rtt, 99),
         }
     }
 }
@@ -103,6 +113,18 @@ mod tests {
         assert_eq!(percentile(&v, 99), Some(99));
         assert_eq!(percentile(&[], 50), None);
         assert_eq!(percentile(&[-5], 99), Some(-5));
+    }
+
+    #[test]
+    fn minute_row_reports_rest_round_trip_percentiles_and_drains_them() {
+        let m = Metrics::default();
+        for v in [40, 10, 30, 20, 1_000] {
+            m.push_rtt(v);
+        }
+        let r = m.minute_row(1, 60_000);
+        assert_eq!((r.rest_rtt_p50_ms, r.rest_rtt_p99_ms), (Some(30), Some(40)));
+        let r2 = m.minute_row(1, 120_000);
+        assert_eq!((r2.rest_rtt_p50_ms, r2.rest_rtt_p99_ms), (None, None));
     }
 
     #[test]

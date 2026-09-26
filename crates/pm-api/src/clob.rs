@@ -80,6 +80,7 @@ pub fn chunk_tokens(tokens: &[String]) -> Vec<Vec<String>> {
 pub struct ClobClient {
     http: reqwest::Client,
     base: String,
+    rtt: Option<crate::RttSink>,
 }
 
 impl ClobClient {
@@ -87,18 +88,25 @@ impl ClobClient {
         Ok(Self {
             http: crate::http::http_client()?,
             base: CLOB_BASE.to_string(),
+            rtt: None,
         })
+    }
+
+    /// Report every request's round trip to `sink` (the scanner's health row).
+    pub fn with_rtt(mut self, sink: crate::RttSink) -> Self {
+        self.rtt = Some(sink);
+        self
     }
 
     pub async fn books(&self, tokens: &[String]) -> Result<Vec<BookWire>, ApiError> {
         let mut out = Vec::new();
         for chunk in chunk_tokens(tokens) {
             let body: Vec<Value> = chunk.iter().map(|t| json!({ "token_id": t })).collect();
-            let text = self
+            let req = self
                 .http
                 .post(format!("{}{}", self.base, CLOB_BOOKS))
-                .json(&body)
-                .send()
+                .json(&body);
+            let text = crate::http::send_timed(req, self.rtt.as_ref())
                 .await?
                 .error_for_status()?
                 .text()
@@ -110,11 +118,8 @@ impl ClobClient {
     }
 
     pub async fn ok(&self) -> Result<bool, ApiError> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.base, CLOB_OK))
-            .send()
-            .await?;
+        let req = self.http.get(format!("{}{}", self.base, CLOB_OK));
+        let resp = crate::http::send_timed(req, self.rtt.as_ref()).await?;
         Ok(resp.status().is_success())
     }
 }

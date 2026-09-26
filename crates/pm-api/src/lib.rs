@@ -11,6 +11,7 @@ pub mod wire;
 pub mod ws;
 
 pub use error::ApiError;
+pub use http::RttSink;
 
 static TLS_INIT: std::sync::Once = std::sync::Once::new();
 

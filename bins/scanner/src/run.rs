@@ -12,6 +12,7 @@ use crate::universe::{ConnMap, Universe};
 use crate::writer::{self, WriterMsg};
 use crate::{now_ms, version};
 use anyhow::Context;
+use pm_api::RttSink;
 use pm_api::backoff::ConnectBudget;
 use pm_api::clob::ClobClient;
 use pm_api::gamma::{GammaClient, Resolution};
@@ -197,8 +198,14 @@ pub async fn run(cfg: Config, cfg_hash: String, policies: Option<Policies>) -> a
         eprintln!("scanner: {reason}");
         return Ok(()); // exit 0: compose `on-failure` does not restart a clean exit
     }
+    let host = crate::premises::host_label(std::env::var("SCANNER_HOST").ok())?;
     let run_id = store.start_run(&new_run(&cfg_hash, "live")).await?;
-    let result = run_live(&cfg, &cfg_hash, policies.as_ref(), &store, run_id).await;
+    // Premises first (spec §4): a run without them never counts on a card.
+    let premises = crate::premises::run_rows(run_id, &cfg, policies.as_ref());
+    let result = match store.insert_run_premises(&premises).await {
+        Ok(()) => run_live(&cfg, &cfg_hash, policies.as_ref(), &store, run_id, host).await,
+        Err(e) => Err(anyhow::Error::from(e).context("record run premises")),
+    };
     let reason = match &result {
         Ok(()) => "shutdown".to_string(),
         Err(e) => format!("error: {e:#}"),
@@ -431,6 +438,7 @@ async fn run_live(
     policies: Option<&Policies>,
     store: &Store,
     run_id: i64,
+    host: String,
 ) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     std::fs::create_dir_all(&cfg.capture.dir)
@@ -532,7 +540,11 @@ async fn run_live(
         drop(resolved_tx); // resolved_rx then yields None, which disables its select arm
         None
     };
-    let clob = Arc::new(ClobClient::new()?);
+    let rtt: RttSink = {
+        let m = metrics.clone();
+        Arc::new(move |ms| m.push_rtt(ms))
+    };
+    let clob = Arc::new(ClobClient::new()?.with_rtt(rtt));
     let limiter = Arc::new(Limiter::new(
         cfg.recheck.rest_per_sec,
         cfg.recheck.resnapshot_reserved_per_sec,
@@ -562,19 +574,25 @@ async fn run_live(
     ));
     let health_task = {
         // health: one row per minute
-        let (metrics, writer_tx) = (metrics.clone(), writer_tx.clone());
+        let (metrics, writer_tx, store) = (metrics.clone(), writer_tx.clone(), store.clone());
+        let mut band = crate::premises::HostBand::new(run_id, host);
         tokio::spawn(async move {
             let mut t = tokio::time::interval(Duration::from_secs(60));
             t.tick().await;
             loop {
                 t.tick().await;
                 let minute = now_ms().div_euclid(60_000) * 60_000;
-                if writer_tx
-                    .send(WriterMsg::Health(metrics.minute_row(run_id, minute)))
-                    .await
-                    .is_err()
-                {
+                let row = metrics.minute_row(run_id, minute);
+                let host_row = band.observe(&row);
+                if writer_tx.send(WriterMsg::Health(row)).await.is_err() {
                     return;
+                }
+                if let Some(h) = host_row
+                    && let Err(e) = store.insert_run_premises(&[h]).await
+                {
+                    eprintln!(
+                        "scanner: host premise not recorded (Edge capture skips this run): {e}"
+                    );
                 }
                 // Drop/delete counters otherwise never reach Postgres (F2): drain each to 0 and
                 // surface a non-zero count as an integrity row.
