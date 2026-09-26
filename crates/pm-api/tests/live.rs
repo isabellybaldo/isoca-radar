@@ -41,3 +41,23 @@ async fn live_gamma_pages_dont_overlap() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_resolutions_route_answers_for_open_markets() {
+    let client = GammaClient::new().unwrap();
+    let page = client.page(None).await.unwrap();
+    let ids: Vec<String> = page
+        .events
+        .iter()
+        .flat_map(|e| e.markets().iter())
+        .map(|m| m.id.clone())
+        .take(10)
+        .collect();
+    assert!(!ids.is_empty());
+    let found = client.resolutions(&ids).await.unwrap();
+    assert!(
+        found.is_empty(),
+        "active markets are not resolved: {found:?}"
+    );
+}

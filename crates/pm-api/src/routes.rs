@@ -5,6 +5,7 @@ pub const WS_MARKET: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/marke
 pub const WS_SPORTS: &str = "wss://sports-api.polymarket.com/ws";
 
 pub const GAMMA_EVENTS_KEYSET: &str = "/events/keyset";
+pub const GAMMA_MARKETS: &str = "/markets";
 pub const CLOB_BOOK: &str = "/book";
 pub const CLOB_BOOKS: &str = "/books";
 pub const CLOB_OK: &str = "/ok";
@@ -12,6 +13,7 @@ pub const CLOB_OK: &str = "/ok";
 /// (method, full URL). Asserted exactly by tests/routes.rs.
 pub const ALLOWED: &[(&str, &str)] = &[
     ("GET", "https://gamma-api.polymarket.com/events/keyset"),
+    ("GET", "https://gamma-api.polymarket.com/markets"),
     ("GET", "https://clob.polymarket.com/book"),
     ("POST", "https://clob.polymarket.com/books"),
     ("GET", "https://clob.polymarket.com/ok"),

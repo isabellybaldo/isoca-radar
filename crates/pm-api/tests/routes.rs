@@ -9,6 +9,7 @@ fn route_table_is_exactly_the_read_only_set() {
         ALLOWED,
         &[
             ("GET", "https://gamma-api.polymarket.com/events/keyset"),
+            ("GET", "https://gamma-api.polymarket.com/markets"),
             ("GET", "https://clob.polymarket.com/book"),
             ("POST", "https://clob.polymarket.com/books"),
             ("GET", "https://clob.polymarket.com/ok"),
@@ -21,11 +22,12 @@ fn route_table_is_exactly_the_read_only_set() {
 #[test]
 fn table_agrees_with_the_constants() {
     assert_eq!(ALLOWED[0].1, format!("{GAMMA_BASE}{GAMMA_EVENTS_KEYSET}"));
-    assert_eq!(ALLOWED[1].1, format!("{CLOB_BASE}{CLOB_BOOK}"));
-    assert_eq!(ALLOWED[2].1, format!("{CLOB_BASE}{CLOB_BOOKS}"));
-    assert_eq!(ALLOWED[3].1, format!("{CLOB_BASE}{CLOB_OK}"));
-    assert_eq!(ALLOWED[4].1, WS_MARKET);
-    assert_eq!(ALLOWED[5].1, WS_SPORTS);
+    assert_eq!(ALLOWED[1].1, format!("{GAMMA_BASE}{GAMMA_MARKETS}"));
+    assert_eq!(ALLOWED[2].1, format!("{CLOB_BASE}{CLOB_BOOK}"));
+    assert_eq!(ALLOWED[3].1, format!("{CLOB_BASE}{CLOB_BOOKS}"));
+    assert_eq!(ALLOWED[4].1, format!("{CLOB_BASE}{CLOB_OK}"));
+    assert_eq!(ALLOWED[5].1, WS_MARKET);
+    assert_eq!(ALLOWED[6].1, WS_SPORTS);
 }
 
 /// Recursively collect every file under `dir`.

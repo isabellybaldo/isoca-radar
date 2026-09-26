@@ -1,6 +1,6 @@
 //! Gamma (market discovery): wire types and normalization (spec §3, §7).
 use crate::ApiError;
-use crate::routes::{GAMMA_BASE, GAMMA_EVENTS_KEYSET};
+use crate::routes::{GAMMA_BASE, GAMMA_EVENTS_KEYSET, GAMMA_MARKETS};
 use crate::wire::{decimal, string_array, string_or_number};
 use arb_core::detect::LegStatus;
 use arb_core::fee::FeeSchedule;
@@ -39,6 +39,8 @@ pub struct GammaMarket {
     pub order_price_min_tick_size: Option<Value>,
     pub seconds_delay: Option<Value>,
     pub end_date: Option<String>,
+    /// UMA adapter state, e.g. "proposed", "disputed", "resolved" (S3c payout acceptance).
+    pub uma_resolution_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +164,62 @@ pub fn leg_status(m: &GammaMarket, augmented: bool) -> LegStatus {
     }
 }
 
+/// A market's final payout per share of YES and of NO (spec §5.6: never an assumed {0,1}).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub market_id: String,
+    pub payout_yes: Decimal,
+    pub payout_no: Decimal,
+}
+
+/// Ids per `/markets` request.
+pub const RESOLUTION_CHUNK: usize = 50;
+
+/// The payout vector of a CLOSED market: two values in [0, 1] summing to exactly 1. A fractional
+/// vector (50-50, Q19) also needs `umaResolutionStatus == "resolved"`, because a closed market
+/// still in dispute shows its last trading prices, which sum to 1 as well.
+pub fn payout_vector(m: &GammaMarket) -> Option<(Decimal, Decimal)> {
+    if m.closed != Some(true) {
+        return None;
+    }
+    let p = string_array(&m.outcome_prices, "outcomePrices").ok()?;
+    let [y, n] = p.as_slice() else {
+        return None;
+    };
+    let y = Decimal::from_str_exact(y.trim()).ok()?;
+    let n = Decimal::from_str_exact(n.trim()).ok()?;
+    let unit = |x: Decimal| x >= Decimal::ZERO && x <= Decimal::ONE;
+    if !unit(y) || !unit(n) || y + n != Decimal::ONE {
+        return None;
+    }
+    let binary =
+        (y == Decimal::ONE && n == Decimal::ZERO) || (y == Decimal::ZERO && n == Decimal::ONE);
+    if !binary && m.uma_resolution_status.as_deref() != Some("resolved") {
+        return None;
+    }
+    Some((y, n))
+}
+
+pub fn parse_markets(text: &str) -> Result<Vec<GammaMarket>, ApiError> {
+    Ok(serde_json::from_str(text)?)
+}
+
+/// Accepted payouts among the markets we asked about (`wanted`), in response order. Anything
+/// else in the response is ignored, so a filter Gamma silently drops can't settle a stranger.
+pub fn parse_resolutions(text: &str, wanted: &[String]) -> Result<Vec<Resolution>, ApiError> {
+    Ok(parse_markets(text)?
+        .into_iter()
+        .filter(|m| wanted.contains(&m.id))
+        .filter_map(|m| {
+            payout_vector(&m).map(|(payout_yes, payout_no)| Resolution {
+                market_id: m.id.clone(),
+                payout_yes,
+                payout_no,
+            })
+        })
+        .collect())
+}
+
 /// Page through Gamma's keyset endpoint. Stops when no cursor is returned.
 /// A page that brings no new ids while a cursor is still offered, or hitting `max_pages`,
 /// is an error: a silently truncated universe is worse than a failed refresh (spec §7).
@@ -248,5 +306,30 @@ impl GammaClient {
 
     pub async fn all_active_events(&self) -> Result<Vec<GammaEvent>, ApiError> {
         fetch_all(|c| self.page(c), 1_000, 100).await
+    }
+
+    /// Closed markets among `market_ids` with an accepted payout vector (read-only `GET /markets`).
+    pub async fn resolutions(&self, market_ids: &[String]) -> Result<Vec<Resolution>, ApiError> {
+        let mut out = Vec::new();
+        for chunk in market_ids.chunks(RESOLUTION_CHUNK) {
+            let mut query: Vec<(&str, String)> = vec![
+                ("closed", "true".to_string()),
+                ("limit", chunk.len().to_string()),
+            ];
+            for id in chunk {
+                query.push(("id", id.clone()));
+            }
+            let text = self
+                .http
+                .get(format!("{}{}", self.base, GAMMA_MARKETS))
+                .query(&query)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?;
+            out.extend(parse_resolutions(&text, chunk)?);
+        }
+        Ok(out)
     }
 }

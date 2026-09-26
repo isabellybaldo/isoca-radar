@@ -935,7 +935,7 @@ All in pure crates, against synthetic books.
 1. No exchange credential fields exist in config. Processes refuse to start if an **exchange or wallet** credential is present: a denylist of env name patterns (`*PRIVATE_KEY*`, `*MNEMONIC*`, `*SEED_PHRASE*`, `POLY_*`, `CLOB_*`, `*API_SECRET*`, `*PASSPHRASE*`). Database role passwords (`POSTGRES_*`, `PG*`) are expected and allowed.
 1b. Every outbound destination is listed (§9.3 egress note); anything else is a bug. The Polygon client can only send `eth_call` / `eth_chainId`, so it can't submit a transaction even with a key present.
 2. `cargo-deny` bans signing and exchange-client crates.
-3. `pm-api` exposes only `GET /events/keyset`, `GET /book`, `POST /books`, `GET /ok`, the market websocket, and the Sports websocket. A test asserts that route table.
+3. `pm-api` exposes only `GET /events/keyset`, `GET /markets` (Gamma, closed markets by id: the paper trader's resolutions, S3c), `GET /book`, `POST /books`, `GET /ok`, the market websocket, and the Sports websocket. A test asserts that route table.
 4. No code is imported from other repos with trading capability (e.g. polybots has order signing and live executors). Lessons only, re-implemented here.
 5. `sim` produces ledger entries only. There's no code path to an exchange, and none can be added without breaking #2/#3.
 6. All services run as non-root with a read-only root filesystem (writable volume only). `oracle` has `network_mode: none`. The only published port is `127.0.0.1:8080` in phase A. The oracle never leaves your machine, even in phase B.
