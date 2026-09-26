@@ -4185,6 +4185,7 @@ Added when this plan was refreshed against the landed S3b, S3a-2 and aba9ce5 (20
     - An unwind that cannot trade (below `min_order_shares`, or no book) is still a `paper_fills` row: side `sell`, `filled` 0, `vwap` NULL, a measured zero. The fills key (ruling 4) still holds: at most one buy and one unwind per (episode, leg).
     - A mark, a resolution's `AccountRow` and the close's mark can share one millisecond (e.g. a close exactly on a minute boundary). `paper_marks` keeps the first per `(run, account, t_ms)` (ruling 4); `paper_ledger` keeps every entry, since each has its own `seq`.
     - `PaperTrader::restore` already starts a changed account fresh and releases reservations; `paper::restore_trader` keeps its filter only for the log line (amends ruling 9's wording, not its effect).
+26. **The policies hash gates a restore (final review, `1c3364d`).** `paper_state.policies_sha256` (migration 0005) is stamped on every save. On start, if any saved row's sha is NULL or differs from the current one, ALL accounts start fresh and one line is logged; otherwise the per-account spec check (ruling 9) still applies. Any `policies.toml` edit (latencies, `[p1]`, settle delay, markouts) therefore resets the paper ledger, so a run's pre-registered hash covers all of its equity. This amends rulings 9 and 25.
 
 ## Self-review
 
