@@ -88,3 +88,20 @@ sh scripts/disk-budget.sh
 - **Episodes (at 76 min):** yes_basket_incomplete 271 (137 stale), no_basket 72, yes_basket 9.
 - **Fixes:** S3a Task 4 (stop changed slots before start; idle slots; no churn on refreshes between retiers) and **Task 8** (repair phantom levels from the stream's top; throttle integrity rows and resnapshots; 60 s universe-save timeout). Also noted for Phase 8: KVM 2 CPU headroom for the full universe plus the sim. **Not fixed (deferred):** a retier is still a full re-plan, so expect all 40 connections to reconnect every 30 min in run 2 (paced at 20/min, so about 2 min until the last shard is back). Soak 2 pass criteria must allow it, and record CPU next to the retier times.
 - The replay prefix was deleted: after Task 8 the replay would diverge from this live run by design. Redeploy after S3a and restart the soak with a fresh prefix.
+
+### Run 2: 2026-09-25, LIVE=3, stopped after 3 h 47 min. Replay equality PASSED; no-drops FAILED
+- Image 088c43d (S3a). START=1790356605308 (17:16:45 UTC), CUTOFF=1790362800000 (19:00 UTC); prefix = hours 17 and 18.
+- **Fixed vs run 1:**
+  - The phantom-level loop is gone: the worst single token had 17 top_mismatch in total (run 1: 20,240 in 35 min).
+  - Retiers (40 reconnects each) no longer trigger integrity floods.
+  - 52 stream repairs in the first 30 min.
+- **Failed:**
+  - 19 drops: the shard→engine channel was full, because of engine CPU. `Engine::evaluate` scanned all of `pending_tops` on every frame.
+  - p99 lag reached 50.7 s.
+  - VPS steal time was 35–46 % under load vs 1–6 % idle, which looks like Hostinger capping sustained CPU. Budget ~1 effective vCPU.
+- **Memory:** grew from 1.08 to 1.40 GB over 3.7 h. Watch it in run 3.
+- **Capture cap:** not reached (6.0 GB at stop).
+- **Replay equality (Phase 2 exit, part 2) PASSED.** Replay run 5 used image 2c5b84d (S3a-2), 24,539,540 frames, 0 parse errors, in 922 s (~38 µs/frame on the VPS). Episodes decided inside [START, CUTOFF): live 367, replay 367, only_live 0, only_replay 0.
+- **Fixes shipped after run 2:**
+  - S3a-2: exact top-of-book gate; `pending_tops` indexed by connection and by group. Release bench 365 → 19.6 µs/frame. Per-minute `engine:` timing log line.
+  - aba9ce5: replay streams to a sink, so memory stays bounded. Run 5's 2.9 GB peak came from the old collect-everything path.
