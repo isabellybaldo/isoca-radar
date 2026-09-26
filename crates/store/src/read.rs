@@ -206,15 +206,16 @@ impl Store {
     }
 
     /// Unclosed live episodes of the newest live scanner run only: a crashed run's never-closed
-    /// rows are history, not opportunities. "Newest" is judged against every scanner run except
-    /// `replay` (a replay started after the live run must never hide live data): if that newest
-    /// run isn't itself `live` — a crash-loop, or the breaker starting a `safe` run — nothing here
-    /// is still open and the list is empty.
+    /// rows are history, not opportunities. "Newest" is judged against the scanner's own sessions
+    /// only, `live` and `safe` (a `replay` started after the live run must never hide live data,
+    /// and a `breaker_reset` marker row is not a session): if that newest run isn't itself `live`
+    /// — a crash-loop, or the breaker starting a `safe` run — nothing here is still open and the
+    /// list is empty.
     pub async fn open_episodes(&self) -> Result<Vec<EpisodeSummary>, StoreError> {
         let sql = format!(
             "WITH newest AS ( \
                  SELECT run_id, mode FROM runs \
-                 WHERE service = 'scanner' AND mode <> 'replay' \
+                 WHERE service = 'scanner' AND mode IN ('live', 'safe') \
                  ORDER BY run_id DESC LIMIT 1) \
              SELECT {SUMMARY_COLS} FROM episodes e, newest n \
              WHERE e.source = 'live' AND e.closed_server_ms IS NULL \

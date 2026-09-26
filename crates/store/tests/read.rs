@@ -326,6 +326,25 @@ async fn open_episodes_survive_a_newer_replay_run() {
     db.drop(owner).await;
 }
 
+/// `breaker_reset` and `census` rows are markers/tools, not scanner sessions: a reset recorded
+/// while the live scanner is up must not empty the Radar.
+#[tokio::test]
+async fn open_episodes_survive_a_newer_breaker_reset_or_census_row() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    let mut open = ep("live-1-00000001", live, 1_000);
+    open.closed_server_ms = None;
+    write_eps(&owner, vec![open]).await;
+    run(&owner, "breaker_reset").await;
+    run(&owner, "census").await;
+    let analyze = ro(&db).await;
+    assert_eq!(analyze.open_episodes().await.unwrap().len(), 1);
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
 /// health_series caps at MAX_SERIES_ROWS by keeping the *newest* minutes, not the oldest, while
 /// the api's output order stays ascending. Bulk-inserted with `generate_series` (bypassing
 /// `write_batch`) so a MAX_SERIES_ROWS+5-row window is cheap to set up.
