@@ -6,9 +6,14 @@ use scanner::capture::{
     over_budget_hours, stale_universe_files, universe_file_name, universe_path,
 };
 use scanner::engine::{EngineCtx, Out};
-use scanner::replay::{replay_dir, replay_dir_with};
+use scanner::paper::push_sim;
+use scanner::replay::{replay_dir, replay_dir_paper_with, replay_dir_with};
 use scanner::universe::{ConnMap, GroupMeta, LegMeta, Status, Universe};
+use sim::config::SimConfig;
+use sim::trader::PaperTrader;
+use std::path::Path;
 use std::path::PathBuf;
+use store::Batch;
 
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -325,4 +330,189 @@ fn stale_universe_files_are_deleted_once_older_than_every_remaining_hour_file() 
     // `old` predates the oldest (only) hour file; `fresh` does not
     assert_eq!(stale_universe_files(&dir), vec![old]);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+const POLICIES: &str = include_str!("../../../config/policies.toml");
+const T0: i64 = 1_790_121_600_000; // a whole minute: the first mark boundary is T0 + 60 000
+
+/// Book snapshots for y0..y2 with one bid and one ask level each, size 100.
+fn paper_frame(ts: i64, bids: [&str; 3], asks: [&str; 3]) -> String {
+    let items: Vec<String> = (0..3)
+        .map(|i| {
+            format!(
+                r#"{{"event_type":"book","asset_id":"y{i}","market":"0x","timestamp":"{ts}","hash":"h","bids":[{{"price":"{}","size":"100"}}],"asks":[{{"price":"{}","size":"100"}}]}}"#,
+                bids[i], asks[i]
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// A NO basket opens at T0 + 1 100, every scenario executes by T0 + 2 000 and converts by
+/// T0 + 4 000; m0 resolves 50-50 at T0 + 5 000; the capture ends with a Shutdown line at
+/// T0 + 6 000, or (a crash) without one.
+fn write_paper_capture(dir: &Path, clean_stop: bool) {
+    let u = universe();
+    let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
+    let ufile = universe_file_name(u.taken_ms, 1);
+    let asks = ["0.45", "0.40", "0.35"]; // ΣA = 1.20: never a YES basket
+    let open = ["0.40", "0.35", "0.30"]; // NO asks 0.60/0.65/0.70: Σ 1.95 < 2
+    let mut msgs = vec![
+        CaptureMsg::Universe(Box::new(UniverseRecord {
+            universe: u.clone(),
+            conn_of,
+            file: ufile.clone(),
+        })),
+        line(
+            T0,
+            None,
+            Some(Ctl::Universe {
+                taken_ms: u.taken_ms,
+                file: ufile,
+            }),
+        ),
+        line(
+            T0 + 100,
+            Some(paper_frame(T0, ["0.30", "0.30", "0.30"], asks)),
+            None,
+        ), // ΣNO 2.10: nothing
+        line(T0 + 1_100, Some(paper_frame(T0 + 1_000, open, asks)), None), // the NO basket opens
+        line(T0 + 2_000, Some(paper_frame(T0 + 1_900, open, asks)), None), // every scenario's t_x has passed
+        line(T0 + 4_000, Some(paper_frame(T0 + 3_900, open, asks)), None), // conversions due (+2 s)
+        line(
+            T0 + 5_000,
+            None,
+            Some(Ctl::Resolved {
+                market_id: "m0".into(),
+                payout_yes: "0.5".into(),
+                payout_no: "0.5".into(),
+            }),
+        ),
+    ];
+    if clean_stop {
+        msgs.push(line(T0 + 6_000, None, Some(Ctl::Shutdown)));
+    }
+    let mut w = Writer::new(dir.to_path_buf());
+    for m in &msgs {
+        w.write(m).unwrap();
+    }
+    w.finish();
+}
+
+fn replay_paper(dir: &Path, policies: &SimConfig) -> Vec<Out> {
+    let mut outs = Vec::new();
+    replay_dir_paper_with(
+        dir,
+        ctx(),
+        Some(PaperTrader::new(policies.clone()).unwrap()),
+        |o| outs.push(o),
+    )
+    .unwrap();
+    outs
+}
+
+fn paper_rows(outs: &[Out]) -> Batch {
+    let mut b = Batch::default();
+    for o in outs {
+        if let Out::Paper(s) = o {
+            push_sim(1, (**s).clone(), &mut b);
+        }
+    }
+    b
+}
+
+#[test]
+fn replay_paper_trades_deterministically_and_keeps_the_equity_identity() {
+    let dir = tmp("paper");
+    write_paper_capture(&dir, true);
+    let policies: SimConfig = toml::from_str(POLICIES).unwrap();
+    let (a, b) = (replay_paper(&dir, &policies), replay_paper(&dir, &policies));
+    assert_eq!(a, b, "same capture, same outputs, paper rows included");
+    let (ra, rb) = (paper_rows(&a), paper_rows(&b));
+    assert_eq!(ra, rb, "same paper ledger rows");
+    assert!(!ra.paper_ledger.is_empty());
+
+    assert!(
+        a.iter()
+            .any(|o| matches!(o, Out::Episode(w) if w.row.kind == "no_basket"))
+    );
+    assert!(a.iter().any(
+        |o| matches!(o, Out::Integrity(i) if i.kind == "non_binary_payout" && i.ts_ms == T0 + 5_000)
+    ));
+    let p0 = "P0-converter/colo-idle";
+    assert!(
+        ra.paper_execs
+            .iter()
+            .any(|x| x.account_id == p0 && x.q_eff == dec!(51.2))
+    );
+    assert!(
+        ra.paper_ledger
+            .iter()
+            .any(|l| l.account_id == p0 && l.kind == "convert")
+    );
+
+    // Ctl::Shutdown closes the trader: one final mark per account, and the identity holds on each
+    let finals: Vec<_> = ra
+        .paper_marks
+        .iter()
+        .filter(|m| m.t_ms == T0 + 6_000)
+        .collect();
+    assert_eq!(finals.len(), policies.accounts.len());
+    for m in &finals {
+        assert_eq!(
+            m.equity,
+            dec!(1000) + m.realized + m.unrealized,
+            "{}",
+            m.account_id
+        );
+    }
+    let p0_final = finals.iter().find(|m| m.account_id == p0).unwrap();
+    assert_eq!(p0_final.realized, dec!(2.56), "51.2 sets × (2 − 1.95)");
+
+    // the bare replay (no trader) emits exactly the scanner outputs of the paper replay
+    let mut bare = Vec::new();
+    replay_dir_with(&dir, ctx(), |o| bare.push(o)).unwrap();
+    let scanner_only: Vec<Out> = a
+        .iter()
+        .filter(|o| !matches!(o, Out::Paper(_)))
+        .cloned()
+        .collect();
+    assert_eq!(scanner_only, bare);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_capture_without_a_shutdown_line_closes_the_trader_at_its_last_instant() {
+    let dir = tmp("paper-crash");
+    write_paper_capture(&dir, false);
+    let policies: SimConfig = toml::from_str(POLICIES).unwrap();
+    let rows = paper_rows(&replay_paper(&dir, &policies));
+    // the last captured instant is the Resolved line (T0 + 5 000): every account marks there
+    let finals = rows
+        .paper_marks
+        .iter()
+        .filter(|m| m.t_ms == T0 + 5_000)
+        .count();
+    assert!(
+        finals >= policies.accounts.len(),
+        "{finals} marks at the crash close"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_resolved_line_round_trips_through_the_capture_format() {
+    let l = Line {
+        recv_ts_us: 5,
+        shard: 0,
+        raw: None,
+        ctl: Some(Ctl::Resolved {
+            market_id: "m0".into(),
+            payout_yes: "0.5".into(),
+            payout_no: "0.5".into(),
+        }),
+    };
+    let json = serde_json::to_string(&l).unwrap();
+    assert!(json.contains(r#""kind":"resolved""#), "{json}");
+    assert_eq!(serde_json::from_str::<Line>(&json).unwrap(), l);
 }

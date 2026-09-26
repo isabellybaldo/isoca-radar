@@ -3,6 +3,8 @@ use crate::capture::{Ctl, Line, UniverseRecord, ctl_book, universe_path};
 use crate::engine::{Engine, EngineCtx, Out};
 use anyhow::Context;
 use pm_api::ws::parse_frame;
+use rust_decimal::Decimal;
+use sim::trader::PaperTrader;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -53,16 +55,22 @@ fn load_universe(dir: &Path, taken_ms: i64, file: &str) -> anyhow::Result<Univer
 }
 
 /// Replay a capture directory, delivering every engine output to `sink` in order instead of
-/// collecting them, so a long replay does not have to hold millions of `Out`s in memory.
-pub fn replay_dir_with(
+/// collecting them, so a long replay does not have to hold millions of `Out`s in memory. With a
+/// paper trader (S3c) the trader starts FRESH (never from `paper_state`), so two replays of one
+/// capture produce identical paper rows; resolutions come only from `Ctl::Resolved` lines.
+pub fn replay_dir_paper_with(
     dir: &Path,
     ctx: EngineCtx,
+    paper: Option<PaperTrader>,
     mut sink: impl FnMut(Out),
 ) -> anyhow::Result<ReplayStats> {
     let mut hours = Vec::new();
     walk(dir, &mut hours)?;
     hours.sort();
     let mut engine = Engine::new(ctx);
+    if let Some(t) = paper {
+        engine.set_paper(t);
+    }
     let mut frames = 0_u64;
     let mut parse_errors = 0_u64;
     let mut last_ms = 0_i64;
@@ -121,8 +129,24 @@ pub fn replay_dir_with(
                         sink(o);
                     }
                 }
+                Some(Ctl::Resolved {
+                    market_id,
+                    payout_yes,
+                    payout_no,
+                }) => {
+                    let y = Decimal::from_str_exact(&payout_yes)
+                        .with_context(|| format!("bad payout_yes {payout_yes:?}"))?;
+                    let n = Decimal::from_str_exact(&payout_no)
+                        .with_context(|| format!("bad payout_no {payout_no:?}"))?;
+                    for o in engine.on_resolution(ms, &market_id, y, n) {
+                        sink(o);
+                    }
+                }
                 Some(Ctl::Shutdown) => {
                     for o in engine.close_all(ms) {
+                        sink(o);
+                    }
+                    for o in engine.paper_close(ms) {
                         sink(o);
                     }
                     shut_down = true;
@@ -131,14 +155,27 @@ pub fn replay_dir_with(
         }
     }
     if !shut_down {
+        // crash: close at the last captured instant
         for o in engine.close_all(last_ms) {
-            sink(o); // crash: close at the last captured instant
+            sink(o);
+        }
+        for o in engine.paper_close(last_ms) {
+            sink(o);
         }
     }
     Ok(ReplayStats {
         frames,
         parse_errors,
     })
+}
+
+/// Replay without a paper trader (the S2 scanner outputs only).
+pub fn replay_dir_with(
+    dir: &Path,
+    ctx: EngineCtx,
+    sink: impl FnMut(Out),
+) -> anyhow::Result<ReplayStats> {
+    replay_dir_paper_with(dir, ctx, None, sink)
 }
 
 pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {

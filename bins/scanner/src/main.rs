@@ -62,7 +62,10 @@ async fn real_main() -> anyhow::Result<()> {
         Cmd::Run => scanner::run::run(cfg, hash).await,
         Cmd::Census => scanner::run::census(&cfg).await,
         Cmd::Migrate => scanner::run::migrate().await,
-        Cmd::Replay { dir, dry_run } => scanner::run::replay_cmd(&cfg, &hash, &dir, dry_run).await,
+        Cmd::Replay { dir, dry_run } => {
+            let (policies, hash) = scanner::paper::with_policies(&cfg.paper, &hash)?;
+            scanner::run::replay_cmd(&cfg, &hash, &dir, dry_run, policies.as_ref()).await
+        }
         Cmd::Breaker {
             action: BreakerCmd::Reset,
         } => scanner::run::breaker_reset().await,

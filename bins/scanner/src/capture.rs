@@ -1,6 +1,6 @@
 //! Raw capture (spec §7): <dir>/YYYY-MM-DD/HH.jsonl.zst, one JSON line per engine input:
 //! frames {recv_ts_us, shard, raw} and control lines {recv_ts_us, shard, ctl} (down, universe,
-//! rest_snapshot, suspect, shutdown), so replay reproduces the live engine exactly. Universe
+//! rest_snapshot, suspect, resolved, shutdown), so replay reproduces the live engine exactly. Universe
 //! records live next to them, zstd-compressed, as universe-<taken_ms>-<seq>.json.zst (`<seq>` is
 //! a per-run counter so a warm start reusing `taken_ms` can never overwrite an earlier record).
 //! Capture never blocks the scanner: it pauses on low disk (hysteresis) and deletes hour files
@@ -45,6 +45,13 @@ pub enum Ctl {
     Suspect {
         event_id: String,
         until_ms: i64,
+    },
+    /// A market resolution the live resolver found (S3c), with the recv instant the engine got.
+    /// Payouts are exact decimal strings, like `RestSnapshot` levels.
+    Resolved {
+        market_id: String,
+        payout_yes: String,
+        payout_no: String,
     },
     Shutdown,
 }

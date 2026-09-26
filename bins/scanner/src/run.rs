@@ -5,7 +5,8 @@ use crate::config::Config;
 use crate::engine::{Engine, EngineCtx, Out, RecheckReq};
 use crate::feed::{FeedMsg, Supervisor};
 use crate::metrics::Metrics;
-use crate::replay::replay_dir_with;
+use crate::paper::{self, Policies};
+use crate::replay::replay_dir_paper_with;
 use crate::shards::{self, Plan};
 use crate::universe::{ConnMap, Universe};
 use crate::writer::{self, WriterMsg};
@@ -15,6 +16,7 @@ use pm_api::backoff::ConnectBudget;
 use pm_api::clob::ClobClient;
 use pm_api::gamma::GammaClient;
 use pm_api::ws::parse_frame;
+use sim::trader::PaperTrader;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -35,6 +37,9 @@ pub fn warm_start_usable(taken_ms: i64, now_ms: i64, max_age_ms: i64) -> bool {
 /// the `runs` exit row, the whole stop fits compose's 30 s stop_grace_period.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
 pub const END_RUN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Rows per `scanner replay` write, and per message on its bounded replay → writer channel.
+const REPLAY_CHUNK: usize = 2_000;
 
 /// Run one shutdown step, but never past `deadline` (a ready step still completes). An overrun
 /// is logged and the step abandoned.
@@ -874,16 +879,32 @@ pub async fn replay_cmd(
     cfg_hash: &str,
     dir: &Path,
     dry_run: bool,
+    policies: Option<&Policies>,
 ) -> anyhow::Result<()> {
+    // Every replay starts every account fresh with the SAME policies file (spec §11 replay).
+    let trader = || -> anyhow::Result<Option<PaperTrader>> {
+        policies
+            .map(|p| PaperTrader::new(p.sim.clone()))
+            .transpose()
+            .context("paper trader")
+    };
     if dry_run {
         let mut eps: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let stats = replay_dir_with(dir, engine_ctx(cfg, cfg_hash, 0, "replay"), |o| {
-            if let Out::Episode(w) = o {
-                eps.insert(w.row.episode_id.clone());
-            }
-        })?;
+        let mut paper_rows = 0_u64;
+        let stats = replay_dir_paper_with(
+            dir,
+            engine_ctx(cfg, cfg_hash, 0, "replay"),
+            trader()?,
+            |o| match o {
+                Out::Episode(w) => {
+                    eps.insert(w.row.episode_id.clone());
+                }
+                Out::Paper(_) => paper_rows += 1,
+                _ => {}
+            },
+        )?;
         println!(
-            "frames {} parse_errors {} episodes {}",
+            "frames {} parse_errors {} episodes {} paper_rows {paper_rows}",
             stats.frames,
             stats.parse_errors,
             eps.len()
@@ -893,28 +914,54 @@ pub async fn replay_cmd(
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
     let store = Store::connect(&url, 2).await?;
     let run_id = store.start_run(&new_run(cfg_hash, "replay")).await?;
-    let mut rows: Vec<Out> = Vec::new();
-    let stats = replay_dir_with(
-        dir,
+    if let Some(p) = policies {
+        // Pre-registration first: every other paper row references its account row.
+        store
+            .write_batch(&Batch {
+                paper_accounts: paper::account_rows(run_id, p),
+                ..Batch::default()
+            })
+            .await?;
+    }
+    // The replay runs on a blocking thread and hands full chunks to this task, which writes
+    // them as they come: at most a few chunks are ever in memory, whatever the capture's length
+    // (aba9ce5). A failed write closes the channel; the thread then finishes without sending.
+    let (tx, mut rx) = mpsc::channel::<Batch>(4);
+    let (dir_buf, ctx, t) = (
+        dir.to_path_buf(),
         engine_ctx(cfg, cfg_hash, run_id, "replay"),
-        |o| match o {
-            Out::Episode(_) | Out::Integrity(_) => rows.push(o),
-            _ => {}
-        },
-    )?;
-    let mut batch = Batch::default();
-    for o in rows {
-        match o {
-            // DEVIATION: unbox, same reason as in Io::route.
-            Out::Episode(w) => batch.episodes.push(*w),
-            Out::Integrity(i) => batch.integrity.push(i),
-            _ => {}
-        }
-        if batch.episodes.len() + batch.integrity.len() >= 2_000 {
-            store.write_batch(&std::mem::take(&mut batch)).await?;
+        trader()?,
+    );
+    let replay =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<crate::replay::ReplayStats> {
+            let mut batch = Batch::default();
+            let stats = replay_dir_paper_with(&dir_buf, ctx, t, |o| {
+                match o {
+                    // DEVIATION: unbox, same reason as in Io::route.
+                    Out::Episode(w) => batch.episodes.push(*w),
+                    Out::Integrity(i) => batch.integrity.push(i),
+                    Out::Paper(s) => paper::push_sim(run_id, *s, &mut batch),
+                    _ => return,
+                }
+                if batch.rows() >= REPLAY_CHUNK {
+                    let _ = tx.blocking_send(std::mem::take(&mut batch));
+                }
+            })?;
+            let _ = tx.blocking_send(batch);
+            Ok(stats)
+        });
+    let mut write_err = None;
+    while let Some(b) = rx.recv().await {
+        if let Err(e) = store.write_batch(&b).await {
+            write_err = Some(e);
+            break;
         }
     }
-    store.write_batch(&batch).await?;
+    drop(rx); // never leave the replay thread blocked on a full channel
+    let stats = replay.await.context("replay thread")??;
+    if let Some(e) = write_err {
+        return Err(anyhow::Error::new(e).context("write replay rows"));
+    }
     store
         .end_run(
             run_id,
