@@ -14,7 +14,7 @@ use crate::{now_ms, version};
 use anyhow::Context;
 use pm_api::backoff::ConnectBudget;
 use pm_api::clob::ClobClient;
-use pm_api::gamma::GammaClient;
+use pm_api::gamma::{GammaClient, Resolution};
 use pm_api::ws::parse_frame;
 use sim::trader::PaperTrader;
 use std::collections::HashMap;
@@ -172,7 +172,7 @@ async fn shutdown_signal() {
     }
 }
 
-pub async fn run(cfg: Config, cfg_hash: String) -> anyhow::Result<()> {
+pub async fn run(cfg: Config, cfg_hash: String, policies: Option<Policies>) -> anyhow::Result<()> {
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL (role scanner_rw) is not set")?;
     let store = Store::connect(&url, 5).await?;
     let starts = store
@@ -198,7 +198,7 @@ pub async fn run(cfg: Config, cfg_hash: String) -> anyhow::Result<()> {
         return Ok(()); // exit 0: compose `on-failure` does not restart a clean exit
     }
     let run_id = store.start_run(&new_run(&cfg_hash, "live")).await?;
-    let result = run_live(&cfg, &cfg_hash, &store, run_id).await;
+    let result = run_live(&cfg, &cfg_hash, policies.as_ref(), &store, run_id).await;
     let reason = match &result {
         Ok(()) => "shutdown".to_string(),
         Err(e) => format!("error: {e:#}"),
@@ -309,6 +309,8 @@ struct Io {
     run_id: i64,
     l1_window_ms: i64,
     suspect_window_ms: i64,
+    /// Wakes the resolver soon after a ws `market_resolved` (S3c).
+    resolve_hint: Arc<tokio::sync::Notify>,
 }
 
 impl Io {
@@ -370,7 +372,15 @@ impl Io {
                 }
                 Out::UniverseChanged => self.refresh.notify_one(),
                 Out::Lag(ms) => self.metrics.push_lag(ms),
-                Out::Paper(_) | Out::ResolvedHint => {} // routed in S3c Task 7
+                Out::Paper(o) => {
+                    let mut b = Batch::default();
+                    paper::push_sim(self.run_id, *o, &mut b);
+                    self.writer
+                        .send(WriterMsg::Paper(Box::new(b)))
+                        .await
+                        .context("writer gone")?
+                }
+                Out::ResolvedHint => self.resolve_hint.notify_one(),
                 Out::Drift {
                     token,
                     event_id,
@@ -415,7 +425,13 @@ impl Io {
     }
 }
 
-async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> anyhow::Result<()> {
+async fn run_live(
+    cfg: &Config,
+    cfg_hash: &str,
+    policies: Option<&Policies>,
+    store: &Store,
+    run_id: i64,
+) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     std::fs::create_dir_all(&cfg.capture.dir)
         .with_context(|| format!("create {}", cfg.capture.dir))?;
@@ -477,6 +493,45 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
             .context("writer gone")?;
     }
     let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
+    // Paper trader (S3c): restore the live accounts from paper_state, register this run's
+    // accounts (pre-registration, spec §11) before any other paper row, start the resolver.
+    // Replay never touches paper_state.
+    let trader = match policies {
+        Some(p) => {
+            let saved = store.load_paper_state().await?;
+            let t = paper::restore_trader(p, &saved)?;
+            let accounts = Batch {
+                paper_accounts: paper::account_rows(run_id, p),
+                ..Batch::default()
+            };
+            writer_tx
+                .send(WriterMsg::Paper(Box::new(accounts)))
+                .await
+                .context("writer gone")?;
+            Some(t)
+        }
+        None => None,
+    };
+    let (held_tx, held_rx) = watch::channel(Vec::<String>::new());
+    let (resolved_tx, mut resolved_rx) = mpsc::channel::<Resolution>(1024);
+    let resolve_hint = Arc::new(tokio::sync::Notify::new());
+    let resolver_task = if trader.is_some() {
+        let gamma = Arc::new(GammaClient::new()?);
+        Some(tokio::spawn(paper::run_resolver(
+            move |ids: Vec<String>| {
+                let g = gamma.clone();
+                async move { g.resolutions(&ids).await }
+            },
+            held_rx,
+            resolve_hint.clone(),
+            Duration::from_secs(cfg.paper.resolver_every_secs),
+            paper::RESOLVE_HINT_DELAY,
+            resolved_tx,
+        )))
+    } else {
+        drop(resolved_tx); // resolved_rx then yields None, which disables its select arm
+        None
+    };
     let clob = Arc::new(ClobClient::new()?);
     let limiter = Arc::new(Limiter::new(
         cfg.recheck.rest_per_sec,
@@ -650,8 +705,12 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
         run_id,
         l1_window_ms: cfg.engine.l1_suspect_window_ms,
         suspect_window_ms: cfg.engine.suspect_window_ms,
+        resolve_hint: resolve_hint.clone(),
     };
     let mut engine = Engine::new(engine_ctx(cfg, cfg_hash, run_id, "live"));
+    if let Some(t) = trader {
+        engine.set_paper(t);
+    }
     // Unique across runs AND within a run (F3): run ids are unique, so a warm start that reuses
     // an earlier `taken_ms` in a new process can never overwrite a previous run's record.
     let mut universe_seq: u64 = u64::try_from(run_id).unwrap_or(0).saturating_mul(1_000_000);
@@ -691,6 +750,9 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut save_tick = tokio::time::interval(Duration::from_secs(cfg.paper.state_save_every_secs));
+    save_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    save_tick.tick().await; // the first tick is immediate; a just-restored state needs no save
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut timing = FrameTiming::new(now_ms());
@@ -769,26 +831,84 @@ async fn run_live(cfg: &Config, cfg_hash: &str, store: &Store, run_id: i64) -> a
                 };
                 if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
             }
+            Some(r) = resolved_rx.recv() => {
+                // One instant for the capture line and the engine, so replay settles identically.
+                let t = now_ms();
+                io.ctl(0, Ctl::Resolved {
+                    market_id: r.market_id.clone(),
+                    payout_yes: r.payout_yes.to_string(),
+                    payout_no: r.payout_no.to_string(),
+                }, t);
+                let outs = engine.on_resolution(t, &r.market_id, r.payout_yes, r.payout_no);
+                if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
+            }
+            _ = save_tick.tick() => {
+                // Queued behind every row already routed, so it lands in the same or a later batch.
+                if let Some(st) = engine.paper_state() {
+                    match paper::state_batch(&st, now_ms()) {
+                        Ok(b) => {
+                            if writer_tx.send(WriterMsg::Paper(Box::new(b))).await.is_err() {
+                                break Err(anyhow::anyhow!("writer gone"));
+                            }
+                        }
+                        Err(e) => eprintln!("paper: state not saved: {e:#}"),
+                    }
+                }
+            }
             _ = tick.tick() => {
                 let outs = engine.tick(now_ms());
                 if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
+                let held = engine.paper_held_markets();
+                let _ = held_tx.send_if_modified(|h| {
+                    if *h == held {
+                        false
+                    } else {
+                        *h = held;
+                        true
+                    }
+                });
             }
         }
     };
 
     // Shutdown: ONE deadline for every step (SHUTDOWN_BUDGET), so the whole stop plus `run`'s
     // exit row fits compose's 30 s stop_grace_period. Order:
-    // 1. stop taking new shards/universes; 2. close every open episode; 3. flush the writer;
+    // 1. stop taking new shards/universes/resolutions; 2. close every open episode, then the
+    //    paper trader (final marks + state); 3. flush the writer;
     // 4. THEN stop everything still holding a `writer_tx` clone (the re-checker owns its tasks),
     //    so the writer's final join can return; 5. give the capture thread what time is left.
     let deadline = tokio::time::Instant::now() + SHUTDOWN_BUDGET;
     drop(plan_tx);
     supervisor_task.abort();
     refresher_task.abort();
+    // No resolution may arrive after the Shutdown line below (replay must see what live saw).
+    if let Some(r) = &resolver_task {
+        r.abort();
+    }
     let t = now_ms();
     io.ctl(0, Ctl::Shutdown, t);
     let outs = engine.close_all(t);
     let _ = by_deadline(deadline, "close episodes", io.route(&mut engine, outs)).await;
+    // Paper (S3c): drive the trader to `t`, the Ctl::Shutdown instant (work already due runs at
+    // its own time), complete pending conversions and mark every account at `t` (replay does the
+    // same after close_all on that line), then queue the account state. Both go BEFORE the flush,
+    // so the final flush commits them, inside the same deadline. `paper_close` is pure CPU (15
+    // accounts); the route and the send are the only waits, bounded like every other step.
+    let outs = engine.paper_close(t);
+    let _ = by_deadline(deadline, "close paper", io.route(&mut engine, outs)).await;
+    if let Some(st) = engine.paper_state() {
+        match paper::state_batch(&st, t) {
+            Ok(b) => {
+                let _ = by_deadline(
+                    deadline,
+                    "save paper state",
+                    writer_tx.send(WriterMsg::Paper(Box::new(b))),
+                )
+                .await;
+            }
+            Err(e) => eprintln!("paper: state not saved at shutdown: {e:#}"),
+        }
+    }
     let (done_tx, done_rx) = oneshot::channel();
     let flush = async {
         if writer_tx.send(WriterMsg::Flush(done_tx)).await.is_ok() {
@@ -1067,5 +1187,73 @@ mod tests {
         let later = tokio::time::Instant::now() + Duration::from_secs(5);
         assert!(wait_thread(&busy, later).await);
         let _ = busy.join();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn paper_rows_go_to_the_writer_and_resolution_hints_wake_the_resolver() {
+        use rust_decimal::Decimal;
+        let (writer, mut wrx) = mpsc::channel(16);
+        let (capture, _crx) = mpsc::channel(16);
+        let (recheck, _rrx) = mpsc::channel(16);
+        let (resnap, _srx) = mpsc::channel(16);
+        let io = Io {
+            writer,
+            capture,
+            recheck,
+            resnap,
+            refresh: Arc::new(tokio::sync::Notify::new()),
+            metrics: Arc::new(Metrics::default()),
+            run_id: 9,
+            l1_window_ms: 1,
+            suspect_window_ms: 1,
+            resolve_hint: Arc::new(tokio::sync::Notify::new()),
+        };
+        let mut engine = Engine::new(EngineCtx {
+            run_id: 9,
+            source: "live".into(),
+            scanner_version: "t".into(),
+            config_hash: "c".into(),
+            gap_ms: 30_000,
+            stale_lag_ms: 500,
+            suspect_window_ms: 60_000,
+            l1_suspect_window_ms: 3_600_000,
+            drift_settle_ms: 2_000,
+            issue_throttle_ms: 5_000,
+        });
+        let mark = sim::rows::AccountRow {
+            account: "P0-converter/sp-idle".into(),
+            t_ms: 60_000,
+            cash: Decimal::from(1000),
+            equity: Decimal::from(1000),
+            realized: Decimal::ZERO,
+            unrealized: Decimal::ZERO,
+            fees_paid: Decimal::ZERO,
+            locked: Decimal::ZERO,
+            max_drawdown: Decimal::ZERO,
+            n_positions: 0,
+        };
+        io.route(
+            &mut engine,
+            vec![
+                Out::Paper(Box::new(sim::rows::SimOut::Account(mark))),
+                Out::ResolvedHint,
+            ],
+        )
+        .await
+        .unwrap();
+        match wrx.recv().await {
+            Some(WriterMsg::Paper(b)) => {
+                assert_eq!(b.paper_marks.len(), 1);
+                assert_eq!(
+                    (b.paper_marks[0].run_id, b.paper_marks[0].t_ms),
+                    (9, 60_000)
+                );
+            }
+            other => panic!("expected paper rows, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(1), io.resolve_hint.notified())
+            .await
+            .expect("the hint is stored as a permit for the resolver");
     }
 }

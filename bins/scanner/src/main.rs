@@ -59,7 +59,10 @@ async fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let (cfg, hash) = Config::load(&cli.config)?;
     match cli.cmd {
-        Cmd::Run => scanner::run::run(cfg, hash).await,
+        Cmd::Run => {
+            let (policies, hash) = scanner::paper::with_policies(&cfg.paper, &hash)?;
+            scanner::run::run(cfg, hash, policies).await
+        }
         Cmd::Census => scanner::run::census(&cfg).await,
         Cmd::Migrate => scanner::run::migrate().await,
         Cmd::Replay { dir, dry_run } => {
