@@ -8,6 +8,8 @@ pub mod episodes;
 pub mod error;
 pub mod guard;
 pub mod health;
+pub mod integrity;
+pub mod paper;
 pub mod params;
 
 use axum::Router;
@@ -80,6 +82,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/episodes", get(episodes::list))
         .route("/api/episodes/{id}", get(episodes::detail))
         .route("/api/today", get(episodes::today))
+        .route("/api/integrity/summary", get(integrity::summary))
+        .route("/api/paper/accounts", get(paper::accounts))
+        .route("/api/paper/equity", get(paper::equity))
+        .route("/api/paper/positions", get(paper::positions))
+        .route("/api/paper/ledger", get(paper::ledger))
         .method_not_allowed_fallback(error::method_not_allowed)
         .fallback(error::not_found)
         .with_state(state)
