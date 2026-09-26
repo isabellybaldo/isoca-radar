@@ -7,6 +7,34 @@ Project disk budget: **30 GB**. Run `sh scripts/disk-budget.sh` (VPS) or
 `powershell -ExecutionPolicy Bypass -File scripts\disk-budget.ps1` (PC) before step 1 and after
 step 3.
 
+## Notes before comparing runs (S3c fix round 2, ruling 26)
+
+- **`capture_drops > 0` voids a live-vs-replay ledger comparison.** A dropped capture line can be
+  a dropped `Ctl::Resolved`, which is a lost settlement in replay: the two ledgers then diverge for
+  a reason that has nothing to do with a bug. Check
+  `select coalesce(sum(drops), 0) from health where run_id = <LIVE>` (and any `capture_drop`
+  integrity rows) before trusting a mismatch either way. Replay-vs-replay (step 1) is unaffected:
+  it replays the same capture file twice.
+- **Live-vs-replay ledgers match only for a run started from fresh accounts.** A scanner restart
+  restores `paper_state`, and a restart also forgets consumed liquidity (S3c fix round 1: consumed
+  liquidity is in-memory only, never persisted), so a restored trader can re-take liquidity it had
+  already consumed before the restart. Compare live against replay only across a stretch with no
+  restart in the middle, or reset `paper_state` first.
+- **Changing anything in `policies.toml` starts every account fresh on the next restart**, not
+  just the account whose own settings moved: the whole file's sha256 is recorded with every save,
+  and any change to it (a scenario's `net_ms`/`match_ms`/burst, `[p1]` thresholds,
+  `min_order_shares`, `settle_delay_ms`, markout offsets, an account's `bankroll`/`per_trade`/...)
+  is a new pre-registered experiment. The scanner logs it once at startup:
+  `paper: policies changed (saved <old|none> != current <new>); all accounts start fresh`. Seeing
+  that line is expected right after any policies edit; NOT seeing it when you expected a fresh
+  start is the bug to chase.
+- **Before the first evaluation run, verify `umaResolutionStatus` against a live response.** Fetch
+  one resolved NegRisk market from `gamma-api.polymarket.com/markets` and confirm that field name
+  is exactly right (spec ruling 5: it is unverified against a live payload). A 50-50 (voided leg)
+  market is accepted only when its payout vector is fractional AND that status reads `resolved`;
+  if the field name is wrong, every 50-50 market silently never settles. Print no secrets when you
+  do this — it's a public, unauthenticated endpoint.
+
 ## 0. Image and schema
 
 The image must contain S3c, including `/etc/cute-trading/policies.toml`. Rebuild it once (it costs

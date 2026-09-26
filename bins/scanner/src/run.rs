@@ -844,8 +844,8 @@ async fn run_live(
             }
             _ = save_tick.tick() => {
                 // Queued behind every row already routed, so it lands in the same or a later batch.
-                if let Some(st) = engine.paper_state() {
-                    match paper::state_batch(&st, now_ms()) {
+                if let (Some(st), Some(p)) = (engine.paper_state(), policies) {
+                    match paper::state_batch(&st, now_ms(), &p.sha256) {
                         Ok(b) => {
                             if writer_tx.send(WriterMsg::Paper(Box::new(b))).await.is_err() {
                                 break Err(anyhow::anyhow!("writer gone"));
@@ -895,16 +895,21 @@ async fn run_live(
     // so the final flush commits them, inside the same deadline. `paper_close` is pure CPU (15
     // accounts); the route and the send are the only waits, bounded like every other step.
     let outs = engine.paper_close(t);
-    let _ = by_deadline(deadline, "close paper", io.route(&mut engine, outs)).await;
-    if let Some(st) = engine.paper_state() {
-        match paper::state_batch(&st, t) {
+    if let Some(Err(_)) = by_deadline(deadline, "close paper", io.route(&mut engine, outs)).await {
+        eprintln!("paper: close not routed at shutdown: writer gone");
+    }
+    if let (Some(st), Some(p)) = (engine.paper_state(), policies) {
+        match paper::state_batch(&st, t, &p.sha256) {
             Ok(b) => {
-                let _ = by_deadline(
+                if let Some(Err(_)) = by_deadline(
                     deadline,
                     "save paper state",
                     writer_tx.send(WriterMsg::Paper(Box::new(b))),
                 )
-                .await;
+                .await
+                {
+                    eprintln!("paper: state not saved at shutdown: writer gone");
+                }
             }
             Err(e) => eprintln!("paper: state not saved at shutdown: {e:#}"),
         }

@@ -293,6 +293,9 @@ pub struct PaperStateRow {
     pub account_id: String,
     pub state: String,
     pub updated_ms: i64,
+    /// The policies sha256 this account was saved under (migration 0005, ruling 26). `NULL` for a
+    /// row saved before this column existed: a restore treats that as a mismatch, never a match.
+    pub policies_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

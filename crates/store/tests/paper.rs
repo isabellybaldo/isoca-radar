@@ -195,6 +195,7 @@ async fn paper_state_keeps_the_newest_save_per_account() {
         account_id: id.into(),
         state: body.into(),
         updated_ms: ms,
+        policies_sha256: Some("ab".repeat(32)),
     };
     store
         .write_batch(&Batch {
@@ -222,6 +223,74 @@ async fn paper_state_keeps_the_newest_save_per_account() {
     assert_eq!(
         store.load_paper_state().await.unwrap(),
         vec![st("a", "{\"v\":2}", 2), st("b", "{\"v\":3}", 3)]
+    );
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn paper_state_round_trips_the_policies_sha256_and_a_pre_migration_row_is_null() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let sha = "cd".repeat(32);
+    store
+        .write_batch(&Batch {
+            paper_state: vec![
+                PaperStateRow {
+                    account_id: "a".into(),
+                    state: "{}".into(),
+                    updated_ms: 1,
+                    policies_sha256: Some(sha.clone()),
+                },
+                PaperStateRow {
+                    account_id: "b".into(),
+                    state: "{}".into(),
+                    updated_ms: 1,
+                    policies_sha256: None,
+                },
+            ],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let rows = store.load_paper_state().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.account_id == "a")
+            .unwrap()
+            .policies_sha256,
+        Some(sha),
+        "the sha it was saved under round-trips exactly"
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.account_id == "b")
+            .unwrap()
+            .policies_sha256,
+        None,
+        "a row saved before this column existed reads back NULL, never a fabricated match"
+    );
+    // a rewrite under a new sha updates the recorded sha (still guarded by updated_ms)
+    let sha2 = "ef".repeat(32);
+    store
+        .write_batch(&Batch {
+            paper_state: vec![PaperStateRow {
+                account_id: "a".into(),
+                state: "{}".into(),
+                updated_ms: 2,
+                policies_sha256: Some(sha2.clone()),
+            }],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let rows = store.load_paper_state().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.account_id == "a")
+            .unwrap()
+            .policies_sha256,
+        Some(sha2)
     );
     db.drop(store).await;
 }

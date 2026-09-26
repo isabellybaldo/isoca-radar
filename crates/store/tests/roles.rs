@@ -203,6 +203,7 @@ async fn scanner_appends_paper_rows_and_upserts_state_but_analyze_only_reads() {
         account_id: "P0-converter/sp-idle".into(),
         state: format!("{{\"saved\":{ms}}}"),
         updated_ms: ms,
+        policies_sha256: Some("ab".repeat(32)),
     };
     scanner
         .write_batch(&Batch {

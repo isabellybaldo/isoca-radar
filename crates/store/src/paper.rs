@@ -177,16 +177,18 @@ pub(crate) async fn write_paper(conn: &mut PgConnection, b: &Batch) -> Result<()
     }
     for chunk in dedupe_last_state(&b.paper_state).chunks(CHUNK) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO paper_state (account_id, state, updated_ms) ",
+            "INSERT INTO paper_state (account_id, state, updated_ms, policies_sha256) ",
         );
         qb.push_values(chunk, |mut s, r| {
             s.push_bind(clean(&r.account_id))
                 .push_bind(clean(&r.state))
-                .push_bind(r.updated_ms);
+                .push_bind(r.updated_ms)
+                .push_bind(clean_opt(&r.policies_sha256));
         });
         // A restored (older) batch must never overwrite a newer save.
         qb.push(
-            " ON CONFLICT (account_id) DO UPDATE SET state = EXCLUDED.state, updated_ms = EXCLUDED.updated_ms \
+            " ON CONFLICT (account_id) DO UPDATE SET state = EXCLUDED.state, updated_ms = EXCLUDED.updated_ms, \
+             policies_sha256 = EXCLUDED.policies_sha256 \
              WHERE paper_state.updated_ms <= EXCLUDED.updated_ms",
         );
         qb.build().execute(&mut *conn).await?;
@@ -221,7 +223,7 @@ impl Store {
     /// The live accounts saved by the last run (replay never calls this).
     pub async fn load_paper_state(&self) -> Result<Vec<PaperStateRow>, StoreError> {
         Ok(sqlx::query_as::<_, PaperStateRow>(
-            "SELECT account_id, state, updated_ms FROM paper_state ORDER BY account_id",
+            "SELECT account_id, state, updated_ms, policies_sha256 FROM paper_state ORDER BY account_id",
         )
         .fetch_all(self.pool())
         .await?)

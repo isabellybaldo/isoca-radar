@@ -190,8 +190,14 @@ pub fn push_sim(run_id: i64, o: SimOut, b: &mut Batch) {
     }
 }
 
-/// The live accounts as `paper_state` rows (exact JSON: decimals serialize as strings).
-pub fn state_batch(st: &TraderState, updated_ms: i64) -> anyhow::Result<Batch> {
+/// The live accounts as `paper_state` rows (exact JSON: decimals serialize as strings). Every save
+/// carries the current policies sha256, so a restore can tell a genuine restart from a
+/// policies.toml edit (ruling 26).
+pub fn state_batch(
+    st: &TraderState,
+    updated_ms: i64,
+    policies_sha256: &str,
+) -> anyhow::Result<Batch> {
     let paper_state = st
         .accounts
         .iter()
@@ -200,6 +206,7 @@ pub fn state_batch(st: &TraderState, updated_ms: i64) -> anyhow::Result<Batch> {
                 account_id: a.id.clone(),
                 state: serde_json::to_string(a).context("serialize paper account")?,
                 updated_ms,
+                policies_sha256: Some(policies_sha256.to_string()),
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -209,11 +216,34 @@ pub fn state_batch(st: &TraderState, updated_ms: i64) -> anyhow::Result<Batch> {
     })
 }
 
-/// Rebuild the live trader from `paper_state`. A saved account whose spec differs from the
-/// policies file (same id, e.g. a new per_trade) is a different pre-registered experiment: it
-/// starts fresh. `PaperTrader::restore` (S3b) already does that on its own; filtering here only
-/// adds the log line. A row that isn't a saved account is an error, never a silent reset.
+/// Rebuild the live trader from `paper_state`. Ruling 26: the policies sha gates the whole
+/// restore, not just each account's spec. Any change anywhere in policies.toml (a scenario's
+/// net_ms/match_ms/burst, `[p1]` thresholds, min_order_shares, settle_delay_ms, markout offsets,
+/// ...) changes the sha over the per-account AccountSpec check alone would miss, so a NULL or
+/// mismatched sha on ANY loaded row starts every account fresh under the new sha, logged once.
+/// Only when every row's sha matches does the narrower per-account check run: a saved account
+/// whose spec differs from the policies file (same id, e.g. a new per_trade) is a different
+/// pre-registered experiment and starts fresh on its own. `PaperTrader::restore` (S3b) already
+/// does that; filtering here only adds the log line. A row that isn't a saved account is an
+/// error, never a silent reset.
 pub fn restore_trader(p: &Policies, rows: &[PaperStateRow]) -> anyhow::Result<PaperTrader> {
+    if let Some(old) = rows
+        .iter()
+        .find(|r| r.policies_sha256.as_deref() != Some(p.sha256.as_str()))
+    {
+        eprintln!(
+            "paper: policies changed (saved {} != current {}); all accounts start fresh",
+            old.policies_sha256.as_deref().unwrap_or("none"),
+            p.sha256
+        );
+        return PaperTrader::restore(
+            p.sim.clone(),
+            TraderState {
+                accounts: Vec::new(),
+            },
+        )
+        .context("restore paper trader");
+    }
     let mut accounts = Vec::new();
     for r in rows {
         let a: Account = serde_json::from_str(&r.state)
@@ -230,9 +260,45 @@ pub fn restore_trader(p: &Policies, rows: &[PaperStateRow]) -> anyhow::Result<Pa
     PaperTrader::restore(p.sim.clone(), TraderState { accounts }).context("restore paper trader")
 }
 
+/// One poll: ask `fetch` about the currently-held markets and forward each resolution found.
+/// Nothing held → no call, not an error (an empty `held` watch at startup, before the first
+/// `tick`, is a normal no-op). Returns `false` when `out` is gone (the caller should stop).
+async fn poll_once<F, Fut>(
+    fetch: &mut F,
+    held: &watch::Receiver<Vec<String>>,
+    out: &mpsc::Sender<Resolution>,
+) -> bool
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<Vec<Resolution>, pm_api::ApiError>>,
+{
+    let markets = held.borrow().clone();
+    if markets.is_empty() {
+        return true;
+    }
+    match fetch(markets).await {
+        Ok(found) => {
+            for r in found {
+                if out.send(r).await.is_err() {
+                    return false;
+                }
+            }
+        }
+        Err(e) => eprintln!("resolver: {e}"),
+    }
+    true
+}
+
 /// Live resolver: every `every`, and `hint_delay` after each ws hint, ask `fetch` about the
 /// markets the trader holds and forward each resolution found. The engine loop captures it as
 /// `Ctl::Resolved` BEFORE applying it, so replay settles identically. Nothing held → no call.
+///
+/// Polls once immediately at startup, before waiting on `every` (S3c fix round 2): a position
+/// restored from `paper_state` in a market that resolved during downtime then settles right away
+/// instead of waiting up to `every`. After that it keeps the normal interval. The first poll with
+/// an empty `held` watch is a no-op like every other poll, never an error, and this never spins:
+/// the immediate poll runs exactly once, then every later poll is gated by the same
+/// sleep/hint-notify select as before.
 pub async fn run_resolver<F, Fut>(
     mut fetch: F,
     held: watch::Receiver<Vec<String>>,
@@ -244,24 +310,16 @@ pub async fn run_resolver<F, Fut>(
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<Vec<Resolution>, pm_api::ApiError>>,
 {
+    if !poll_once(&mut fetch, &held, &out).await {
+        return;
+    }
     loop {
         tokio::select! {
             _ = tokio::time::sleep(every) => {}
             _ = hint.notified() => { tokio::time::sleep(hint_delay).await; }
         }
-        let markets = held.borrow().clone();
-        if markets.is_empty() {
-            continue;
-        }
-        match fetch(markets).await {
-            Ok(found) => {
-                for r in found {
-                    if out.send(r).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            Err(e) => eprintln!("resolver: {e}"),
+        if !poll_once(&mut fetch, &held, &out).await {
+            return;
         }
     }
 }
@@ -415,33 +473,94 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_saved_account_whose_spec_changed_starts_fresh() {
-        let p = parse_policies(POLICIES).unwrap();
+    fn saved_rows(p: &Policies) -> Vec<store::PaperStateRow> {
         let mut st = PaperTrader::new(p.sim.clone()).unwrap().state();
         st.accounts[0].cash = d("900");
         st.accounts[1].cash = d("800");
-        let rows = state_batch(&st, 5).unwrap().paper_state;
+        let rows = state_batch(&st, 5, &p.sha256).unwrap().paper_state;
         assert_eq!(rows.len(), st.accounts.len());
-        assert!(rows.iter().all(|r| r.updated_ms == 5));
+        assert!(
+            rows.iter()
+                .all(|r| r.updated_ms == 5
+                    && r.policies_sha256.as_deref() == Some(p.sha256.as_str()))
+        );
+        rows
+    }
+
+    #[test]
+    fn a_matching_sha_restores_the_saved_accounts() {
+        let p = parse_policies(POLICIES).unwrap();
+        let rows = saved_rows(&p);
         let same = restore_trader(&p, &rows).unwrap();
         assert_eq!(
             (same.accounts()[0].cash, same.accounts()[1].cash),
             (d("900"), d("800"))
         );
-        // the first account's per_trade changed: a different pre-registered experiment
-        let changed =
-            parse_policies(&POLICIES.replacen("per_trade = \"100\"", "per_trade = \"50\"", 1))
-                .unwrap();
+    }
+
+    #[test]
+    fn a_matching_sha_with_one_changed_spec_leaves_only_that_account_fresh() {
+        let p = parse_policies(POLICIES).unwrap();
+        let rows = saved_rows(&p);
+        // The sha still matches (a real policies.toml edit would also change it; this simulates,
+        // at the unit level, the narrower per-account guard ruling 26 keeps for when the sha
+        // matches), but account 0's spec no longer matches what was saved: a different
+        // pre-registered experiment starts fresh on its own, account 1 is untouched.
+        let mut changed = p.clone();
+        changed.sim.accounts[0].per_trade = d("50");
         let t = restore_trader(&changed, &rows).unwrap();
         assert_eq!(
             (t.accounts()[0].cash, t.accounts()[1].cash),
             (d("1000"), d("800"))
         );
+    }
+
+    #[test]
+    fn a_policies_sha_mismatch_starts_every_account_fresh() {
+        let p = parse_policies(POLICIES).unwrap();
+        let rows = saved_rows(&p);
+        // Every AccountSpec is untouched: only a [p1] threshold changed. Ruling 26: the old
+        // per-account-only check would have restored both accounts' cash under the new sha; it
+        // must not.
+        let changed = parse_policies(&POLICIES.replacen(
+            "min_annualized = \"0.10\"",
+            "min_annualized = \"0.20\"",
+            1,
+        ))
+        .unwrap();
+        assert_ne!(changed.sha256, p.sha256);
+        assert_eq!(
+            changed.sim.accounts, p.sim.accounts,
+            "no AccountSpec changed"
+        );
+        let fresh = restore_trader(&changed, &rows).unwrap();
+        assert_eq!(
+            (fresh.accounts()[0].cash, fresh.accounts()[1].cash),
+            (d("1000"), d("1000")),
+            "a policies change anywhere starts every account fresh, not just the one whose spec moved"
+        );
+    }
+
+    #[test]
+    fn a_null_sha_on_any_row_starts_every_account_fresh() {
+        let p = parse_policies(POLICIES).unwrap();
+        let mut rows = saved_rows(&p);
+        rows[0].policies_sha256 = None; // e.g. a row saved before migration 0005
+        let fresh = restore_trader(&p, &rows).unwrap();
+        assert_eq!(
+            (fresh.accounts()[0].cash, fresh.accounts()[1].cash),
+            (d("1000"), d("1000"))
+        );
+    }
+
+    #[test]
+    fn a_corrupt_save_is_loud_never_a_silent_reset() {
+        let p = parse_policies(POLICIES).unwrap();
         let bad = vec![store::PaperStateRow {
             account_id: "x".into(),
             state: "{not json".into(),
             updated_ms: 1,
+            policies_sha256: Some(p.sha256.clone()),
         }];
         assert!(
             restore_trader(&p, &bad).is_err(),
