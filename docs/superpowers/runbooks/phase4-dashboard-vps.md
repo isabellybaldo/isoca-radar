@@ -1,5 +1,11 @@
 # Phase 4 dashboard on the VPS (radar.isoca.space)
 
+**Name:** the project is called **isoca-radar** (GitHub repo `isabellybaldo/isoca-radar`, page title,
+OAuth App). Internal identifiers keep the old name on purpose, because renaming them would move
+data: the compose project `cute-trading` (volumes `cute-trading_data` / `cute-trading_pgdata`), the
+database `cute_trading`, the image tags `cute-trading/*:dev`, `/etc/cute-trading/`, and the folders
+on the PC and the VPS.
+
 A private dashboard over the scanner's Postgres, behind a GitHub login (only `isabellybaldo`).
 Read-only (api as `analyze_ro`), paper only, no GitHub secrets. Three containers join the existing
 compose project: `api`, `web`, `oauth2-proxy` (profile `web`, file `compose.web.yml`).
@@ -17,7 +23,7 @@ Expect `31.97.23.123`. ACME (HTTP-01) needs this before the first start.
 ## 1. Once: the GitHub OAuth App
 
 github.com → Settings → Developer settings → OAuth Apps → **New OAuth App**:
-- Application name: `cute-trading radar`
+- Application name: `isoca-radar`
 - Homepage URL: `https://radar.isoca.space`
 - Authorization callback URL: `https://radar.isoca.space/oauth2/callback`
 

@@ -20,7 +20,7 @@ export function Header() {
   const { state } = useStream();
   return (
     <header className="top">
-      <span className="logo">♥ cute-trading</span>
+      <span className="logo">♥ isoca-radar</span>
       <nav className="nav" aria-label="main">
         {NAV.map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => (isActive ? 'on' : undefined)}>

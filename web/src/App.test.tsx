@@ -16,7 +16,7 @@ describe('App shell', () => {
         <App />
       </MemoryRouter>,
     );
-    expect(screen.getByText('♥ cute-trading')).toBeInTheDocument();
+    expect(screen.getByText('♥ isoca-radar')).toBeInTheDocument();
     for (const name of ['RADAR', 'EPISODES', 'PAPER', 'HEALTH']) {
       expect(screen.getByRole('link', { name })).toBeInTheDocument();
     }

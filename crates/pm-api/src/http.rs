@@ -9,7 +9,7 @@ pub(crate) fn http_client() -> Result<reqwest::Client, ApiError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .https_only(true)
-        .user_agent("cute-trading-research/0.1 (read-only)")
+        .user_agent("isoca-radar-research/0.1 (read-only)")
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .build()
