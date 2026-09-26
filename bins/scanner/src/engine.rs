@@ -7,10 +7,15 @@ use arb_core::detect::{
     no_basket_may_signal, yes_basket_may_signal,
 };
 use arb_core::episode::{Censor, EpisodeEvent, EpisodeTracker};
-use arb_core::fill::{BasketRule, BuyLeg, walk};
+use arb_core::fill::{BasketQuote, BasketRule, BuyLeg, walk};
 use arb_core::money::{Price, Shares};
+use arb_core::stats::{annualized, days_to_end, parse_rfc3339_ms};
 use pm_api::ws::MarketEvent;
 use rust_decimal::Decimal;
+use sim::policy::{LegInfo, OpenCtx};
+use sim::rows::SimOut;
+use sim::trader::{Books, PaperTrader, TraderState};
+use sim::types::BookSide;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use store::{EpisodeLegRow, EpisodeRow, EpisodeWrite, IntegrityRow};
@@ -75,6 +80,10 @@ pub enum Out {
         event_id: Option<String>,
         detail: String,
     },
+    /// A paper-trader row (S3c), boxed like `Episode` to keep `Out` small.
+    Paper(Box<SimOut>),
+    /// A ws `market_resolved` arrived: the live resolver should ask Gamma soon.
+    ResolvedHint,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,6 +117,8 @@ struct OpenEp {
     n_updates: i32,
     /// From `EpisodeTracker::open_censor` at open time (spec censor_left).
     censor_left: bool,
+    /// Latest endDate over the group's live legs at open (spec §5.5 lock-up estimate).
+    end_ms: Option<i64>,
     peak: Snap,
 }
 
@@ -183,6 +194,12 @@ pub struct Engine {
     /// (`String: Borrow<str>`) instead of allocating one on every call; only a miss allocates,
     /// to insert the token's own key.
     issue_throttle: HashMap<&'static str, HashMap<String, IssueThrottle>>,
+    /// The paper trader (S3c), fed by the S3b call contract. None = scanner only.
+    paper: Option<PaperTrader>,
+    /// The latest input instant the trader has been driven to: frame receive times, and the
+    /// instants of `on_resolution` and `paper_close` (all inputs, so replay sees the same). The
+    /// paper trader's open clock never runs behind it (see `open_ctx`).
+    last_recv_ms: i64,
     /// Spec §5.4/§8.2: skip a detector's depth walk when its top-of-book gate is false and no
     /// episode is open for its key (S3a-2). Always on in live and replay. Tests and the bench turn
     /// it off to prove the outputs are identical.
@@ -238,6 +255,54 @@ fn leg_fee(leg: &BuyLeg, filled: Decimal) -> Decimal {
     fee
 }
 
+/// The engine's YES books seen through `sim::trader::Books`. The fields are borrowed one by one,
+/// so the trader (another field of the engine) can read them with no clone.
+struct EngineBooks<'a> {
+    token_ix: &'a HashMap<String, (usize, usize)>,
+    groups: &'a [Group],
+}
+
+impl Books for EngineBooks<'_> {
+    fn yes_book(&self, yes_token: &str) -> Option<&Book> {
+        let &(g, l) = self.token_ix.get(yes_token)?;
+        self.groups.get(g)?.legs.get(l).map(|leg| &leg.book)
+    }
+}
+
+fn paper_outs(v: Vec<SimOut>, out: &mut Vec<Out>) {
+    out.extend(v.into_iter().map(|o| Out::Paper(Box::new(o))));
+}
+
+/// Spec §5.5's secondary figure for a quote: (1 + Π/cost)^(365/max(days, 7)) − 1 (no cost → None).
+fn lockup_annualized(q: &BasketQuote, days: Decimal) -> Option<Decimal> {
+    if q.cost <= Decimal::ZERO {
+        return None;
+    }
+    annualized(q.pnl.checked_div(q.cost)?, days)
+}
+
+/// The levels present before a `Book::trim_to_top` and absent from `now` (a trim only removes),
+/// as (side, price): each is a removal the paper trader's consumed-liquidity ledger must see.
+fn gone_levels(
+    bids_before: &[(Price, Shares)],
+    asks_before: &[(Price, Shares)],
+    now: &Book,
+) -> Vec<(BookSide, Decimal)> {
+    let (bids_now, asks_now) = (now.bids_best_first(), now.asks_best_first());
+    let mut gone = Vec::new();
+    for (side, before, after) in [
+        (BookSide::Bid, bids_before, &bids_now),
+        (BookSide::Ask, asks_before, &asks_now),
+    ] {
+        for (p, _) in before {
+            if !after.iter().any(|(q, _)| q == p) {
+                gone.push((side, p.get()));
+            }
+        }
+    }
+    gone
+}
+
 impl Engine {
     pub fn new(ctx: EngineCtx) -> Engine {
         let gap_ms = ctx.gap_ms;
@@ -264,6 +329,8 @@ impl Engine {
             group_last_ts: Vec::new(),
             held_closed: Vec::new(),
             issue_throttle: HashMap::new(),
+            paper: None,
+            last_recv_ms: i64::MIN,
             threshold_gate: true,
             detector_calls: 0,
         }
@@ -668,6 +735,16 @@ impl Engine {
         // describes the FINAL top, so checking right after one item flags in-between states that
         // never existed (live smoke 2026-09-25). See `resolve_pending`.
         let mut frame_tokens: Vec<String> = Vec::new();
+        self.last_recv_ms = self.last_recv_ms.max(recv_ms);
+        // S3b call contract: work due at or before this frame runs on the books as they were
+        // just BEFORE it (the state at its due time).
+        if let Some(t) = self.paper.as_mut() {
+            let books = EngineBooks {
+                token_ix: &self.token_ix,
+                groups: &self.groups,
+            };
+            paper_outs(t.on_frame(recv_ms, &books), &mut out);
+        }
         for ev in events {
             match ev {
                 MarketEvent::Snapshot {
@@ -683,6 +760,11 @@ impl Engine {
                         self.pending_remove(token); // a snapshot supersedes earlier deltas' tops
                         if !frame_tokens.iter().any(|t| t == token) {
                             frame_tokens.push(token.clone());
+                        }
+                        if let (Some(t), Some(&(g, l))) =
+                            (self.paper.as_mut(), self.token_ix.get(token.as_str()))
+                        {
+                            t.on_snapshot(token, &self.groups[g].legs[l].book);
                         }
                     }
                 }
@@ -730,14 +812,22 @@ impl Engine {
                             },
                         );
                     }
+                    if found
+                        && let Some(t) = self.paper.as_mut()
+                        && self.token_ix.contains_key(token.as_str())
+                    {
+                        t.on_level(token, BookSide::from_core(side), price.get(), size.get());
+                    }
                 }
                 MarketEvent::LastTrade { server_ts_ms, .. }
                 | MarketEvent::TickSize { server_ts_ms, .. } => {
                     bump(&mut frame_ts, *server_ts_ms);
                 }
-                MarketEvent::Resolved { .. } | MarketEvent::NewMarket { .. } => {
-                    out.push(Out::UniverseChanged)
+                MarketEvent::Resolved { .. } => {
+                    out.push(Out::UniverseChanged);
+                    out.push(Out::ResolvedHint);
                 }
+                MarketEvent::NewMarket { .. } => out.push(Out::UniverseChanged),
                 MarketEvent::Other { .. } => {}
             }
         }
@@ -879,6 +969,16 @@ impl Engine {
             // trim is unconditional: a phantom level must never be priced, whether or not it's
             // the ONLY thing wrong with the book.
             let (sb, sa) = server.unwrap_or((None, None));
+            // S3c: a trimmed level is a removal the paper trader's consumed-liquidity ledger must
+            // see, exactly like a size-0 delta. Remember the levels before the trim: group legs
+            // only, only when a trader is attached, and only on a top mismatch (one book's levels,
+            // never a scan of the universe).
+            let before = match (group, self.paper.is_some()) {
+                (Some(_), true) => self
+                    .book_of(token)
+                    .map(|b| (b.bids_best_first(), b.asks_best_first())),
+                _ => None,
+            };
             let mut changed = false;
             let repaired = self.book_mut(token).is_some_and(|b| {
                 changed = b.trim_to_top(sb, sa);
@@ -886,6 +986,17 @@ impl Engine {
                 (sb.is_none() || sb == t.best_bid.map(|(x, _)| x))
                     && (sa.is_none() || sa == t.best_ask.map(|(x, _)| x))
             });
+            if changed && let Some((bids, asks)) = before {
+                let gone = self
+                    .book_of(token)
+                    .map(|b| gone_levels(&bids, &asks, b))
+                    .unwrap_or_default();
+                if let Some(t) = self.paper.as_mut() {
+                    for (side, price) in gone {
+                        t.on_level(token, side, price, Decimal::ZERO);
+                    }
+                }
+            }
             if repaired {
                 detail.push_str(" → repaired from stream");
             }
@@ -1015,9 +1126,9 @@ impl Engine {
         }
     }
 
-    fn snap(&self, at: At, s: &Signal) -> Snap {
-        let legs: Vec<BuyLeg> = s
-            .legs_used
+    /// The bought outcome's ask levels per used leg: YES asks, or NO asks (= 1 − YES bids, L1).
+    fn buy_legs(&self, at: At, s: &Signal) -> Vec<BuyLeg> {
+        s.legs_used
             .iter()
             .map(|&i| {
                 let leg = &self.groups[at.g].legs[i];
@@ -1029,7 +1140,11 @@ impl Engine {
                     fee: leg.fee,
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    fn snap(&self, at: At, s: &Signal) -> Snap {
+        let legs = self.buy_legs(at, s);
         let rule = match at.det {
             Det::Yes => BasketRule::AllLegs {
                 payoff: Decimal::ONE,
@@ -1059,6 +1174,47 @@ impl Engine {
         }
     }
 
+    /// The latest endDate over the group's live legs (spec §5.5: an estimate of lock-up).
+    fn group_end_ms(&self, g: usize) -> Option<i64> {
+        self.universe
+            .groups
+            .get(g)?
+            .legs
+            .iter()
+            .filter(|l| l.status == Status::Live)
+            .filter_map(|l| l.end_date.as_deref().and_then(parse_rfc3339_ms))
+            .max()
+    }
+
+    /// Everything a policy may look at when this episode opens (S3b `OpenCtx`).
+    fn open_ctx(&self, ep: &OpenEp, at: At, s: &Signal) -> OpenCtx {
+        let meta = &self.universe.groups[at.g];
+        let days = ep.end_ms.map(|e| days_to_end(e, at.ts));
+        OpenCtx {
+            episode_id: ep.episode_id.clone(),
+            event_id: meta.event_id.clone(),
+            // A frame (or a deferred check it settled) passes its own recv; `rest_snapshot`
+            // passes the REST book's SERVER ts, which can be far behind. Never start the paper
+            // clock before the latest instant the trader was driven to (rulings 15, 24).
+            r_open_ms: at.recv_ms.max(self.last_recv_ms),
+            signal: s.clone(),
+            legs: meta
+                .legs
+                .iter()
+                .map(|l| LegInfo {
+                    market_id: l.market_id.clone(),
+                    yes_token: l.yes_token.clone(),
+                    fee: l.fee(),
+                    seconds_delay: l.seconds_delay,
+                })
+                .collect(),
+            open_levels: self.buy_legs(at, s).into_iter().map(|l| l.levels).collect(),
+            days_to_end: days,
+            annualized: days.and_then(|d| lockup_annualized(&s.quote, d)),
+            pair_approved: false,
+        }
+    }
+
     fn open_episode(&mut self, id: u64, key: &str, at: At, s: &Signal, out: &mut Vec<Out>) {
         let lag = at.recv_ms - at.ts;
         // The tracker has already inserted the open episode by the time it returns the Open
@@ -1075,6 +1231,7 @@ impl Engine {
             suspect: self.suspect_until[at.g] > at.ts,
             n_updates: 1,
             censor_left,
+            end_ms: self.group_end_ms(at.g),
             peak: self.snap(at, s),
         };
         out.push(Out::Episode(Box::new(self.row(&ep, None))));
@@ -1085,6 +1242,12 @@ impl Engine {
             opened_ms: at.ts,
             q_max: s.quote.q_max,
         }));
+        if self.paper.is_some() {
+            let ctx = self.open_ctx(&ep, at, s);
+            if let Some(t) = self.paper.as_mut() {
+                paper_outs(t.on_open(&ctx), out);
+            }
+        }
         self.open_by_key.insert(key.to_string(), id);
         self.open.insert(id, ep);
     }
@@ -1124,6 +1287,7 @@ impl Engine {
         let meta = &self.universe.groups[ep.group];
         let s = &ep.peak.signal;
         let q = &s.quote;
+        let days = ep.end_ms.map(|e| days_to_end(e, ep.opened_ms));
         let used = &s.legs_used;
         let live = meta
             .legs
@@ -1198,9 +1362,9 @@ impl Engine {
                 .iter()
                 .filter_map(|&i| meta.legs.get(i).and_then(|l| l.seconds_delay))
                 .max(),
-            days_to_end: None,
-            annualized_return: None,
-            post_end: None,
+            days_to_end: days,
+            annualized_return: days.and_then(|d| lockup_annualized(q, d)),
+            post_end: days.map(|d| d < Decimal::ZERO),
             engine_suspect: ep.suspect,
             stale_transport: ep.stale,
             open_lag_ms: Some(ep.open_lag_ms),
@@ -1355,6 +1519,9 @@ impl Engine {
                 return out;
             }
             self.groups[g].legs[l].book = book;
+            if let Some(t) = self.paper.as_mut() {
+                t.on_snapshot(token, &self.groups[g].legs[l].book);
+            }
             // A REST snapshot is complete state, superseding any deferred delta top-check.
             self.pending_remove(token);
             // Never move the tracker's clock backwards: a REST snapshot can be older than a ws
@@ -1445,5 +1612,92 @@ impl Engine {
 
     pub fn rates(&mut self) -> HashMap<String, u64> {
         std::mem::take(&mut self.msgs)
+    }
+
+    pub fn set_paper(&mut self, trader: PaperTrader) {
+        self.paper = Some(trader);
+    }
+
+    pub fn paper(&self) -> Option<&PaperTrader> {
+        self.paper.as_ref()
+    }
+
+    /// Sorted market ids the trader holds (the live resolver's question list).
+    pub fn paper_held_markets(&self) -> Vec<String> {
+        self.paper
+            .as_ref()
+            .map(|t| t.held_markets().into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn paper_state(&self) -> Option<TraderState> {
+        self.paper.as_ref().map(PaperTrader::state)
+    }
+
+    /// Shutdown at `t_ms` (live: the Ctl::Shutdown instant; replay: the same line, or the last
+    /// input). S3b contract: `close` must follow `on_frame(t_ms)`, so work due at or before the
+    /// close instant first runs at its own due time; then pending conversions complete at
+    /// `t_ms`, other pending work is dropped, and every account marks.
+    pub fn paper_close(&mut self, t_ms: i64) -> Vec<Out> {
+        let mut out = Vec::new();
+        self.last_recv_ms = self.last_recv_ms.max(t_ms);
+        if let Some(t) = self.paper.as_mut() {
+            let books = EngineBooks {
+                token_ix: &self.token_ix,
+                groups: &self.groups,
+            };
+            paper_outs(t.on_frame(t_ms, &books), &mut out);
+            paper_outs(t.close(t_ms, &books), &mut out);
+        }
+        out
+    }
+
+    /// A market resolved with this payout vector (live: from Gamma via `Ctl::Resolved`; replay:
+    /// the same line). A vector other than {1,0}/{0,1} is also a Q19 integrity row. The trader is
+    /// first driven to `t_ms` (`on_frame`), so an execution already due settles with the shares
+    /// it bought; then every account holding the market settles, and its `AccountRow` values the
+    /// account's other open positions on the current books.
+    pub fn on_resolution(
+        &mut self,
+        t_ms: i64,
+        market_id: &str,
+        payout_yes: Decimal,
+        payout_no: Decimal,
+    ) -> Vec<Out> {
+        let mut out = Vec::new();
+        let binary = (payout_yes == Decimal::ONE && payout_no == Decimal::ZERO)
+            || (payout_yes == Decimal::ZERO && payout_no == Decimal::ONE);
+        if !binary {
+            let event_id = self
+                .universe
+                .groups
+                .iter()
+                .find(|m| m.legs.iter().any(|l| l.market_id == market_id))
+                .map(|m| m.event_id.clone());
+            out.push(self.integrity(
+                t_ms,
+                Issue {
+                    kind: "non_binary_payout",
+                    event_id,
+                    detail: Some(format!(
+                        "market {market_id}: payout yes {payout_yes} no {payout_no}"
+                    )),
+                    ..Issue::default()
+                },
+            ));
+        }
+        self.last_recv_ms = self.last_recv_ms.max(t_ms);
+        if let Some(t) = self.paper.as_mut() {
+            let books = EngineBooks {
+                token_ix: &self.token_ix,
+                groups: &self.groups,
+            };
+            paper_outs(t.on_frame(t_ms, &books), &mut out);
+            paper_outs(
+                t.on_resolution(t_ms, market_id, payout_yes, payout_no, &books),
+                &mut out,
+            );
+        }
+        out
     }
 }

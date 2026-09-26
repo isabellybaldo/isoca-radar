@@ -365,6 +365,7 @@ impl Io {
                 }
                 Out::UniverseChanged => self.refresh.notify_one(),
                 Out::Lag(ms) => self.metrics.push_lag(ms),
+                Out::Paper(_) | Out::ResolvedHint => {} // routed in S3c Task 7
                 Out::Drift {
                     token,
                     event_id,

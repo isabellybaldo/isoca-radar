@@ -221,3 +221,25 @@ fn same_inputs_same_outputs() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn held_markets_lists_positions_and_returned_yes() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[PolicyKind::P0Converter])).unwrap();
+    assert!(t.held_markets().is_empty());
+    t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
+    t.on_frame(1100, &books);
+    assert_eq!(
+        t.held_markets().into_iter().collect::<Vec<_>>(),
+        vec!["m0", "m1", "m2"]
+    );
+    t.on_frame(3100, &books);
+    assert_eq!(
+        t.held_markets().into_iter().collect::<Vec<_>>(),
+        vec!["m3"],
+        "after conversion only the returned YES is held"
+    );
+    t.on_resolution(9_000, "m3", d("1"), d("0"), &books);
+    assert!(t.held_markets().is_empty());
+}

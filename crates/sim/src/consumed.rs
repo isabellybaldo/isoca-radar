@@ -59,17 +59,20 @@ impl ConsumedLiquidity {
 
     /// A full book for `yes_token` arrived: re-check every consumed level of that token.
     pub fn on_snapshot(&mut self, yes_token: &str, book: &Book) {
-        let side_map = |v: Vec<(arb_core::money::Price, arb_core::money::Shares)>| -> BTreeMap<Decimal, Decimal> {
-            v.into_iter().map(|(p, s)| (p.get(), s.get())).collect()
-        };
-        let bids = side_map(book.bids_best_first());
-        let asks = side_map(book.asks_best_first());
         let keys: Vec<LevelKey> = self
             .levels
             .keys()
             .filter(|k| k.yes_token == yes_token)
             .cloned()
             .collect();
+        if keys.is_empty() {
+            return; // nothing consumed on this token: don't copy its book
+        }
+        let side_map = |v: Vec<(arb_core::money::Price, arb_core::money::Shares)>| -> BTreeMap<Decimal, Decimal> {
+            v.into_iter().map(|(p, s)| (p.get(), s.get())).collect()
+        };
+        let bids = side_map(book.bids_best_first());
+        let asks = side_map(book.asks_best_first());
         for k in keys {
             let side = match k.side {
                 BookSide::Bid => &bids,

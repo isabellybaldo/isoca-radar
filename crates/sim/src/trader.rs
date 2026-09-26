@@ -16,7 +16,7 @@ use arb_core::fill::{BasketRule, BuyLeg, walk};
 use arb_core::money::{Price, Shares};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Read access to the engine's YES books.
 pub trait Books {
@@ -194,6 +194,23 @@ impl PaperTrader {
 
     pub fn accounts(&self) -> &[Account] {
         &self.accounts
+    }
+
+    /// Markets any account holds a position or returned YES in: what the live resolver asks
+    /// Gamma about (S3c). Sorted, so callers can compare snapshots cheaply.
+    pub fn held_markets(&self) -> BTreeSet<String> {
+        self.accounts
+            .iter()
+            .flat_map(|a| a.positions.keys().chain(a.returned.keys()))
+            .map(|k| k.market_id.clone())
+            .collect()
+    }
+
+    /// Does any account hold consumed liquidity at all? The engine calls `on_level` for every
+    /// applied delta and `on_snapshot` for every applied snapshot: with nothing consumed (the
+    /// common case between trades) both return before allocating a key or copying a book.
+    fn any_consumed(&self) -> bool {
+        self.consumed.iter().any(|c| !c.is_empty())
     }
 
     fn delay(&self, acct: usize, seconds_delay: Option<i32>) -> i64 {
@@ -462,6 +479,9 @@ impl PaperTrader {
     }
 
     pub fn on_level(&mut self, yes_token: &str, side: BookSide, price: Decimal, new_size: Decimal) {
+        if !self.any_consumed() {
+            return;
+        }
         let key = crate::consumed::LevelKey {
             yes_token: yes_token.to_string(),
             side,
@@ -473,6 +493,9 @@ impl PaperTrader {
     }
 
     pub fn on_snapshot(&mut self, yes_token: &str, book: &Book) {
+        if !self.any_consumed() {
+            return;
+        }
         for c in &mut self.consumed {
             c.on_snapshot(yes_token, book);
         }

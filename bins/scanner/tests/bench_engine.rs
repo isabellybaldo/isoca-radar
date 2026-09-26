@@ -47,3 +47,34 @@ fn engine_us_per_frame_with_and_without_the_threshold_gate() {
     println!("VPS budget at ~4.3k frames/s: ~232 µs/frame on one core, shared with parse_frame");
     assert_eq!(digests[0], digests[1], "the gate changed the outputs");
 }
+
+#[test]
+#[ignore = "profiling: run by hand (S3c plan, Task 4)"]
+fn engine_us_per_frame_with_and_without_the_paper_trader() {
+    let groups = env_usize("BENCH_GROUPS", 2_000);
+    let n = env_usize("BENCH_FRAMES", 100_000);
+    let mut s = Synth::new(groups, 7);
+    let frames = s.script(n, 0);
+    let policies: sim::config::SimConfig =
+        toml::from_str(include_str!("../../../config/policies.toml")).unwrap();
+    for paper in [false, true] {
+        let mut e = synth_engine(&s, true);
+        if paper {
+            e.set_paper(sim::trader::PaperTrader::new(policies.clone()).unwrap());
+        }
+        let mut paper_rows = 0_usize;
+        let t = Instant::now();
+        drive(&mut e, &frames, 0, &mut |o| {
+            if matches!(o, Out::Paper(_)) {
+                paper_rows += 1;
+            }
+        });
+        let ns = t.elapsed().as_nanos() / u128::try_from(frames.len()).unwrap();
+        println!(
+            "paper={paper:<5} groups={groups} frames={} engine={}.{:03} µs/frame paper_rows={paper_rows}",
+            frames.len(),
+            ns / 1_000,
+            ns % 1_000,
+        );
+    }
+}
