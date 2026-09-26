@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod dto;
+pub mod episodes;
 pub mod error;
 pub mod guard;
 pub mod health;
@@ -75,6 +76,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health/now", get(health::now))
         .route("/api/health/series", get(health::series))
+        .route("/api/episodes/open", get(episodes::open))
+        .route("/api/episodes", get(episodes::list))
+        .route("/api/episodes/{id}", get(episodes::detail))
+        .route("/api/today", get(episodes::today))
         .method_not_allowed_fallback(error::method_not_allowed)
         .fallback(error::not_found)
         .with_state(state)
