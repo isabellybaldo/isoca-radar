@@ -93,6 +93,25 @@ fn km_median_without_censoring_and_not_reached() {
 }
 
 #[test]
+fn median_of_and_km_median_disagree_by_design_on_even_n() {
+    // Even n, fully uncensored: median_of (their/Gebele-style sample median) interpolates the
+    // middle pair; km's median (our/Kleinbaum & Klein convention) is the first observed event
+    // time where Ŝ crosses 1/2. The two conventions are documented as intentionally different
+    // and this pins that they in fact differ on the same data.
+    let vals = [1, 2, 3, 4];
+    assert_eq!(median_of(counts(&vals).into_iter(), 4), Some(dec!(2.5)));
+    let m = durmap(&vals.iter().map(|t| (*t, true)).collect::<Vec<_>>());
+    assert_eq!(km(m.iter().map(|(t, v)| (*t, *v)), &[]).median, Some(2));
+}
+
+#[test]
+fn bins_with_non_positive_width_returns_none_instead_of_panicking() {
+    let m = counts(&[1, 2, 3]);
+    assert_eq!(bins(&m, 0, 100), None);
+    assert_eq!(bins(&m, -5, 100), None);
+}
+
+#[test]
 fn empirical_survival_is_the_share_strictly_greater() {
     let m = counts(&[1, 2, 2, 3]);
     assert_eq!(
@@ -131,7 +150,7 @@ fn bins_are_fixed_width_with_an_open_top_and_negatives_apart() {
     assert_eq!(centi_bps(dec!(0.0000125)), 12); // 0.125 bp → 0.12 (tie to even)
     assert_eq!(centi_bps(dec!(-0.001)), -1_000);
     let m = counts(&[-5, 0, 2_499, 2_500, 4_900, 49_999, 50_000, 123_456]);
-    let (below, b) = bins(&m, 2_500, 50_000);
+    let (below, b) = bins(&m, 2_500, 50_000).unwrap();
     assert_eq!(below, 1);
     assert_eq!(b.len(), 21);
     assert_eq!(b[0], (0, 2));

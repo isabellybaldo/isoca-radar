@@ -88,7 +88,14 @@ pub fn merge_sorted<'a, V: Copy + 'a>(
 pub struct KmSummary {
     /// Ŝ(τ) for each grid point, fixed point (FP_ONE = 1).
     pub at: Vec<i128>,
-    /// The smallest event time with Ŝ ≤ 1/2 (None: not reached).
+    /// OUR convention (Kleinbaum & Klein): the smallest *event* time at which the Kaplan–Meier
+    /// estimate first reaches Ŝ(t) ≤ 1/2 (None: never reached). This is not an interpolated
+    /// midpoint — it is a specific observed time, chosen because it stays exact under integer/
+    /// fixed-point maths and matches the textbook's own worked examples. It intentionally
+    /// disagrees with [`median_of`]'s sample-median convention even on the same uncensored data:
+    /// e.g. `[1, 2, 3, 4]` gives a sample median of 2.5 (the mean of the middle pair) but a KM
+    /// median of 2 (the first event time where Ŝ ≤ 1/2 — see
+    /// `median_of_and_km_median_disagree_by_design_on_even_n` in `tests/stats.rs`).
     pub median: Option<i64>,
     pub events: i64,
     pub censored: i64,
@@ -96,11 +103,20 @@ pub struct KmSummary {
 
 /// Kaplan–Meier, Ŝ(τ) = Π_{t_j ≤ τ} (1 − d_j / n_j), over `(t, (events, censored))` in ascending
 /// t (a censored time tied with events stays at risk at that time, the textbook convention).
-/// `grid` must be ascending.
+/// `grid` must be ascending. Debug builds assert the caller's invariants (non-negative counts,
+/// events not exceeding the current at-risk count, an ascending grid, and no i128 overflow in
+/// the survival product); a release build never panics on bad input but the fixed point then
+/// saturates toward its maximum representable value instead of silently wrapping to 0 — a
+/// documented, conservative fallback that no valid input exercises (see `debug_assert!`
+/// call sites below and the 6-MP oracle / proptest that pin normal behaviour).
 pub fn km<I>(entries: I, grid: &[i64]) -> KmSummary
 where
     I: Iterator<Item = (i64, (i64, i64))> + Clone,
 {
+    debug_assert!(
+        grid.windows(2).all(|w| w[0] <= w[1]),
+        "km: grid must be ascending, got {grid:?}"
+    );
     let (events, censored) = entries
         .clone()
         .fold((0i64, 0i64), |a, (_, v)| (a.0 + v.0, a.1 + v.1));
@@ -110,14 +126,29 @@ where
     let mut gi = 0usize;
     let mut median = None;
     for (t, (e, c)) in entries {
+        debug_assert!(
+            e >= 0 && c >= 0,
+            "km: negative counts (e={e}, c={c}) at t={t}"
+        );
+        debug_assert!(
+            e <= at_risk,
+            "km: events ({e}) exceed at-risk ({at_risk}) at t={t}"
+        );
         while gi < grid.len() && grid.get(gi).is_some_and(|g| *g < t) {
             at.push(s);
             gi += 1;
         }
         if e > 0 && at_risk > 0 {
-            s = s
-                .checked_mul(i128::from(at_risk - e))
-                .map_or(0, |x| x / i128::from(at_risk));
+            let factor = i128::from(at_risk - e);
+            let product = s.checked_mul(factor);
+            debug_assert!(
+                product.is_some(),
+                "km: i128 overflow computing the survival product at t={t} (s={s}, factor={factor})"
+            );
+            // Release fallback only: saturate toward the largest representable value rather
+            // than wrapping to 0. Unreachable for realistic episode counts (s ≤ FP_ONE ≈ 1e28,
+            // factor bounded by the at-risk count), so no test exercises this arm.
+            s = product.unwrap_or(i128::MAX) / i128::from(at_risk);
             if median.is_none() && s.saturating_mul(2) <= FP_ONE {
                 median = Some(t);
             }
@@ -154,8 +185,14 @@ pub fn emp_at(m: &CountMap, grid: &[i64]) -> Vec<Option<Decimal>> {
         .collect()
 }
 
-/// The sample median of `n` values given as ascending (value, count): the mean of the middle
-/// pair when n is even.
+/// THEIR convention (an empirical/Gebele-style sample median): the median of `n` values given as
+/// ascending (value, count), the mean of the middle pair when n is even. This differs from
+/// [`KmSummary::median`]'s Kaplan–Meier convention by design — the sample median is a plain
+/// order statistic (needs uncensored data and interpolates between two observations), while the
+/// KM median is the first *observed* event time at which the survival curve crosses 1/2 (works
+/// under censoring, never interpolates). The two do not have to agree, even on the same
+/// uncensored data: see `median_of_and_km_median_disagree_by_design_on_even_n` in
+/// `tests/stats.rs`.
 pub fn median_of<I: Iterator<Item = (i64, i64)>>(entries: I, n: i64) -> Option<Decimal> {
     if n <= 0 {
         return None;
@@ -192,8 +229,12 @@ pub fn nearest_rank<I: Iterator<Item = (i64, i64)>>(entries: I, n: i64, pct: i64
 }
 
 /// Fixed-width bins: (count below 0, [(lo, count)] for lo = 0, width, …, top − width, then the
-/// open bin from `top`).
-pub fn bins(m: &CountMap, width: i64, top: i64) -> (i64, Vec<(i64, i64)>) {
+/// open bin from `top`). `None` when `width <= 0`: a non-positive width has no meaning as a bin
+/// size and would otherwise divide by zero.
+pub fn bins(m: &CountMap, width: i64, top: i64) -> Option<(i64, Vec<(i64, i64)>)> {
+    if width <= 0 {
+        return None;
+    }
     let n_bins = usize::try_from(top / width).unwrap_or(0);
     let mut out: Vec<(i64, i64)> = (0..=n_bins)
         .map(|i| (i64::try_from(i).unwrap_or(0) * width, 0))
@@ -211,7 +252,7 @@ pub fn bins(m: &CountMap, width: i64, top: i64) -> (i64, Vec<(i64, i64)>) {
             slot.1 += c;
         }
     }
-    (below, out)
+    Some((below, out))
 }
 
 /// An edge given as a fraction of $1 (0.0049) in 0.01-bp units (4900), rounded half-even.
