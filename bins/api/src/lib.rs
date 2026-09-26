@@ -134,7 +134,12 @@ pub async fn run_on(
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
             shutdown.await;
-            let _ = shutdown_tx.send(true);
+            // `send` is a no-op (and returns `Err`) when there are no receivers yet — e.g. a
+            // stream that is mid-handler, between `AppState::new`'s `subscribe()` call site in
+            // `stream::sse` and actually polling, would then read the old `false` and never end.
+            // `send_replace` always sets the value, so any receiver that subscribes even after
+            // this line still observes `true`.
+            shutdown_tx.send_replace(true);
         })
         .await?;
     for h in bridge {
@@ -176,5 +181,21 @@ mod tests {
             "Something broke on our side. It has been written down."
         );
         assert!(!v.to_string().contains("kaboom"));
+    }
+
+    #[test]
+    fn shutdown_flag_reaches_a_subscriber_that_arrives_after_shutdown_with_no_streams_open() {
+        // Mirrors `AppState::new` (which discards its initial receiver) and `run_on`'s shutdown
+        // closure: with zero receivers, a plain `send` would return `Err` and leave the value at
+        // `false`. `send_replace` must set it regardless, so a stream that subscribes even after
+        // shutdown has already fired still sees `true`, not the stale default.
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        drop(shutdown_rx);
+        shutdown_tx.send_replace(true);
+        let late = shutdown_tx.subscribe();
+        assert!(
+            *late.borrow(),
+            "a late subscriber must see the post-shutdown value"
+        );
     }
 }

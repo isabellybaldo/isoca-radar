@@ -188,16 +188,17 @@ impl Store {
     }
 
     /// Admin/test tooling: terminate every LISTEN backend in this database (proves the bridge's
-    /// reconnect path against a real dropped connection). Returns how many were terminated, so a
-    /// test can assert it actually killed something instead of a no-op query.
+    /// reconnect path against a real dropped connection). Returns how many `pg_terminate_backend`
+    /// calls actually returned `true` (a backend can vanish between being matched and being
+    /// signaled, in which case it returns `false` and must not be counted), so a test can assert
+    /// it actually killed something instead of a no-op query.
     pub async fn terminate_listen_backends(&self) -> Result<i64, StoreError> {
-        let terminated: Vec<bool> = sqlx::query_scalar(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity \
              WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
         )
-        .fetch_all(self.pool())
-        .await?;
-        Ok(i64::try_from(terminated.len()).unwrap_or(i64::MAX))
+        .fetch_one(self.pool())
+        .await?)
     }
 
     /// Unclosed live episodes of the newest live scanner run only: a crashed run's never-closed
