@@ -184,6 +184,8 @@ async fn observations_integrity_and_health_land_and_health_upserts() {
         capture_paused: false,
         parked_shards: 0,
         dropped_groups: 0,
+        rest_rtt_p50_ms: None,
+        rest_rtt_p99_ms: None,
     };
     let batch = Batch {
         episodes: vec![EpisodeWrite {
@@ -429,6 +431,8 @@ async fn duplicate_health_minute_in_one_batch_keeps_the_last() {
         capture_paused: false,
         parked_shards: 0,
         dropped_groups: 0,
+        rest_rtt_p50_ms: None,
+        rest_rtt_p99_ms: None,
     };
     let mut second = first.clone();
     second.msgs = 2;
@@ -478,5 +482,88 @@ async fn observation_zero_reads_back_distinct_from_null() {
     assert_eq!(back, vec![obs]);
     assert_eq!(back[0].pnl, Some(dec!(0)));
     assert_eq!(back[0].edge, None);
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn updated_ms_is_set_on_insert_and_advances_on_every_upsert() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let row = episode("01J00000000000000000000UPD", run);
+    let write = |r: EpisodeRow| Batch {
+        episodes: vec![EpisodeWrite {
+            row: r,
+            legs: vec![],
+        }],
+        ..Batch::default()
+    };
+    store.write_batch(&write(row.clone())).await.unwrap();
+    let first = store
+        .episode_updated_ms(&row.episode_id)
+        .await
+        .unwrap()
+        .expect("row exists");
+    assert!(first > 1_700_000_000_000, "wall-clock ms, got {first}");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut closed = row.clone();
+    closed.closed_server_ms = Some(9_000);
+    store.write_batch(&write(closed)).await.unwrap();
+    let second = store
+        .episode_updated_ms(&row.episode_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(second > first, "{second} > {first}");
+    assert_eq!(store.episode_updated_ms("nope").await.unwrap(), None);
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn health_rtt_columns_round_trip_and_upsert() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let run = new_run(&store).await;
+    let mut h = HealthRow {
+        run_id: run,
+        minute_ms: 60_000,
+        tokens: 1,
+        shards: 1,
+        msgs: 1,
+        bytes: 1,
+        drops: 0,
+        reconnects: 0,
+        rest_p50_ms: None,
+        rest_p99_ms: None,
+        lag_p50_ms: Some(80),
+        lag_p99_ms: None,
+        clock_offset_ms: None,
+        ok: None,
+        capture_paused: false,
+        parked_shards: 0,
+        dropped_groups: 0,
+        rest_rtt_p50_ms: None,
+        rest_rtt_p99_ms: None,
+    };
+    let b = |h: HealthRow| Batch {
+        health: vec![h],
+        ..Batch::default()
+    };
+    store.write_batch(&b(h.clone())).await.unwrap();
+    h.rest_rtt_p50_ms = Some(130);
+    h.rest_rtt_p99_ms = Some(0);
+    store.write_batch(&b(h.clone())).await.unwrap();
+    let ro = Store::connect_read_only(db.opts.clone(), 1, 5_000, Some("analyze_ro"))
+        .await
+        .unwrap();
+    let rows = ro.health_series(0, 120_000).await.unwrap();
+    assert_eq!(
+        (rows[0].rest_rtt_p50_ms, rows[0].rest_rtt_p99_ms),
+        (Some(130), Some(0)),
+        "a measured 0 stays 0, not NULL"
+    );
+    ro.close().await;
     db.drop(store).await;
 }

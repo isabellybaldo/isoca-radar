@@ -172,6 +172,19 @@ pub struct HealthRow {
     pub capture_paused: bool,
     pub parked_shards: i32,
     pub dropped_groups: i32,
+    /// p50 / p99 of the scanner's own CLOB request round trips this minute (send → response
+    /// headers, successful requests only). None: no request finished this minute.
+    pub rest_rtt_p50_ms: Option<i32>,
+    pub rest_rtt_p99_ms: Option<i32>,
+}
+
+/// One premise a run was started under (Phase 5a spec §4): `version` is `code+sha8(config)`, or
+/// `code:label|band` for `host`.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct RunPremiseRow {
+    pub run_id: i64,
+    pub area: String,
+    pub version: String,
 }
 
 /// One paper account of a run: its pre-registered spec (spec §11) and the policies file hash.

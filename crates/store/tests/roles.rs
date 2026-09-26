@@ -259,3 +259,137 @@ async fn scanner_appends_paper_rows_and_upserts_state_but_analyze_only_reads() {
     scanner.close().await;
     db.drop(owner).await;
 }
+
+#[tokio::test]
+async fn analyze_rw_reads_the_scanner_tables_and_writes_only_card_tables() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let rw = db.role("analyze_rw").await;
+    for t in [
+        "episodes",
+        "runs",
+        "run_premises",
+        "health",
+        "paper_marks",
+        "paper_accounts",
+    ] {
+        rw.raw_exec(&format!("SELECT count(*) FROM {t}"))
+            .await
+            .unwrap_or_else(|e| panic!("analyze_rw reads {t}: {e}"));
+    }
+    rw.raw_exec(
+        "INSERT INTO card_cells (card, premise_key, hour_ms, data, computed_ms) VALUES ('g1', 'k', 0, '{}', 1); \
+         UPDATE card_cells SET computed_ms = 2; \
+         INSERT INTO card_results (card, win, premise_key, status, body, computed_ms) \
+             VALUES ('G1', '7d', 'k', 'live', '{}', 1); \
+         UPDATE card_results SET computed_ms = 2; \
+         INSERT INTO card_meta (key, value) VALUES ('tick', '{}'); \
+         UPDATE card_meta SET value = '{\"a\":1}'; \
+         DELETE FROM card_cells; DELETE FROM card_results; DELETE FROM card_meta",
+    )
+    .await
+    .expect("analyze_rw writes the card tables");
+    for sql in [
+        "INSERT INTO runs (service, started_ms, version, config_hash, mode) VALUES ('x', 1, 'v', 'c', 'live')",
+        "UPDATE episodes SET kind = kind",
+        "DELETE FROM episodes",
+        "UPDATE health SET msgs = msgs",
+        "INSERT INTO run_premises (run_id, area, version) VALUES (1, 'fees', '1')",
+        "UPDATE paper_marks SET equity = equity",
+        "DELETE FROM paper_accounts",
+        "UPDATE paper_state SET updated_ms = 1",
+        "UPDATE legs SET status = status",
+    ] {
+        let e = rw.raw_exec(sql).await.unwrap_err();
+        assert!(is_permission_denied(&e), "{sql}: {e}");
+    }
+    let ddl = rw.raw_exec("CREATE TABLE nope (a int)").await.unwrap_err();
+    assert!(is_permission_denied(&ddl), "{ddl}");
+    let settings = owner.role_db_settings("analyze_rw").await.unwrap();
+    assert!(
+        settings.iter().any(|s| s == "statement_timeout=10s"),
+        "{settings:?}"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn analyze_ro_reads_card_results_and_meta_but_still_cannot_write() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let ro = db.role("analyze_ro").await;
+    ro.raw_exec("SELECT count(*) FROM card_results; SELECT count(*) FROM card_meta")
+        .await
+        .expect("analyze_ro reads results");
+    for sql in [
+        "INSERT INTO card_results (card, win, premise_key, status, body, computed_ms) VALUES ('G1', '7d', 'k', 'live', '{}', 1)",
+        "INSERT INTO card_meta (key, value) VALUES ('x', '{}')",
+        "INSERT INTO card_cells (card, premise_key, hour_ms, data, computed_ms) VALUES ('g1', 'k', 0, '{}', 1)",
+        "INSERT INTO run_premises (run_id, area, version) VALUES (1, 'fees', '1')",
+    ] {
+        let e = ro.raw_exec(sql).await.unwrap_err();
+        assert!(is_permission_denied(&e), "{sql}: {e}");
+    }
+    ro.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn scanner_appends_run_premises_but_never_rewrites_them() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let scanner = db.role("scanner_rw").await;
+    let run = scanner
+        .start_run(&NewRun {
+            service: "scanner".into(),
+            started_ms: 1,
+            version: "v".into(),
+            config_hash: "c".into(),
+            mode: "live".into(),
+        })
+        .await
+        .unwrap();
+    let rows = vec![
+        RunPremiseRow {
+            run_id: run,
+            area: "fees".into(),
+            version: "1+e3b0c442".into(),
+        },
+        RunPremiseRow {
+            run_id: run,
+            area: "depth".into(),
+            version: "1+e3b0c442".into(),
+        },
+    ];
+    scanner
+        .insert_run_premises(&rows)
+        .await
+        .expect("scanner appends");
+    scanner
+        .insert_run_premises(&rows)
+        .await
+        .expect("a re-sent row is a no-op, not an error");
+    let back = scanner.run_premises_for(run).await.unwrap();
+    assert_eq!(
+        back.iter().map(|r| r.area.as_str()).collect::<Vec<_>>(),
+        ["depth", "fees"]
+    );
+    for sql in [
+        "UPDATE run_premises SET version = 'x'",
+        "DELETE FROM run_premises",
+    ] {
+        let e = scanner.raw_exec(sql).await.unwrap_err();
+        assert!(is_permission_denied(&e), "{sql}: {e}");
+    }
+    let cards = scanner
+        .raw_exec("INSERT INTO card_meta (key, value) VALUES ('x', '{}')")
+        .await
+        .unwrap_err();
+    assert!(is_permission_denied(&cards), "{cards}");
+    scanner.close().await;
+    db.drop(owner).await;
+}

@@ -127,4 +127,26 @@ impl Store {
         .fetch_all(&self.pool)
         .await?)
     }
+
+    /// Admin/test tooling: one episode's `updated_ms`.
+    pub async fn episode_updated_ms(&self, episode_id: &str) -> Result<Option<i64>, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT updated_ms FROM episodes WHERE episode_id = $1")
+                .bind(episode_id)
+                .fetch_optional(self.pool())
+                .await?,
+        )
+    }
+
+    /// Admin/test tooling: `role`'s settings for THIS database (`ALTER ROLE … IN DATABASE … SET`).
+    pub async fn role_db_settings(&self, role: &str) -> Result<Vec<String>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT unnest(s.setconfig)::text FROM pg_db_role_setting s \
+             JOIN pg_roles r ON r.oid = s.setrole JOIN pg_database d ON d.oid = s.setdatabase \
+             WHERE r.rolname = $1 AND d.datname = current_database() ORDER BY 1",
+        )
+        .bind(role)
+        .fetch_all(self.pool())
+        .await?)
+    }
 }

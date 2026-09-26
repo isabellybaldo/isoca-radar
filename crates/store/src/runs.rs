@@ -1,6 +1,6 @@
 //! `runs`: every start/exit of a long-running service. Feeds the crash-loop breaker (§8.1.2).
 use crate::text::clean;
-use crate::{NewRun, Store, StoreError};
+use crate::{NewRun, RunPremiseRow, Store, StoreError};
 
 impl Store {
     pub async fn start_run(&self, r: &NewRun) -> Result<i64, StoreError> {
@@ -67,5 +67,32 @@ impl Store {
                 .fetch_one(self.pool())
                 .await?,
         )
+    }
+
+    /// Append this run's premises (spec §4). Re-sending a row is a no-op (the scanner may retry).
+    pub async fn insert_run_premises(&self, rows: &[RunPremiseRow]) -> Result<(), StoreError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO run_premises (run_id, area, version) ",
+        );
+        qb.push_values(rows, |mut s, r| {
+            s.push_bind(r.run_id)
+                .push_bind(clean(&r.area))
+                .push_bind(clean(&r.version));
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(self.pool()).await?;
+        Ok(())
+    }
+
+    pub async fn run_premises_for(&self, run_id: i64) -> Result<Vec<RunPremiseRow>, StoreError> {
+        Ok(sqlx::query_as::<_, RunPremiseRow>(
+            "SELECT run_id, area, version FROM run_premises WHERE run_id = $1 ORDER BY area",
+        )
+        .bind(run_id)
+        .fetch_all(self.pool())
+        .await?)
     }
 }

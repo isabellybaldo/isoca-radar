@@ -105,6 +105,8 @@ fn health(run_id: i64, minute_ms: i64, drops: i32) -> HealthRow {
         capture_paused: false,
         parked_shards: 0,
         dropped_groups: 0,
+        rest_rtt_p50_ms: None,
+        rest_rtt_p99_ms: None,
     }
 }
 

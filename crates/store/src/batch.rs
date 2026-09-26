@@ -67,6 +67,10 @@ const LEG_COLS: &str = "episode_id, leg_idx, market_id, token, action, best_pric
 const EP_CHUNK: usize = 500;
 const CHUNK: usize = 1000;
 
+/// The database clock in ms, evaluated per row: every insert and update of an episode stamps
+/// `updated_ms` with it, and analyze's cursor compares only these stamps (one clock).
+const NOW_MS_SQL: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
 fn push_episode(
     b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &'static str>,
     r: &EpisodeRow,
@@ -212,15 +216,21 @@ impl Store {
         let update_set = EPISODE_COLS[1..]
             .iter()
             .map(|c| format!("{c} = EXCLUDED.{c}"))
+            .chain(std::iter::once(
+                "updated_ms = EXCLUDED.updated_ms".to_string(),
+            ))
             .collect::<Vec<_>>()
             .join(", ");
         let episodes = dedupe_last(&b.episodes);
         for chunk in episodes.chunks(EP_CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(format!(
-                "INSERT INTO episodes ({}) ",
+                "INSERT INTO episodes ({}, updated_ms) ",
                 EPISODE_COLS.join(", ")
             ));
-            qb.push_values(chunk, |mut sep, w| push_episode(&mut sep, &w.row));
+            qb.push_values(chunk, |mut sep, w| {
+                push_episode(&mut sep, &w.row);
+                sep.push(NOW_MS_SQL);
+            });
             qb.push(format!(
                 " ON CONFLICT (episode_id) DO UPDATE SET {update_set}"
             ));
@@ -301,7 +311,8 @@ impl Store {
         for chunk in health.chunks(CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(
                 "INSERT INTO health (run_id, minute_ms, tokens, shards, msgs, bytes, drops, reconnects, rest_p50_ms, \
-                 rest_p99_ms, lag_p50_ms, lag_p99_ms, clock_offset_ms, ok, capture_paused, parked_shards, dropped_groups) ",
+                 rest_p99_ms, lag_p50_ms, lag_p99_ms, clock_offset_ms, ok, capture_paused, parked_shards, dropped_groups, \
+                 rest_rtt_p50_ms, rest_rtt_p99_ms) ",
             );
             qb.push_values(chunk, |mut s, h| {
                 s.push_bind(h.run_id)
@@ -320,7 +331,9 @@ impl Store {
                     .push_bind(h.ok)
                     .push_bind(h.capture_paused)
                     .push_bind(h.parked_shards)
-                    .push_bind(h.dropped_groups);
+                    .push_bind(h.dropped_groups)
+                    .push_bind(h.rest_rtt_p50_ms)
+                    .push_bind(h.rest_rtt_p99_ms);
             });
             qb.push(
                 " ON CONFLICT (run_id, minute_ms) DO UPDATE SET tokens = EXCLUDED.tokens, shards = EXCLUDED.shards, \
@@ -328,7 +341,8 @@ impl Store {
                  rest_p50_ms = EXCLUDED.rest_p50_ms, rest_p99_ms = EXCLUDED.rest_p99_ms, lag_p50_ms = EXCLUDED.lag_p50_ms, \
                  lag_p99_ms = EXCLUDED.lag_p99_ms, clock_offset_ms = EXCLUDED.clock_offset_ms, ok = EXCLUDED.ok, \
                  capture_paused = EXCLUDED.capture_paused, parked_shards = EXCLUDED.parked_shards, \
-                 dropped_groups = EXCLUDED.dropped_groups",
+                 dropped_groups = EXCLUDED.dropped_groups, rest_rtt_p50_ms = EXCLUDED.rest_rtt_p50_ms, \
+                 rest_rtt_p99_ms = EXCLUDED.rest_rtt_p99_ms",
             );
             qb.build().execute(&mut *tx).await?;
         }

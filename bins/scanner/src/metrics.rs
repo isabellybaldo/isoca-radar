@@ -86,6 +86,8 @@ impl Metrics {
             capture_paused: self.capture_paused.load(Ordering::Relaxed),
             parked_shards: i32_of(self.parked.load(Ordering::Relaxed)),
             dropped_groups: i32_of(self.dropped_groups.load(Ordering::Relaxed)),
+            rest_rtt_p50_ms: None, // Task 4 fills real values
+            rest_rtt_p99_ms: None,
         }
     }
 }

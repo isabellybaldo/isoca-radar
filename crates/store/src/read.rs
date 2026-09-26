@@ -13,7 +13,8 @@ pub const MAX_SERIES_ROWS: i64 = 7 * 24 * 60;
 pub const DAY_MS: i64 = 86_400_000;
 
 const HEALTH_COLS: &str = "run_id, minute_ms, tokens, shards, msgs, bytes, drops, reconnects, rest_p50_ms, \
-    rest_p99_ms, lag_p50_ms, lag_p99_ms, clock_offset_ms, ok, capture_paused, parked_shards, dropped_groups";
+    rest_p99_ms, lag_p50_ms, lag_p99_ms, clock_offset_ms, ok, capture_paused, parked_shards, dropped_groups, \
+    rest_rtt_p50_ms, rest_rtt_p99_ms";
 
 /// The newest live run that has written at least one health row (uses the health primary key).
 const LATEST_HEALTH_RUN: &str = "(SELECT r.run_id FROM runs r WHERE r.mode = 'live' \
