@@ -14,6 +14,8 @@ tokio.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 rust_decimal_macros.workspace = true
+sim = { path = "../sim" }
+serde_json.workspace = true
 
 [lints]
 workspace = true

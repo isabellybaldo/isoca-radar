@@ -6,6 +6,7 @@ mod batch;
 pub mod error;
 mod paper;
 mod read;
+mod read_paper;
 pub mod rows;
 mod runs;
 mod text;
@@ -17,6 +18,7 @@ pub use read::{
     DAY_MS, EpisodeFilter, EpisodePage, EpisodeSummary, HealthNow, IntegritySummary, MAX_OPEN,
     MAX_PAGE, MAX_SERIES_ROWS, Today,
 };
+pub use read_paper::{EquityPoint, LedgerPage, PaperAccountNow, PaperLedgerEntry, PaperPosition};
 pub use rows::*;
 pub use sqlx::postgres::PgConnectOptions;
 

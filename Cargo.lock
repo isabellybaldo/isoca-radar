@@ -2039,6 +2039,8 @@ version = "0.1.0"
 dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
+ "serde_json",
+ "sim",
  "sqlx",
  "thiserror",
  "tokio",
