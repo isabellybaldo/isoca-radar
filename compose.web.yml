@@ -1,5 +1,8 @@
-# Phase 4 dashboard (spec 2026-09-25-phase4-dashboard-design.md §2–§3). VPS only; needs Traefik's
-# external network `traefik_public`. Kept out of compose.yml so local `docker compose up` never needs it.
+# Phase 4 dashboard (spec 2026-09-25-phase4-dashboard-design.md §2–§3). VPS only; needs Traefik
+# joined to the dedicated external network `ct_radar` (runbook §2; a fix-round finding: sharing
+# Traefik's common `traefik_public` network would let any other site's container on the VPS call
+# the api directly, or let another compose project claim the `ct-oauth2-proxy` alias and bypass the
+# login). Kept out of compose.yml so local `docker compose up` never needs it.
 #   docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web oauth2-proxy
 # Every router except oauth2-proxy's own /oauth2/* pages goes through forward-auth (spec §3).
 # No secrets here: RADAR_DOMAIN and OAUTH2_PROXY_* come from the VPS-only .env.
@@ -24,17 +27,21 @@ services:
     restart: unless-stopped
     stop_grace_period: 5s          # open SSE streams keep graceful shutdown waiting
     read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     cpus: "0.25"
     mem_limit: 128m
     logging: *logging
-    networks: [internal, traefik_public]
+    networks: [internal, ct_radar]
     labels:
       - traefik.enable=true
-      - traefik.docker.network=traefik_public
+      - traefik.docker.network=ct_radar
       - "traefik.http.routers.ct-api.rule=Host(`${RADAR_DOMAIN:?set RADAR_DOMAIN in .env}`) && PathPrefix(`/api/`)"
       - traefik.http.routers.ct-api.entrypoints=websecure
       - traefik.http.routers.ct-api.tls.certresolver=letsencrypt
-      - traefik.http.routers.ct-api.middlewares=ct-auth@docker,ct-sec@docker,ct-csp@docker,ct-rl@docker
+      # rate limit first (throttle unauthenticated floods), then security headers — ct-sec (HSTS,
+      # frame, nosniff, referrer) and ct-csp (CSP) — so even a 302/401 carries them, then auth last
+      - traefik.http.routers.ct-api.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker
       - traefik.http.services.ct-api.loadbalancer.server.port=8081
 
   web:
@@ -45,18 +52,20 @@ services:
     profiles: ["web"]
     restart: unless-stopped
     read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]                # nginx-unprivileged binds >1024 and never chowns at runtime; needs none
     tmpfs: [/tmp]
     cpus: "0.1"
     mem_limit: 32m
     logging: *logging
-    networks: [traefik_public]
+    networks: [ct_radar]
     labels:
       - traefik.enable=true
-      - traefik.docker.network=traefik_public
+      - traefik.docker.network=ct_radar
       - "traefik.http.routers.ct-web.rule=Host(`${RADAR_DOMAIN}`)"
       - traefik.http.routers.ct-web.entrypoints=websecure
       - traefik.http.routers.ct-web.tls.certresolver=letsencrypt
-      - traefik.http.routers.ct-web.middlewares=ct-auth@docker,ct-sec@docker,ct-csp@docker,ct-rl@docker
+      - traefik.http.routers.ct-web.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker
       - traefik.http.services.ct-web.loadbalancer.server.port=8080
 
   oauth2-proxy:
@@ -64,6 +73,8 @@ services:
     profiles: ["web"]
     restart: unless-stopped
     read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     cpus: "0.1"
     mem_limit: 64m
     logging: *logging
@@ -88,11 +99,11 @@ services:
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_SILENCE_PING_LOGGING: "true"
     networks:
-      traefik_public:
+      ct_radar:
         aliases: [ct-oauth2-proxy]
     labels:
       - traefik.enable=true
-      - traefik.docker.network=traefik_public
+      - traefik.docker.network=ct_radar
       # oauth2-proxy's own pages: the only route that answers without a session
       - "traefik.http.routers.ct-oauth.rule=Host(`${RADAR_DOMAIN}`) && PathPrefix(`/oauth2/`)"
       - traefik.http.routers.ct-oauth.entrypoints=websecure
@@ -109,7 +120,9 @@ services:
       - traefik.http.middlewares.ct-redirect.redirectscheme.permanent=true
       # forward-auth: 202 with a valid session, a redirect to GitHub without one (static://202 mode)
       - traefik.http.middlewares.ct-auth.forwardauth.address=http://ct-oauth2-proxy:4180/
-      - traefik.http.middlewares.ct-auth.forwardauth.trustForwardHeader=true
+      # false: Traefik is the edge (terminates TLS, faces the internet) and sets these headers itself;
+      # oauth2-proxy must not trust a client-supplied X-Forwarded-* instead
+      - traefik.http.middlewares.ct-auth.forwardauth.trustForwardHeader=false
       # hardening (spec §3)
       - traefik.http.middlewares.ct-sec.headers.stsSeconds=31536000
       - traefik.http.middlewares.ct-sec.headers.frameDeny=true
@@ -120,5 +133,5 @@ services:
       - traefik.http.middlewares.ct-rl.ratelimit.burst=60
 
 networks:
-  traefik_public:
+  ct_radar:
     external: true

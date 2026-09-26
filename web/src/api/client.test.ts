@@ -1,8 +1,42 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { jsonResponse, mockApi } from '../test/mockApi';
-import { ApiError, api } from './client';
+import { ApiError, SESSION_EXPIRED_TEXT, api } from './client';
 
 describe('api client', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('on a 401 (session expired), reloads the page once instead of surfacing an error', async () => {
+    mockApi({ '/api/episodes/open': () => jsonResponse(401, { error: 'unauthorized', detail: 'no session' }) });
+    const reload = vi.fn();
+    vi.stubGlobal('location', { reload });
+
+    let settled = false;
+    void api.openEpisodes().then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(reload).toHaveBeenCalledOnce();
+    expect(settled).toBe(false); // never resolves/rejects: the page is navigating away
+  });
+
+  it('on a repeated 401 within the guard window, shows the sign-in-again copy instead of reloading again', async () => {
+    mockApi({ '/api/episodes/open': () => jsonResponse(401, { error: 'unauthorized', detail: 'no session' }) });
+    const reload = vi.fn();
+    vi.stubGlobal('location', { reload });
+
+    void api.openEpisodes().catch(() => {}); // first call: triggers the reload, marks the guard; never settles
+    await new Promise((r) => setTimeout(r, 0));
+    const err = await api.openEpisodes().catch((e: unknown) => e); // second call within the window
+
+    expect(reload).toHaveBeenCalledOnce();
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ status: 401, detail: SESSION_EXPIRED_TEXT });
+  });
+
   it('turns JSON errors into ApiError with the server detail', async () => {
     mockApi({
       '/api/episodes/open': () =>

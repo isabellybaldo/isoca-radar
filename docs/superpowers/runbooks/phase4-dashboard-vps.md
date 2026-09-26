@@ -41,9 +41,29 @@ OAUTH2_PROXY_COOKIE_SECRET=...
 ```
 ```bash
 chmod 600 .env
-docker network ls | grep traefik_public
+```
+
+Create the dashboard's own network and join Traefik to it. **`compose.web.yml` intentionally does not
+put `api`, `web` or `oauth2-proxy` on Traefik's shared `traefik_public` network** — a fix-round security
+finding: any other site's container on the shared network could otherwise call `http://api:8081`
+without logging in, or another compose project could claim the `ct-oauth2-proxy` alias and answer
+`200` to every forward-auth check, bypassing the login entirely. `ct_radar` is a dedicated network
+only Traefik and this project's three dashboard containers join.
+
+```bash
+docker network create ct_radar
+# find Traefik's container name (this only lists names, never env/secrets):
+docker ps --format '{{.Names}}' | grep -i traefik
+docker network connect ct_radar <traefik-container-name>
 docker inspect "$(docker ps --format '{{.Names}}' | grep -i traefik | head -1)" --format '{{json .Args}}' | tr ',' '\n' | grep -i entrypoints
 ```
+The `docker network connect` is a once-only, imperative step: it only needs repeating if Traefik's
+own container is later recreated (a Traefik image update, a `docker compose up` on Traefik's own
+project, etc.), since a fresh container starts with only the networks its own compose file lists.
+**The durable fix** is to add `ct_radar` (as `external: true`) to Traefik's own compose file's
+`networks:` and to its service's `networks:` list, so every future recreate keeps it attached without
+a manual reconnect.
+
 `compose.web.yml` assumes the entrypoints are named `web` (:80) and `websecure` (:443). If Traefik
 uses other names, edit the `entrypoints=` labels before step 4. If Traefik already redirects
 http→https globally, the `ct-http` router is harmless.
@@ -92,8 +112,20 @@ docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build 
 docker compose -f compose.yml -f compose.web.yml ps
 docker compose -f compose.yml -f compose.web.yml logs --tail 20 api web oauth2-proxy
 ```
-Expect `api: listening on 0.0.0.0:8081 (read-only, paper only)`. If the cert doesn't issue (Traefik serves
-"TRAEFIK DEFAULT CERT"), wait for DNS, then `docker compose -f compose.yml -f compose.web.yml restart web`.
+**Never drop `-q` from that `config` line.** Without it, `docker compose config` prints the fully
+resolved compose file to stdout, including every real value substituted from `.env` (database
+passwords, the OAuth client secret, the cookie secret). `-q` only validates and exits 0/1.
+
+Expect `api: listening on 0.0.0.0:8081 (read-only, paper only)`. If the cert doesn't issue (Traefik
+serves "TRAEFIK DEFAULT CERT" instead of a real one), that's Traefik's own ACME (HTTP-01) challenge,
+not anything `web` does — restarting `web` does not make Traefik retry it. Instead: confirm DNS has
+propagated (§0), wait a few minutes (Let's Encrypt HTTP-01 can take a little time after DNS updates),
+and check Traefik's own logs for the ACME attempt and its error:
+```bash
+docker logs --tail 100 "$(docker ps --format '{{.Names}}' | grep -i traefik | head -1)" 2>&1 | grep -iE 'acme|certificate'
+```
+If it's still stuck after that, restart Traefik's own container (not `web`) so it retries the
+challenge from scratch.
 
 ## 5. Post-deploy smoke test
 

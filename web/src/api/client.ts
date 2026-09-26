@@ -16,8 +16,36 @@ export class ApiError extends Error {
   }
 }
 
+// oauth2-proxy's forward-auth answers a JSON 401 (not a redirect) to a request that sends
+// `Accept: application/json` without a valid session, e.g. after the cookie expires mid-visit.
+// The fix is a full page reload: Traefik's forward-auth then redirects the top-level navigation to
+// GitHub. Guarded by a sessionStorage timestamp so a session that stays invalid doesn't reload forever.
+export const SESSION_EXPIRED_TEXT = 'Lost the api. Your session may have expired: reload the page to sign in again.';
+const REAUTH_RELOAD_KEY = 'ct_radar_reauth_reload_at';
+const REAUTH_RELOAD_WINDOW_MS = 10_000;
+
+function markReauthReload(): boolean {
+  try {
+    const now = Date.now();
+    const last = sessionStorage.getItem(REAUTH_RELOAD_KEY);
+    if (last && now - Number(last) < REAUTH_RELOAD_WINDOW_MS) return false;
+    sessionStorage.setItem(REAUTH_RELOAD_KEY, String(now));
+    return true;
+  } catch {
+    // sessionStorage unavailable (private mode, etc.): fall through to the copy instead of looping.
+    return false;
+  }
+}
+
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, { signal, credentials: 'same-origin', headers: { Accept: 'application/json' } });
+  if (res.status === 401) {
+    if (markReauthReload()) {
+      location.reload();
+      return new Promise<T>(() => {}); // navigating away: never resolve, never render an error flash
+    }
+    throw new ApiError(401, 'unauthorized', SESSION_EXPIRED_TEXT);
+  }
   if (!res.ok) {
     let code = `http_${res.status}`;
     let detail = 'Something broke. Not your fault. Probably.';
