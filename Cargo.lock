@@ -9,6 +9,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "analyze"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cards",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde_json",
+ "sim",
+ "store",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

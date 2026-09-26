@@ -1,0 +1,829 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+mod common;
+use analyze::tick::Analyzer;
+use cards::body::ScenarioLat;
+use rust_decimal_macros::dec;
+use serde_json::Value;
+use std::time::{Duration, Instant};
+use store::*;
+
+const H: i64 = 3_600_000;
+const M: i64 = 60_000;
+/// An hour boundary (497,220 h after the epoch).
+const T0: i64 = 1_789_992_000_000;
+
+fn scenarios() -> Vec<ScenarioLat> {
+    analyze::scenarios::load(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/policies.toml"
+    ))
+    .unwrap()
+}
+
+fn premises(run_id: i64, episode_def: &str) -> Vec<RunPremiseRow> {
+    [
+        ("censoring", "1+c0"),
+        ("depth", "1+e3b0c442"),
+        ("detector_no", "1+e3b0c442"),
+        ("detector_yes", "1+e3b0c442"),
+        ("episode_def", episode_def),
+        ("fees", "1+e3b0c442"),
+        ("host", "1:vps-kvm2|100-250"),
+        ("sim", "1+bb"),
+    ]
+    .iter()
+    .map(|(a, v)| RunPremiseRow {
+        run_id,
+        area: a.to_string(),
+        version: v.to_string(),
+    })
+    .collect()
+}
+
+fn ep(id: &str, run_id: i64, kind: &str, opened: i64, closed: Option<i64>) -> EpisodeRow {
+    EpisodeRow {
+        episode_id: id.into(),
+        run_id,
+        source: "live".into(),
+        kind: kind.into(),
+        realization: "converter".into(),
+        event_id: format!("ev-{id}"),
+        event_slug: None,
+        event_title: None,
+        neg_risk_market_id: None,
+        pair_id: None,
+        category: None,
+        n_outcomes: 3,
+        n_legs: 3,
+        legs_dropped: 0,
+        augmented: false,
+        incomplete_set: false,
+        uncovered_legs: 0,
+        opened_server_ms: opened,
+        closed_server_ms: closed,
+        duration_ms: closed.map(|c| c - opened),
+        censor_left: false,
+        censor_right: false,
+        censor_gap: false,
+        detect_lag_ms: None,
+        n_updates: 1,
+        peak_server_ms: opened,
+        peak_edge_top: dec!(0.0049),
+        peak_edge_top_gross: dec!(0.0137),
+        peak_max_size: dec!(83),
+        peak_cost_usd: dec!(99.59),
+        peak_payout_usd: dec!(100),
+        peak_fees_usd: dec!(0.96),
+        peak_pnl_net_usd: dec!(0.41),
+        peak_pnl_gross_usd: dec!(1.37),
+        peak_profit_per_dollar: None,
+        pnl_net_budget100_usd: Some(dec!(0.33)),
+        bottleneck_leg_idx: None,
+        bottleneck_notional_usd: None,
+        below_min_size: None,
+        max_seconds_delay: None,
+        days_to_end: None,
+        annualized_return: None,
+        post_end: None,
+        engine_suspect: false,
+        stale_transport: false,
+        open_lag_ms: None,
+        oracle_downgraded: None,
+        scanner_version: "t".into(),
+        config_hash: "c".into(),
+    }
+}
+
+async fn run(store: &Store, started_ms: i64) -> i64 {
+    store
+        .start_run(&NewRun {
+            service: "scanner".into(),
+            started_ms,
+            version: "t".into(),
+            config_hash: "c".into(),
+            mode: "live".into(),
+        })
+        .await
+        .unwrap()
+}
+
+async fn write(store: &Store, rows: Vec<EpisodeRow>) {
+    store
+        .write_batch(&Batch {
+            episodes: rows
+                .into_iter()
+                .map(|row| EpisodeWrite { row, legs: vec![] })
+                .collect(),
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+}
+
+async fn rw(db: &common::TestDb) -> Store {
+    Store::connect_analyze(db.opts.clone(), 2, 10_000, Some("analyze_rw"))
+        .await
+        .unwrap()
+}
+
+async fn body(store: &Store, win: &str, card: &str) -> Value {
+    let rows = store.card_results_for(win).await.unwrap();
+    let (_, b) = rows
+        .iter()
+        .find(|(c, _)| c == card)
+        .unwrap_or_else(|| panic!("no {card} for {win}: {rows:?}"));
+    serde_json::from_str(b).unwrap()
+}
+
+fn cell(b: &Value, label: &str, col: &str) -> Value {
+    b["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["label"] == label)
+        .unwrap_or_else(|| panic!("no row {label}"))[col]
+        .clone()
+}
+
+#[tokio::test]
+async fn a_tick_writes_every_card_and_window_with_statuses_and_meta() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for i in 0..12 {
+        rows.push(ep(
+            &format!("n{i:02}"),
+            r,
+            "no_basket",
+            T0 - 2 * H + i * M,
+            Some(T0 - 2 * H + i * M + 4_000),
+        ));
+    }
+    for i in 0..3 {
+        rows.push(ep(
+            &format!("y{i}"),
+            r,
+            "yes_basket",
+            T0 - H + i * M,
+            Some(T0 - H + i * M + 16_000),
+        ));
+    }
+    write(&owner, rows).await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.write_static_meta().await.unwrap();
+    let rep = a.tick(T0 + 30 * M).await.unwrap();
+    assert_eq!(
+        rep.results,
+        4 * 4 + 5,
+        "G1–G4 × 4 windows + EDGE × 5 windows"
+    );
+    let g1 = body(&rw, "7d", "G1").await;
+    assert_eq!(cell(&g1, "NO-side episodes", "ours"), "12");
+    assert_eq!(cell(&g1, "YES-side episodes", "their"), "3");
+    assert_eq!(cell(&g1, "YES-side episodes", "paper"), "2098");
+    assert_eq!(
+        g1["status"], "warming",
+        "data since T0 − 3 h starts inside 7d"
+    );
+    assert!(
+        g1["premise_key"]
+            .as_str()
+            .unwrap()
+            .contains("episode_def=1+aa")
+    );
+    assert_eq!(g1["hash"].as_str().unwrap().len(), 64);
+    let all = body(&rw, "all", "G1").await;
+    assert_eq!(
+        all["status"], "thin",
+        "all is never warming; YES n = 3 < 10 is thin"
+    );
+    let today: Vec<String> = rw
+        .card_results_for("today")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|x| x.0)
+        .collect();
+    assert_eq!(today, ["EDGE"]);
+    let edge = body(&rw, "24h", "EDGE").await;
+    assert_eq!(cell(&edge, "edge on the table", "ours"), "4.95");
+    let meta: Vec<String> = rw
+        .card_meta_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.0)
+        .collect();
+    for k in [
+        "cursor",
+        "fam:dur",
+        "fam:edge",
+        "fam:g1",
+        "fam:g4",
+        "last_error",
+        "not_replicated",
+        "papers",
+        "tick",
+    ] {
+        assert!(meta.contains(&k.to_string()), "{k} in {meta:?}");
+    }
+    let fam: Value =
+        serde_json::from_str(&rw.card_meta_get("fam:g1").await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        (fam["done"].as_bool(), fam["next_hour"].as_i64()),
+        (Some(true), Some(T0))
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_late_close_outside_the_recent_48h_rebuilds_the_old_hour_without_double_counting() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 70 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    let opened = T0 - 60 * H; // outside the 48 h in-memory cache, inside 7d
+    write(
+        &owner,
+        vec![
+            ep("long", r, "no_basket", opened, None),
+            ep(
+                "short",
+                r,
+                "no_basket",
+                opened + M,
+                Some(opened + M + 2_000),
+            ),
+        ],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0).await.unwrap();
+    let g3 = body(&rw, "7d", "G3").await;
+    assert_eq!(
+        cell(&g3, "episodes observed (per hour)", "their"),
+        "61",
+        "open: observed in every hour to now"
+    );
+    assert_eq!(
+        cell(&body(&rw, "7d", "G2").await, "NO durations (n)", "ours"),
+        "1"
+    );
+    // the late close: two hours long
+    write(
+        &owner,
+        vec![ep("long", r, "no_basket", opened, Some(opened + 2 * H))],
+    )
+    .await;
+    a.tick(T0 + 15 * M).await.unwrap();
+    for win in ["7d", "30d", "all"] {
+        let g3 = body(&rw, win, "G3").await;
+        assert_eq!(
+            cell(&g3, "episodes observed (per hour)", "their"),
+            "3",
+            "{win}: 2 hours of long + short"
+        );
+        let g2 = body(&rw, win, "G2").await;
+        assert_eq!(
+            cell(&g2, "NO durations (n)", "ours"),
+            "2",
+            "{win}: counted once, as a finished duration"
+        );
+    }
+    let key = body(&rw, "7d", "G2").await["premise_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stored = rw.card_cells_at("dur", &key, &[opened]).await.unwrap();
+    assert!(
+        stored[0].1.contains("7200000"),
+        "the opening hour's cell has the 2 h duration: {}",
+        stored[0].1
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_premise_bump_mid_window_never_mixes_keys() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run(&owner, T0 - 50 * H).await;
+    owner
+        .insert_run_premises(&premises(r1, "1+aa"))
+        .await
+        .unwrap();
+    owner.end_run(r1, T0 - 10 * H, "shutdown").await.unwrap();
+    write(
+        &owner,
+        (0..5)
+            .map(|i| {
+                ep(
+                    &format!("old{i}"),
+                    r1,
+                    "no_basket",
+                    T0 - 20 * H + i * M,
+                    Some(T0 - 20 * H + i * M + 1_000),
+                )
+            })
+            .collect(),
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0 - 6 * H).await.unwrap();
+    let old_key = body(&rw, "7d", "G1").await["premise_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old_cells = rw
+        .card_cells_range("g1", &old_key, 0, i64::MAX)
+        .await
+        .unwrap();
+    assert!(!old_cells.is_empty());
+    // a new run under a bumped episode_def
+    let r2 = run(&owner, T0 - 5 * H).await;
+    owner
+        .insert_run_premises(&premises(r2, "2+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        (0..3)
+            .map(|i| {
+                ep(
+                    &format!("new{i}"),
+                    r2,
+                    "no_basket",
+                    T0 - 4 * H + i * M,
+                    Some(T0 - 4 * H + i * M + 1_000),
+                )
+            })
+            .collect(),
+    )
+    .await;
+    a.tick(T0).await.unwrap();
+    for win in ["24h", "7d", "all"] {
+        let g1 = body(&rw, win, "G1").await;
+        assert!(
+            g1["premise_key"]
+                .as_str()
+                .unwrap()
+                .contains("episode_def=2+aa"),
+            "{win}"
+        );
+        assert_eq!(
+            cell(&g1, "NO-side episodes", "ours"),
+            "3",
+            "{win}: only the new key's run"
+        );
+        assert_eq!(g1["since_ms"].as_i64(), Some(T0 - 5 * H));
+    }
+    assert_eq!(body(&rw, "7d", "G1").await["status"], "warming");
+    assert_eq!(
+        rw.card_cells_range("g1", &old_key, 0, i64::MAX)
+            .await
+            .unwrap(),
+        old_cells,
+        "old cells untouched"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn runs_without_premises_are_never_counted() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run(&owner, T0 - 5 * H).await;
+    owner
+        .insert_run_premises(&premises(r1, "1+aa"))
+        .await
+        .unwrap();
+    owner.end_run(r1, T0 - 3 * H, "shutdown").await.unwrap();
+    let r2 = run(&owner, T0 - 2 * H).await; // a mixed-version run that wrote no premises
+    write(
+        &owner,
+        vec![
+            ep("a", r1, "no_basket", T0 - 4 * H, Some(T0 - 4 * H + 1_000)),
+            ep(
+                "b",
+                r1,
+                "no_basket",
+                T0 - 4 * H + M,
+                Some(T0 - 4 * H + M + 1_000),
+            ),
+            ep("c", r2, "no_basket", T0 - H, Some(T0 - H + 1_000)),
+            ep("d", r2, "no_basket", T0 - H + M, Some(T0 - H + M + 1_000)),
+        ],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0).await.unwrap();
+    assert_eq!(
+        cell(&body(&rw, "all", "G1").await, "NO-side episodes", "ours"),
+        "2"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn catch_up_builds_history_in_24_hour_batches_and_pauses_between_them() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 60 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        (0..60)
+            .map(|i| {
+                ep(
+                    &format!("e{i:02}"),
+                    r,
+                    "yes_basket",
+                    T0 - 60 * H + i * H,
+                    Some(T0 - 60 * H + i * H + 5_000),
+                )
+            })
+            .collect(),
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::from_millis(30), "test", scenarios())
+        .await
+        .unwrap();
+    let t = Instant::now();
+    let rep = a.tick(T0).await.unwrap();
+    assert_eq!(
+        rep.catch_up_hours,
+        4 * 61,
+        "61 hours (T0 − 60 h … T0) for each of the 4 families"
+    );
+    // 61 hours = batches of 24 + 24 + 13: 2 pauses per family
+    assert!(
+        t.elapsed() >= Duration::from_millis(4 * 2 * 30),
+        "{:?}",
+        t.elapsed()
+    );
+    let g1 = body(&rw, "7d", "G1").await;
+    assert_eq!(cell(&g1, "YES-side episodes", "ours"), "60");
+    assert_ne!(
+        g1["status"], "under_review",
+        "catch-up finished inside the tick"
+    );
+    let rep2 = a.tick(T0 + 20 * M).await.unwrap();
+    assert_eq!(rep2.catch_up_hours, 0, "a normal tick after catch-up");
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn the_startup_check_refuses_a_role_that_can_write_elsewhere() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    assert!(analyze::ensure_writes_only_cards(&owner).await.is_err());
+    let rw = rw(&db).await;
+    analyze::ensure_writes_only_cards(&rw).await.unwrap();
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_failed_tick_records_the_error_and_keeps_the_last_results() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep("a", r, "no_basket", T0 - H, Some(T0 - H + 1_000))],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0).await.unwrap();
+    owner
+        .raw_exec("ALTER TABLE card_results RENAME TO card_results_away")
+        .await
+        .unwrap();
+    let err = a.tick(T0 + 15 * M).await.unwrap_err();
+    a.record_error(T0 + 15 * M, &format!("{err:#}")).await;
+    a.reset();
+    owner
+        .raw_exec("ALTER TABLE card_results_away RENAME TO card_results")
+        .await
+        .unwrap();
+    let e: Value =
+        serde_json::from_str(&rw.card_meta_get("last_error").await.unwrap().unwrap()).unwrap();
+    assert_eq!(e["ms"].as_i64(), Some(T0 + 15 * M));
+    assert!(e["text"].as_str().unwrap().contains("card_results"), "{e}");
+    assert_eq!(
+        rw.card_results_for("7d").await.unwrap().len(),
+        5,
+        "the last results stay (G1–G4 and EDGE)"
+    );
+    a.tick(T0 + 30 * M).await.unwrap();
+    assert_eq!(
+        rw.card_meta_get("last_error").await.unwrap().as_deref(),
+        Some("null")
+    );
+    assert_eq!(
+        cell(&body(&rw, "7d", "G1").await, "NO-side episodes", "ours"),
+        "1",
+        "reloaded from card_cells, not doubled"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+/// Fails any write of an under_review result, so a test can prove none happened mid-tick.
+const NO_UNDER_REVIEW: &str = "CREATE FUNCTION no_under_review() RETURNS trigger LANGUAGE plpgsql AS $$ \
+     BEGIN IF NEW.status = 'under_review' THEN RAISE EXCEPTION 'under_review written for %', NEW.card; END IF; \
+     RETURN NEW; END $$; \
+     CREATE TRIGGER no_under_review BEFORE INSERT OR UPDATE ON card_results \
+     FOR EACH ROW EXECUTE FUNCTION no_under_review()";
+
+#[tokio::test]
+async fn a_restart_under_the_same_key_is_never_under_review_but_a_key_change_is() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r,
+            "no_basket",
+            T0 - 2 * H,
+            Some(T0 - 2 * H + 1_000),
+        )],
+    )
+    .await;
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0)
+        .await
+        .unwrap();
+    owner.raw_exec(NO_UNDER_REVIEW).await.unwrap();
+    // a restart two hours later: the gap is rebuilt, but the key did not change (F17)
+    let mut b = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    let rep = b.tick(T0 + 2 * H).await.unwrap();
+    assert!(rep.catch_up_hours > 0, "the downtime hours are rebuilt");
+    assert_eq!(
+        cell(&body(&rw, "7d", "G1").await, "NO-side episodes", "ours"),
+        "1",
+        "loaded, not doubled"
+    );
+    // a premise bump: under_review while the new key catches up
+    let r2 = run(&owner, T0 + 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r2, "2+aa"))
+        .await
+        .unwrap();
+    let err = b.tick(T0 + 3 * H).await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("under_review written"),
+        "{err:#}"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_clock_that_went_back_before_the_key_began_never_panics() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 + 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r,
+            "no_basket",
+            T0 + 3 * H + M,
+            Some(T0 + 3 * H + M + 1_000),
+        )],
+    )
+    .await;
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0 + 4 * H)
+        .await
+        .unwrap();
+    // restart with a clock 4 h behind: the key's first run starts after "now" (F10: no clamp panic)
+    let mut b = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    b.tick(T0).await.unwrap();
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+fn mark(run_id: i64, t_ms: i64, equity: rust_decimal::Decimal) -> PaperMarkRow {
+    let z = dec!(0);
+    PaperMarkRow {
+        run_id,
+        account_id: "p0-sp-idle".into(),
+        t_ms,
+        cash: equity,
+        equity,
+        realized: z,
+        unrealized: z,
+        fees_paid: z,
+        locked: z,
+        max_drawdown: z,
+        n_positions: 0,
+    }
+}
+
+#[tokio::test]
+async fn equity_deltas_start_from_the_bankroll_for_an_account_begun_inside_the_window() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r,
+            "no_basket",
+            T0 - 2 * H,
+            Some(T0 - 2 * H + 1_000),
+        )],
+    )
+    .await;
+    let account = PaperAccountRow {
+        run_id: r,
+        account_id: "p0-sp-idle".into(),
+        policy: "P0-converter".into(),
+        scenario: "sp-idle".into(),
+        fee_bips: dec!(0),
+        bankroll: dec!(1000),
+        per_trade: dec!(100),
+        policies_sha256: "x".into(),
+    };
+    let marks = vec![
+        mark(r, T0 - H + 10 * M, dec!(1001)),
+        mark(r, T0 - H + 20 * M, dec!(1003)),
+    ];
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![account],
+            paper_marks: marks,
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0 + 30 * M)
+        .await
+        .unwrap();
+    for win in ["24h", "all"] {
+        let e = body(&rw, win, "EDGE").await;
+        assert_eq!(
+            cell(&e, "captured at sp-idle (145 ms)", "ours"),
+            "3",
+            "{win}: +1 vs the bankroll, then +2"
+        );
+    }
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_late_host_row_brings_an_older_run_into_edge_capture_once() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run(&owner, T0 - 10 * H).await;
+    let no_host: Vec<RunPremiseRow> = premises(r1, "1+aa")
+        .into_iter()
+        .filter(|p| p.area != "host")
+        .collect();
+    owner.insert_run_premises(&no_host).await.unwrap();
+    owner.end_run(r1, T0 - 6 * H, "shutdown").await.unwrap();
+    let r2 = run(&owner, T0 - 5 * H).await;
+    owner
+        .insert_run_premises(&premises(r2, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![
+            ep("a", r1, "no_basket", T0 - 8 * H, Some(T0 - 8 * H + 1_000)),
+            ep(
+                "b",
+                r1,
+                "no_basket",
+                T0 - 8 * H + M,
+                Some(T0 - 8 * H + M + 1_000),
+            ),
+            ep("c", r2, "no_basket", T0 - 4 * H, Some(T0 - 4 * H + 1_000)),
+        ],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0).await.unwrap();
+    assert_eq!(
+        cell(&body(&rw, "all", "EDGE").await, "edge on the table", "ours"),
+        "0.33",
+        "run 1 has no host yet"
+    );
+    assert_eq!(
+        cell(&body(&rw, "all", "G1").await, "NO-side episodes", "ours"),
+        "3",
+        "G1 needs no host"
+    );
+    owner
+        .insert_run_premises(
+            &premises(r1, "1+aa")
+                .into_iter()
+                .filter(|p| p.area == "host")
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    a.tick(T0 + 15 * M).await.unwrap();
+    let e = body(&rw, "all", "EDGE").await;
+    assert_eq!(
+        cell(&e, "edge on the table", "ours"),
+        "0.99",
+        "run 1 now counts, once"
+    );
+    assert_eq!(e["since_ms"].as_i64(), Some(T0 - 10 * H));
+    a.tick(T0 + 30 * M).await.unwrap();
+    assert_eq!(
+        cell(&body(&rw, "all", "EDGE").await, "edge on the table", "ours"),
+        "0.99",
+        "still once"
+    );
+    assert_eq!(
+        cell(&body(&rw, "all", "G1").await, "NO-side episodes", "ours"),
+        "3"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}

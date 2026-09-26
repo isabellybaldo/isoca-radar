@@ -34,7 +34,7 @@ fn crate_graph_matches_spec_9_2() {
         "pm-api",
         "store",
     ];
-    for pure in ["arb-core", "sim"] {
+    for pure in ["arb-core", "sim", "cards"] {
         for bad in io {
             assert!(!d[pure].contains(bad), "{pure} must stay pure (no {bad})");
         }
@@ -66,6 +66,16 @@ fn crate_graph_matches_spec_9_2() {
             "api reads Postgres only via store and has no network client or trading code ({bad})"
         );
     }
+    for bad in ["reqwest", "tokio-tungstenite", "sqlx", "pm-api"] {
+        assert!(
+            !d["analyze"].contains(bad),
+            "analyze reads Postgres only via store and has no network client ({bad})"
+        );
+    }
+    assert!(
+        !d["cards"].contains("store"),
+        "cards is pure: analyze does the IO"
+    );
 }
 
 /// Pulls the `["a", "b", ...]` string list assigned to `const NAME: [&str; N] = [...]` out of
@@ -98,6 +108,21 @@ fn scanner_and_api_guard_denylists_are_identical() {
     let api_contains = denylist(&api_src, "CONTAINS");
     let scanner_prefixes = denylist(&scanner_src, "PREFIXES");
     let api_prefixes = denylist(&api_src, "PREFIXES");
+    let analyze_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../analyze/src/guard.rs"
+    ))
+    .expect("analyze guard.rs");
+    assert_eq!(
+        scanner_contains,
+        denylist(&analyze_src, "CONTAINS"),
+        "CONTAINS drifted in analyze"
+    );
+    assert_eq!(
+        scanner_prefixes,
+        denylist(&analyze_src, "PREFIXES"),
+        "PREFIXES drifted in analyze"
+    );
     // A parity check that silently passed on two empty lists (a botched parser, both files
     // gutted) would be worse than useless, so pin both lists non-empty at their real sizes.
     assert!(!scanner_contains.is_empty(), "CONTAINS parsed as empty");
