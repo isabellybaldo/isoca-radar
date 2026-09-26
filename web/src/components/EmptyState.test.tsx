@@ -24,4 +24,17 @@ describe('states', () => {
     expect(screen.getByText('got 1')).toBeInTheDocument();
     render(<Loading />);
   });
+
+  it('shows the error above stale content instead of hiding it (a failed refetch)', () => {
+    const e = new ApiError(503, 'db_unavailable', 'The database is thinking. Try again in a moment.');
+    render(
+      <Loadable state={{ data: 1, error: e, loading: false, reload: () => {} }} what="x">
+        {(n) => <p>{`got ${n}`}</p>}
+      </Loadable>,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('The database is thinking. Try again in a moment.');
+    expect(screen.getByText('got 1')).toBeInTheDocument();
+    const order = screen.getByRole('alert').compareDocumentPosition(screen.getByText('got 1'));
+    expect(Boolean(order & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+  });
 });

@@ -285,6 +285,85 @@ async fn open_episodes_come_only_from_the_newest_live_run() {
     db.drop(owner).await;
 }
 
+/// Ruling 12 (I1): a crash-loop or the breaker starting a `safe` run must hide the crashed live
+/// run's never-closed episodes, not keep showing them as open.
+#[tokio::test]
+async fn open_episodes_are_empty_after_a_newer_safe_run() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    let mut open = ep("live-1-00000001", live, 1_000);
+    open.closed_server_ms = None;
+    write_eps(&owner, vec![open]).await;
+    let analyze = ro(&db).await;
+    assert_eq!(analyze.open_episodes().await.unwrap().len(), 1);
+    run(&owner, "safe").await; // the breaker restarted the scanner in safe mode
+    assert!(analyze.open_episodes().await.unwrap().is_empty());
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
+/// Ruling 12 (I1): replay runs also write `service = 'scanner'` rows (checked against
+/// `bins/scanner/src/run.rs`), so a replay started after the live run must be excluded from the
+/// "newest run" check — otherwise it would hide the live run's still-open episodes.
+#[tokio::test]
+async fn open_episodes_survive_a_newer_replay_run() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    let mut open = ep("live-1-00000001", live, 1_000);
+    open.closed_server_ms = None;
+    write_eps(&owner, vec![open]).await;
+    let analyze = ro(&db).await;
+    assert_eq!(analyze.open_episodes().await.unwrap().len(), 1);
+    run(&owner, "replay").await; // newer than `live`, but must not hide it
+    let rows = analyze.open_episodes().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].episode_id, "live-1-00000001");
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
+/// health_series caps at MAX_SERIES_ROWS by keeping the *newest* minutes, not the oldest, while
+/// the api's output order stays ascending. Bulk-inserted with `generate_series` (bypassing
+/// `write_batch`) so a MAX_SERIES_ROWS+5-row window is cheap to set up.
+#[tokio::test]
+async fn health_series_keeps_the_newest_minutes_when_capped() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    let extra = 5i64;
+    let last = MAX_SERIES_ROWS + extra - 1;
+    owner
+        .raw_exec(&format!(
+            "INSERT INTO health (run_id, minute_ms, tokens, shards, msgs, bytes, drops, \
+                 reconnects, capture_paused, parked_shards, dropped_groups) \
+             SELECT {live}, g * {MIN}, 1, 1, 1, 1, 0, 0, false, 0, 0 \
+             FROM generate_series(0, {last}) AS g"
+        ))
+        .await
+        .unwrap();
+    let analyze = ro(&db).await;
+    let series = analyze
+        .health_series(0, (last + 1) * MIN + 1)
+        .await
+        .unwrap();
+    assert_eq!(series.len(), usize::try_from(MAX_SERIES_ROWS).unwrap());
+    let minutes: Vec<i64> = series.iter().map(|r| r.minute_ms).collect();
+    assert_eq!(
+        minutes[0],
+        extra * MIN,
+        "the oldest {extra} minutes were dropped"
+    );
+    assert_eq!(minutes[minutes.len() - 1], last * MIN);
+    assert!(minutes.windows(2).all(|w| w[0] < w[1]), "ascending order");
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
 #[tokio::test]
 async fn episodes_page_filters_by_kind_net_and_flags_inside_the_range() {
     let Some((owner, db)) = common::fresh().await else {

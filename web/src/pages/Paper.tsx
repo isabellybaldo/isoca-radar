@@ -106,7 +106,7 @@ function Cards({ accounts }: { accounts: PaperAccount[] }) {
           ) : (
             <p>
               realized <Money value={a.realized} signed tone /> · unrealized <Money value={a.unrealized} signed tone /> · locked{' '}
-              <Money value={a.locked} /> · max dd <Money value={a.max_drawdown} /> · {a.n_positions ?? 0} open
+              <Money value={a.locked} /> · max dd <Money value={a.max_drawdown} /> · {a.n_positions === null ? '—' : a.n_positions} open
             </p>
           )}
         </div>

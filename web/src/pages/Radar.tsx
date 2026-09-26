@@ -18,6 +18,10 @@ import { formatDecimal } from '../lib/money';
 
 export const EMPTY_RADAR = '0 opportunities. The market is efficient, or we are slow. Probably both.';
 export const NO_HEALTH = 'No health rows yet. The scanner may be asleep.';
+export const OPEN_STALE = 'scanner not reporting — list may be stale';
+/** Past this age (ms) the last health minute is old enough that the open-episodes list itself may
+ * no longer reflect reality (the scanner could be down, and nothing would ever close these rows). */
+const STALE_HEALTH_MS = 180_000;
 
 /** Spec §5: N gross, M net. "Fees: N−M. Us: M." */
 export function todayQuip(gross: number, net: number): string {
@@ -69,11 +73,12 @@ function EdgeBar({ edge, max }: { edge: string; max: number }) {
 export function Radar() {
   const { episodeTick, healthTick } = useStream();
   const slow = useTicker(30_000);
-  const health = useApi((s) => api.healthNow(s), [healthTick, slow]);
-  const open = useApi((s) => api.openEpisodes(s), [episodeTick, slow]);
-  const today = useApi((s) => api.today(s), [episodeTick, slow]);
+  const health = useApi((s) => api.healthNow(s), [], [healthTick, slow]);
+  const open = useApi((s) => api.openEpisodes(s), [], [episodeTick, slow]);
+  const today = useApi((s) => api.today(s), [], [episodeTick, slow]);
   const now = useNow(100);
   const rows = open.data?.items ?? [];
+  const staleHealth = (health.data?.health?.age_ms ?? 0) > STALE_HEALTH_MS;
   const maxEdge = Math.max(0, ...rows.map((r) => Number(r.edge)));
   const columns: Column<EpisodeSummary>[] = [
     {
@@ -102,6 +107,7 @@ export function Radar() {
         {(d) => (d.health === null ? <Box><EmptyState text={NO_HEALTH} /></Box> : <HealthBar h={d.health} />)}
       </Loadable>
       <Box title={`OPEN EPISODES · ${rows.length}`}>
+        {staleHealth && <Tag tone="flag">{OPEN_STALE}</Tag>}
         <Loadable state={open} what="open episodes">
           {(d) =>
             d.items.length === 0 ? (

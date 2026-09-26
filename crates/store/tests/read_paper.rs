@@ -265,6 +265,41 @@ async fn positions_parse_a_real_sim_account_and_ignore_odd_states() {
     db.drop(owner).await;
 }
 
+/// Ruling 12: a non-numeric `qty`/`basis` in a corrupt `paper_state` row must skip just that row,
+/// not fail the whole call with a Postgres cast error.
+#[tokio::test]
+async fn positions_skip_a_row_with_non_numeric_qty_or_basis() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    owner
+        .raw_exec(
+            "INSERT INTO paper_state (account_id, state, updated_ms) VALUES \
+             ('good', '{\"positions\":[[{\"market_id\":\"m1\",\"outcome\":\"yes\"},{\"qty\":\"40\",\"basis\":\"18\"}]],\"returned\":[]}', 1), \
+             ('bad-qty', '{\"positions\":[[{\"market_id\":\"m2\",\"outcome\":\"no\"},{\"qty\":\"abc\",\"basis\":\"5\"}]],\"returned\":[]}', 1), \
+             ('bad-basis', '{\"positions\":[[{\"market_id\":\"m3\",\"outcome\":\"no\"},{\"qty\":\"5\",\"basis\":[1,2]}]],\"returned\":[]}', 1), \
+             ('bad-returned', '{\"positions\":[],\"returned\":[[{\"market_id\":\"m4\",\"outcome\":\"yes\"},\"NaN\"]]}', 1)",
+        )
+        .await
+        .unwrap();
+    let analyze = ro(&db).await;
+    let pos = analyze.paper_positions().await.unwrap();
+    assert_eq!(
+        pos,
+        vec![PaperPosition {
+            account_id: "good".into(),
+            market_id: "m1".into(),
+            outcome: "yes".into(),
+            qty: dec!(40),
+            basis: dec!(18),
+            returned: false,
+            event_title: None,
+        }]
+    );
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
 #[tokio::test]
 async fn ledger_pages_newest_first_by_run_then_seq() {
     let Some((owner, db)) = common::fresh().await else {

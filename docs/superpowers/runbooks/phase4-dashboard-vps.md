@@ -155,7 +155,9 @@ docker compose -f compose.yml -f compose.web.yml port postgres 5432; echo "exit=
 docker compose -f compose.yml -f compose.web.yml exec postgres psql -U ct_owner -d cute_trading -tAc "select count(*) from pg_stat_activity where usename = 'analyze_ro'"
 ```
 Pass: api under 128 MiB, web under 32 MiB, oauth2-proxy under 64 MiB, the scanner's CPU as before; no
-published Postgres port; `analyze_ro` holds at most 4 connections (one of them the shared LISTEN).
+published Postgres port; the api's connections (role `analyze_ro`; the api sets no
+`application_name`, so this counts every session under that role — nothing else in this deployment
+connects as `analyze_ro`) top out around 4, one of them the shared LISTEN.
 
 ## 6. Phase 4 exit (after a week of capture)
 

@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { healthFixture, healthPointFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { Health, NO_HEALTH_ROWS } from './Health';
@@ -32,6 +32,33 @@ const integrity = {
 };
 
 describe('Health', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('refetches every 30 s even without an SSE event, so a stuck scanner or stream still updates', async () => {
+    vi.useFakeTimers();
+    const f = mockApi({
+      '/api/health/now': { health: healthFixture() },
+      '/api/health/series': { from_ms: 0, to_ms: 1, points: [] },
+      '/api/integrity/summary': integrity,
+    });
+    renderAt('/health');
+    const calls = (path: string) => f.mock.calls.filter((c) => String(c[0]).startsWith(path)).length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls('/api/health/now')).toBe(1);
+    expect(calls('/api/health/series')).toBe(1);
+    expect(calls('/api/integrity/summary')).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(calls('/api/health/now')).toBe(2);
+    expect(calls('/api/health/series')).toBe(2);
+    expect(calls('/api/integrity/summary')).toBe(2);
+  });
+
   it('shows capture status, per-minute charts with reconnect markers, and integrity per million', async () => {
     mockApi({
       '/api/health/now': { health: healthFixture({ capture_paused: true }) },

@@ -133,11 +133,15 @@ impl Store {
 
     /// Holdings in the live `paper_state` saves (sim::Account JSON: `positions` and `returned` are
     /// arrays of [LegKey, value] pairs). A state that isn't a JSON object, or has no such arrays,
-    /// contributes nothing.
+    /// contributes nothing. A row whose `qty`/`basis` isn't a plain decimal (corrupt state, a
+    /// stray object or string) is skipped rather than failing the whole query with a cast error:
+    /// the regex guards the `::numeric` cast the same way a `jsonb_typeof(...) = 'number'` check
+    /// would, since these values come out of `->>` as text regardless of the underlying JSON type.
     pub async fn paper_positions(&self) -> Result<Vec<PaperPosition>, StoreError> {
         if !self.paper_ready().await? {
             return Ok(Vec::new());
         }
+        const NUM: &str = r"^-?[0-9]+(\.[0-9]+)?$";
         Ok(sqlx::query_as::<_, PaperPosition>(
             "WITH s AS ( \
                  SELECT account_id, state::jsonb AS j FROM paper_state WHERE state IS JSON OBJECT \
@@ -149,14 +153,14 @@ impl Store {
                  FROM s CROSS JOIN LATERAL jsonb_array_elements( \
                      CASE WHEN jsonb_typeof(s.j->'positions') = 'array' THEN s.j->'positions' \
                           ELSE '[]'::jsonb END) p \
-                 WHERE p.value->1->>'qty' IS NOT NULL AND p.value->1->>'basis' IS NOT NULL \
+                 WHERE p.value->1->>'qty' ~ $1 AND p.value->1->>'basis' ~ $1 \
                  UNION ALL \
                  SELECT s.account_id, r.value->0->>'market_id', r.value->0->>'outcome', \
                         (r.value->>1)::numeric, 0::numeric, true \
                  FROM s CROSS JOIN LATERAL jsonb_array_elements( \
                      CASE WHEN jsonb_typeof(s.j->'returned') = 'array' THEN s.j->'returned' \
                           ELSE '[]'::jsonb END) r \
-                 WHERE r.value->>1 IS NOT NULL \
+                 WHERE r.value->>1 ~ $1 \
              ) \
              SELECT h.account_id, h.market_id, h.outcome, h.qty, h.basis, h.returned, \
                     e.title AS event_title \
@@ -166,6 +170,7 @@ impl Store {
              WHERE h.market_id IS NOT NULL AND h.outcome IS NOT NULL \
              ORDER BY h.account_id, h.returned, h.market_id, h.outcome LIMIT 1000",
         )
+        .bind(NUM)
         .fetch_all(self.pool())
         .await?)
     }

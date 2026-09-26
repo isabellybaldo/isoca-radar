@@ -108,7 +108,7 @@ services:
       - "traefik.http.routers.ct-oauth.rule=Host(`${RADAR_DOMAIN}`) && PathPrefix(`/oauth2/`)"
       - traefik.http.routers.ct-oauth.entrypoints=websecure
       - traefik.http.routers.ct-oauth.tls.certresolver=letsencrypt
-      - traefik.http.routers.ct-oauth.middlewares=ct-sec@docker,ct-rl@docker
+      - traefik.http.routers.ct-oauth.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker
       - traefik.http.routers.ct-oauth.service=ct-oauth
       - traefik.http.services.ct-oauth.loadbalancer.server.port=4180
       # http → https

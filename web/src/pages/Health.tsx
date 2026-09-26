@@ -9,6 +9,7 @@ import { LineChart } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
 import { Table } from '../components/Table';
 import { Tag } from '../components/Tag';
+import { useTicker } from '../lib/hooks';
 import { formatDecimal } from '../lib/money';
 import { fmtDuration, fmtLocal, fmtUtcDateTime } from '../lib/time';
 
@@ -92,9 +93,10 @@ export function Health() {
   const asked = Number(sp.get('hours'));
   const hours = WINDOWS.includes(asked) ? asked : 24;
   const { healthTick } = useStream();
-  const now = useApi((s) => api.healthNow(s), [healthTick]);
-  const series = useApi((s) => api.healthSeries(hours, s), [hours, healthTick]);
-  const integrity = useApi((s) => api.integrity(hours, s), [hours, healthTick]);
+  const slow = useTicker(30_000);
+  const now = useApi((s) => api.healthNow(s), [], [healthTick, slow]);
+  const series = useApi((s) => api.healthSeries(hours, s), [hours], [healthTick, slow]);
+  const integrity = useApi((s) => api.integrity(hours, s), [hours], [healthTick, slow]);
   return (
     <>
       <Box title="WINDOW">

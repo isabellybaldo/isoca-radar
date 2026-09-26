@@ -150,17 +150,21 @@ impl Store {
         Ok(Some(HealthNow { row, drops_5m }))
     }
 
-    /// Live health minutes in [from_ms, to_ms), oldest first.
+    /// Live health minutes in [from_ms, to_ms), oldest first. When the window holds more than
+    /// `MAX_SERIES_ROWS` minutes, the newest minutes are kept (the inner query orders and caps
+    /// newest-first; the outer query restores ascending order for the api).
     pub async fn health_series(
         &self,
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<HealthRow>, StoreError> {
         let sql = format!(
-            "SELECT {HEALTH_COLS} FROM health \
-             WHERE run_id IN (SELECT run_id FROM runs WHERE mode = 'live') \
-               AND minute_ms >= $1 AND minute_ms < $2 \
-             ORDER BY minute_ms, run_id LIMIT {MAX_SERIES_ROWS}"
+            "SELECT {HEALTH_COLS} FROM ( \
+                 SELECT {HEALTH_COLS} FROM health \
+                 WHERE run_id IN (SELECT run_id FROM runs WHERE mode = 'live') \
+                   AND minute_ms >= $1 AND minute_ms < $2 \
+                 ORDER BY minute_ms DESC, run_id DESC LIMIT {MAX_SERIES_ROWS} \
+             ) newest ORDER BY minute_ms, run_id"
         );
         Ok(sqlx::query_as::<_, HealthRow>(&sql)
             .bind(from_ms)
@@ -202,12 +206,19 @@ impl Store {
     }
 
     /// Unclosed live episodes of the newest live scanner run only: a crashed run's never-closed
-    /// rows are history, not opportunities.
+    /// rows are history, not opportunities. "Newest" is judged against every scanner run except
+    /// `replay` (a replay started after the live run must never hide live data): if that newest
+    /// run isn't itself `live` — a crash-loop, or the breaker starting a `safe` run — nothing here
+    /// is still open and the list is empty.
     pub async fn open_episodes(&self) -> Result<Vec<EpisodeSummary>, StoreError> {
         let sql = format!(
-            "SELECT {SUMMARY_COLS} FROM episodes e \
+            "WITH newest AS ( \
+                 SELECT run_id, mode FROM runs \
+                 WHERE service = 'scanner' AND mode <> 'replay' \
+                 ORDER BY run_id DESC LIMIT 1) \
+             SELECT {SUMMARY_COLS} FROM episodes e, newest n \
              WHERE e.source = 'live' AND e.closed_server_ms IS NULL \
-               AND e.run_id = (SELECT max(run_id) FROM runs WHERE service = 'scanner' AND mode = 'live') \
+               AND n.mode = 'live' AND e.run_id = n.run_id \
              ORDER BY e.opened_server_ms DESC, e.episode_id DESC LIMIT {MAX_OPEN}"
         );
         Ok(sqlx::query_as::<_, EpisodeSummary>(&sql)

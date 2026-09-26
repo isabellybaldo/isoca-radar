@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { episodeSummaryFixture, healthFixture, todayFixture } from '../test/fixtures';
 import { jsonResponse, mockApi } from '../test/mockApi';
-import { EMPTY_RADAR, NO_HEALTH, Radar, msgsPerSecond, todayQuip } from './Radar';
+import { EMPTY_RADAR, NO_HEALTH, OPEN_STALE, Radar, msgsPerSecond, todayQuip } from './Radar';
 
 const renderRadar = () =>
   render(
@@ -66,6 +66,27 @@ describe('Radar', () => {
     expect(await screen.findByRole('img', { name: /^health 8 of 10/ })).toBeInTheDocument();
     expect(screen.getByText('DROPS IN THE LAST 5 MIN')).toBeInTheDocument();
     expect(screen.getByText('CAPTURE PAUSED')).toBeInTheDocument();
+  });
+
+  it('tags the open-episodes list as stale when the scanner has not reported in over 3 minutes', async () => {
+    mockApi({
+      '/api/health/now': { health: healthFixture({ age_ms: 200_000 }) },
+      '/api/episodes/open': { now_ms: 0, items: [episodeSummaryFixture()] },
+      '/api/today': todayFixture(1, 1),
+    });
+    renderRadar();
+    expect(await screen.findByText(OPEN_STALE)).toBeInTheDocument();
+  });
+
+  it('does not tag the open-episodes list as stale when the scanner reported recently', async () => {
+    mockApi({
+      '/api/health/now': { health: healthFixture({ age_ms: 5_000 }) },
+      '/api/episodes/open': { now_ms: 0, items: [] },
+      '/api/today': todayFixture(0, 0),
+    });
+    renderRadar();
+    expect(await screen.findByText(EMPTY_RADAR)).toBeInTheDocument();
+    expect(screen.queryByText(OPEN_STALE)).not.toBeInTheDocument();
   });
 
   it('explains a missing health row and a busy database instead of going blank', async () => {
