@@ -169,6 +169,58 @@ async fn premise_runs_are_live_scanner_runs_with_premises_and_their_ends() {
     db.drop(owner).await;
 }
 
+// Fix round 1 finding: premise_runs (both of its queries) and p0_accounts used a bare LIMIT with
+// no capped() check, breaking the module's own "a capped read that overflows is an error, never a
+// truncation" contract. This proves the fix with small, practical caps via the test-only
+// `..._capped` parameter, instead of seeding hundreds of thousands of rows.
+#[tokio::test]
+async fn premise_runs_and_p0_accounts_error_on_overflow_instead_of_truncating() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run_at(&owner, "live", 1_000).await;
+    let r2 = run_at(&owner, "live", 2_000).await;
+    premises(&owner, r1).await;
+    premises(&owner, r2).await;
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![PaperAccountRow {
+                run_id: r1,
+                account_id: "P0-converter/sp-idle".into(),
+                policy: "P0-converter".into(),
+                scenario: "sp-idle".into(),
+                fee_bips: dec!(0),
+                bankroll: dec!(1000),
+                per_trade: dec!(100),
+                policies_sha256: "ab".repeat(32),
+            }],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let analyze = rw(&db).await;
+    // Two runs recorded premises: a run_cap of 1 must error, not silently return 1 of the 2.
+    assert!(matches!(
+        analyze.premise_runs_capped(1, 100).await,
+        Err(StoreError::TooManyRows("premise_runs"))
+    ));
+    // Two run_premises rows exist: a premise_cap of 1 must error too.
+    assert!(matches!(
+        analyze.premise_runs_capped(100, 1).await,
+        Err(StoreError::TooManyRows("premise_runs"))
+    ));
+    // One P0-converter account exists: a cap of 0 must error, not return an empty page.
+    assert!(matches!(
+        analyze.p0_accounts_capped(0).await,
+        Err(StoreError::TooManyRows("p0_accounts"))
+    ));
+    // Under the real caps, nothing changed: every row still comes back.
+    assert_eq!(analyze.premise_runs().await.unwrap().len(), 2);
+    assert_eq!(analyze.p0_accounts().await.unwrap().len(), 1);
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
 #[tokio::test]
 async fn changed_spans_page_by_updated_ms_then_id_and_skip_replays() {
     let Some((owner, db)) = common::fresh().await else {

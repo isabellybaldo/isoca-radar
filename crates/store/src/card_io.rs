@@ -13,6 +13,9 @@ pub const MAX_CHANGED_PAGE: i64 = 5_000;
 pub const CARD_TABLES: [&str; 3] = ["card_cells", "card_results", "card_meta"];
 const MAX_ROWS: i64 = 200_000;
 const CELL_CHUNK: usize = 1_000;
+const MAX_PREMISE_RUNS: i64 = 100_000;
+const MAX_RUN_PREMISE_ROWS: i64 = 1_000_000;
+const MAX_P0_ACCOUNTS: i64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PremiseRun {
@@ -137,22 +140,43 @@ impl Store {
 
     /// Live scanner runs that recorded premises, oldest first (runs without them never count).
     pub async fn premise_runs(&self) -> Result<Vec<PremiseRun>, StoreError> {
-        let runs: Vec<(i64, i64, Option<i64>)> = sqlx::query_as(
-            "SELECT r.run_id, r.started_ms, \
-                    COALESCE(r.ended_ms, (SELECT min(n.started_ms) FROM runs n \
-                        WHERE n.service = 'scanner' AND n.mode IN ('live', 'safe') AND n.run_id > r.run_id)) \
-             FROM runs r \
-             WHERE r.service = 'scanner' AND r.mode = 'live' \
-               AND EXISTS (SELECT 1 FROM run_premises p WHERE p.run_id = r.run_id) \
-             ORDER BY r.run_id LIMIT 100000",
-        )
-        .fetch_all(self.pool())
-        .await?;
-        let rows: Vec<(i64, String, String)> = sqlx::query_as(
-            "SELECT run_id, area, version FROM run_premises ORDER BY run_id, area LIMIT 1000000",
-        )
-        .fetch_all(self.pool())
-        .await?;
+        self.premise_runs_capped(MAX_PREMISE_RUNS, MAX_RUN_PREMISE_ROWS)
+            .await
+    }
+
+    /// Admin/test tooling: `premise_runs` with its two row caps as parameters, so a test can prove
+    /// the overflow-is-an-error contract without seeding hundreds of thousands of rows.
+    pub async fn premise_runs_capped(
+        &self,
+        run_cap: i64,
+        premise_cap: i64,
+    ) -> Result<Vec<PremiseRun>, StoreError> {
+        let runs: Vec<(i64, i64, Option<i64>)> = capped(
+            sqlx::query_as(
+                "SELECT r.run_id, r.started_ms, \
+                        COALESCE(r.ended_ms, (SELECT min(n.started_ms) FROM runs n \
+                            WHERE n.service = 'scanner' AND n.mode IN ('live', 'safe') AND n.run_id > r.run_id)) \
+                 FROM runs r \
+                 WHERE r.service = 'scanner' AND r.mode = 'live' \
+                   AND EXISTS (SELECT 1 FROM run_premises p WHERE p.run_id = r.run_id) \
+                 ORDER BY r.run_id LIMIT $1",
+            )
+            .bind(run_cap + 1)
+            .fetch_all(self.pool())
+            .await?,
+            run_cap,
+            "premise_runs",
+        )?;
+        let rows: Vec<(i64, String, String)> = capped(
+            sqlx::query_as(
+                "SELECT run_id, area, version FROM run_premises ORDER BY run_id, area LIMIT $1",
+            )
+            .bind(premise_cap + 1)
+            .fetch_all(self.pool())
+            .await?,
+            premise_cap,
+            "premise_runs",
+        )?;
         Ok(runs
             .into_iter()
             .map(|(run_id, started_ms, end_ms)| PremiseRun {
@@ -255,12 +279,20 @@ impl Store {
 
     /// P0-converter accounts at the default fee: (account_id, scenario), one per scenario.
     pub async fn p0_accounts(&self) -> Result<Vec<(String, String)>, StoreError> {
-        Ok(sqlx::query_as(
+        self.p0_accounts_capped(MAX_P0_ACCOUNTS).await
+    }
+
+    /// Admin/test tooling: `p0_accounts` with its row cap as a parameter, so a test can prove the
+    /// overflow-is-an-error contract without seeding thousands of accounts.
+    pub async fn p0_accounts_capped(&self, cap: i64) -> Result<Vec<(String, String)>, StoreError> {
+        let rows = sqlx::query_as(
             "SELECT DISTINCT account_id, scenario FROM paper_accounts \
-             WHERE policy = 'P0-converter' AND fee_bips = 0 ORDER BY 1 LIMIT 1000",
+             WHERE policy = 'P0-converter' AND fee_bips = 0 ORDER BY 1 LIMIT $1",
         )
+        .bind(cap + 1)
         .fetch_all(self.pool())
-        .await?)
+        .await?;
+        capped(rows, cap, "p0_accounts")
     }
 
     /// For each account: its last mark before `from_ms` (any run), then its marks in
