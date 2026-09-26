@@ -18,6 +18,28 @@ impl StoreError {
             _ => false,
         }
     }
+
+    /// True when the database is busy or unreachable, so the api answers 503 ("try again"):
+    /// a statement timeout (57014), an admin shutdown/crash (57P*), a connection failure (08*),
+    /// too many connections (53300), pool exhaustion, or a broken socket.
+    pub fn is_unavailable(&self) -> bool {
+        match self {
+            StoreError::Db(sqlx::Error::Database(e)) => e
+                .code()
+                .map(|c| {
+                    c == "57014" || c.starts_with("57P") || c.starts_with("08") || c == "53300"
+                })
+                .unwrap_or(false),
+            StoreError::Db(
+                sqlx::Error::PoolTimedOut
+                | sqlx::Error::PoolClosed
+                | sqlx::Error::Io(_)
+                | sqlx::Error::Tls(_)
+                | sqlx::Error::WorkerCrashed,
+            ) => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -27,5 +49,11 @@ mod tests {
     #[test]
     fn a_non_data_error_is_not_classified_as_data() {
         assert!(!StoreError::Db(sqlx::Error::PoolTimedOut).is_data_error());
+    }
+
+    #[test]
+    fn pool_timeouts_are_unavailable_but_missing_rows_are_not() {
+        assert!(StoreError::Db(sqlx::Error::PoolTimedOut).is_unavailable());
+        assert!(!StoreError::Db(sqlx::Error::RowNotFound).is_unavailable());
     }
 }

@@ -153,7 +153,7 @@ pub struct IntegrityRow {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct HealthRow {
     pub run_id: i64,
     pub minute_ms: i64,

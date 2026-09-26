@@ -8,7 +8,7 @@ use sqlx::{Postgres, QueryBuilder};
 use std::collections::HashMap;
 
 /// Column order used for every episode insert/select. `push_episode` binds in exactly this order.
-const EPISODE_COLS: [&str; 49] = [
+pub(crate) const EPISODE_COLS: [&str; 49] = [
     "episode_id",
     "run_id",
     "source",

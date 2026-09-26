@@ -5,6 +5,7 @@
 mod batch;
 pub mod error;
 mod paper;
+mod read;
 pub mod rows;
 mod runs;
 mod text;
@@ -12,6 +13,10 @@ mod universe;
 
 pub use batch::{Listener, Table};
 pub use error::StoreError;
+pub use read::{
+    DAY_MS, EpisodeFilter, EpisodePage, EpisodeSummary, HealthNow, IntegritySummary, MAX_OPEN,
+    MAX_PAGE, MAX_SERIES_ROWS, Today,
+};
 pub use rows::*;
 pub use sqlx::postgres::PgConnectOptions;
 
