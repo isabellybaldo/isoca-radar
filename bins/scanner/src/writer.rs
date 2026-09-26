@@ -94,6 +94,7 @@ impl Pending {
             observations: std::mem::take(&mut self.observations).into(),
             integrity: std::mem::take(&mut self.integrity).into(),
             health: std::mem::take(&mut self.health).into(),
+            ..Batch::default()
         }
     }
 

@@ -4,6 +4,7 @@
 
 mod batch;
 pub mod error;
+mod paper;
 pub mod rows;
 mod runs;
 mod text;

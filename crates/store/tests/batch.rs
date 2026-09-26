@@ -213,6 +213,7 @@ async fn observations_integrity_and_health_land_and_health_upserts() {
             detail: Some("bid 0.41 vs 0.42".into()),
         }],
         health: vec![health.clone()],
+        ..Batch::default()
     };
     store.write_batch(&batch).await.unwrap();
     let mut again = health.clone();

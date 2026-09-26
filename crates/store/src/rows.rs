@@ -174,19 +174,221 @@ pub struct HealthRow {
     pub dropped_groups: i32,
 }
 
+/// One paper account of a run: its pre-registered spec (spec §11) and the policies file hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperAccountRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub policy: String,
+    pub scenario: String,
+    pub fee_bips: Decimal,
+    pub bankroll: Decimal,
+    pub per_trade: Decimal,
+    pub policies_sha256: String,
+}
+
+/// A policy's decision on an opened episode (taken, or skipped with a reason).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperIntentRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub decided_ms: i64,
+    pub exec_ms: Option<i64>,
+    pub skip_reason: Option<String>,
+    pub q_target: Option<Decimal>,
+    pub detected_q: Option<Decimal>,
+    pub detected_pnl: Option<Decimal>,
+    pub reserve: Option<Decimal>,
+}
+
+/// What happened at t_x.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperExecRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub exec_ms: i64,
+    pub q_eff: Decimal,
+    pub leg_risk_qty: Decimal,
+    pub pnl_at_tx: Option<Decimal>,
+    pub hit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperFillRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub market_id: String,
+    pub yes_token: String,
+    /// yes | no
+    pub outcome: String,
+    /// buy | sell
+    pub side: String,
+    pub t_ms: i64,
+    pub limit_price: Option<Decimal>,
+    pub requested: Decimal,
+    pub filled: Decimal,
+    pub vwap: Option<Decimal>,
+    pub fees: Decimal,
+    pub levels_used: i32,
+}
+
+/// One `sim::account::LedgerEntry`. Keyed (run_id, account_id, seq).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PaperLedgerRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub seq: i64,
+    pub t_ms: i64,
+    /// buy | sell | convert | settle | mark
+    pub kind: String,
+    pub episode_id: Option<String>,
+    pub market_id: Option<String>,
+    pub yes_token: Option<String>,
+    pub outcome: Option<String>,
+    pub qty: Decimal,
+    pub price: Option<Decimal>,
+    pub cash_delta: Decimal,
+    pub fees: Decimal,
+    pub realized_delta: Decimal,
+    pub cash_after: Decimal,
+    pub equity: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperMarkoutRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub market_id: String,
+    pub yes_token: String,
+    pub outcome: String,
+    pub fill_vwap: Decimal,
+    pub offset_ms: i64,
+    pub mid: Option<Decimal>,
+    pub markout: Option<Decimal>,
+}
+
+/// One `sim::rows::AccountRow` (a mark). Identity: equity = bankroll + realized + unrealized.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PaperMarkRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub t_ms: i64,
+    pub cash: Decimal,
+    pub equity: Decimal,
+    pub realized: Decimal,
+    pub unrealized: Decimal,
+    pub fees_paid: Decimal,
+    pub locked: Decimal,
+    pub max_drawdown: Decimal,
+    pub n_positions: i64,
+}
+
+/// Live only: one serialized `sim::account::Account` per account id (restored at start).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PaperStateRow {
+    pub account_id: String,
+    pub state: String,
+    pub updated_ms: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Batch {
     pub episodes: Vec<EpisodeWrite>,
     pub observations: Vec<ObservationRow>,
     pub integrity: Vec<IntegrityRow>,
     pub health: Vec<HealthRow>,
+    /// Paper trading (S3c). Accounts are written first: every other paper row references one.
+    pub paper_accounts: Vec<PaperAccountRow>,
+    pub paper_intents: Vec<PaperIntentRow>,
+    pub paper_execs: Vec<PaperExecRow>,
+    pub paper_fills: Vec<PaperFillRow>,
+    pub paper_ledger: Vec<PaperLedgerRow>,
+    pub paper_markouts: Vec<PaperMarkoutRow>,
+    pub paper_marks: Vec<PaperMarkRow>,
+    /// Live only: upserted by account id (the newest `updated_ms` wins).
+    pub paper_state: Vec<PaperStateRow>,
 }
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.episodes.is_empty()
-            && self.observations.is_empty()
-            && self.integrity.is_empty()
-            && self.health.is_empty()
+        self.rows() == 0
+    }
+
+    pub fn paper_rows(&self) -> usize {
+        self.paper_accounts.len()
+            + self.paper_intents.len()
+            + self.paper_execs.len()
+            + self.paper_fills.len()
+            + self.paper_ledger.len()
+            + self.paper_markouts.len()
+            + self.paper_marks.len()
+            + self.paper_state.len()
+    }
+
+    pub fn rows(&self) -> usize {
+        self.episodes.len()
+            + self.observations.len()
+            + self.integrity.len()
+            + self.health.len()
+            + self.paper_rows()
+    }
+
+    /// Move the paper rows out into a batch of their own (the rest stays here).
+    pub fn take_paper(&mut self) -> Batch {
+        Batch {
+            paper_accounts: std::mem::take(&mut self.paper_accounts),
+            paper_intents: std::mem::take(&mut self.paper_intents),
+            paper_execs: std::mem::take(&mut self.paper_execs),
+            paper_fills: std::mem::take(&mut self.paper_fills),
+            paper_ledger: std::mem::take(&mut self.paper_ledger),
+            paper_markouts: std::mem::take(&mut self.paper_markouts),
+            paper_marks: std::mem::take(&mut self.paper_marks),
+            paper_state: std::mem::take(&mut self.paper_state),
+            ..Batch::default()
+        }
+    }
+
+    /// Append `other`'s paper rows after ours, in order. `other`'s non-paper rows are ignored.
+    pub fn extend_paper(&mut self, other: Batch) {
+        self.paper_accounts.extend(other.paper_accounts);
+        self.paper_intents.extend(other.paper_intents);
+        self.paper_execs.extend(other.paper_execs);
+        self.paper_fills.extend(other.paper_fills);
+        self.paper_ledger.extend(other.paper_ledger);
+        self.paper_markouts.extend(other.paper_markouts);
+        self.paper_marks.extend(other.paper_marks);
+        self.paper_state.extend(other.paper_state);
+    }
+
+    /// Every row as its own batch (the writer's quarantine path). Episodes come before the
+    /// observations that reference them, and paper accounts before the paper rows.
+    pub fn into_singles(self) -> Vec<Batch> {
+        let mut out = Vec::with_capacity(self.rows());
+        macro_rules! each {
+            ($($field:ident),*) => {$(
+                for x in self.$field {
+                    out.push(Batch { $field: vec![x], ..Batch::default() });
+                }
+            )*};
+        }
+        each!(
+            episodes,
+            observations,
+            integrity,
+            health,
+            paper_accounts,
+            paper_intents,
+            paper_execs,
+            paper_fills,
+            paper_ledger,
+            paper_markouts,
+            paper_marks,
+            paper_state
+        );
+        out
     }
 }

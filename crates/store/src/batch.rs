@@ -163,6 +163,14 @@ pub enum Table {
     IntegrityEvents,
     Health,
     EpisodeLegs,
+    PaperAccounts,
+    PaperIntents,
+    PaperExecs,
+    PaperFills,
+    PaperLedger,
+    PaperMarkouts,
+    PaperMarks,
+    PaperState,
 }
 
 impl Table {
@@ -172,6 +180,14 @@ impl Table {
             Table::IntegrityEvents => "integrity_events",
             Table::Health => "health",
             Table::EpisodeLegs => "episode_legs",
+            Table::PaperAccounts => "paper_accounts",
+            Table::PaperIntents => "paper_intents",
+            Table::PaperExecs => "paper_execs",
+            Table::PaperFills => "paper_fills",
+            Table::PaperLedger => "paper_ledger",
+            Table::PaperMarkouts => "paper_markouts",
+            Table::PaperMarks => "paper_marks",
+            Table::PaperState => "paper_state",
         }
     }
 }
@@ -316,6 +332,8 @@ impl Store {
             );
             qb.build().execute(&mut *tx).await?;
         }
+
+        crate::paper::write_paper(&mut tx, b).await?;
 
         tx.commit().await?;
         Ok(())
