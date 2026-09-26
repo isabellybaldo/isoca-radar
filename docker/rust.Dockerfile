@@ -20,5 +20,6 @@ FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57
 COPY --from=builder /src/target/release/scanner /usr/local/bin/scanner
 COPY --from=builder --chown=65532:65532 /data /data
 COPY config/scanner.toml /etc/cute-trading/scanner.toml
+COPY config/policies.toml /etc/cute-trading/policies.toml
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/scanner"]

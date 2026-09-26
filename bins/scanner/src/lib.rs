@@ -8,6 +8,7 @@ pub mod engine;
 pub mod feed;
 pub mod guard;
 pub mod metrics;
+pub mod paper;
 pub mod replay;
 pub mod run;
 pub mod shards;

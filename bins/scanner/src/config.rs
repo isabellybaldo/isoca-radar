@@ -16,6 +16,7 @@ pub struct Config {
     pub capture: CaptureCfg,
     pub breaker: BreakerCfg,
     pub store: StoreCfg,
+    pub paper: PaperCfg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -100,6 +101,19 @@ pub struct BreakerCfg {
 pub struct StoreCfg {
     pub flush_ms: u64,
     pub max_pending_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaperCfg {
+    /// Run the paper trader (live and replay). Off = scanner only, as in S2.
+    pub enabled: bool,
+    /// The frozen policies file (spec §11). Its sha256 joins the run's config_hash.
+    pub policies: String,
+    /// Ask Gamma about held markets this often (and soon after a ws market_resolved).
+    pub resolver_every_secs: u64,
+    /// Save live account state to paper_state this often (restored at start).
+    pub state_save_every_secs: u64,
 }
 
 impl Config {
@@ -200,6 +214,18 @@ impl Config {
             self.engine.issue_throttle_ms >= 0,
             "engine.issue_throttle_ms must be ≥ 0"
         );
+        anyhow::ensure!(
+            self.paper.resolver_every_secs >= 60,
+            "paper.resolver_every_secs must be ≥ 60 (Gamma is polled, not hammered)"
+        );
+        anyhow::ensure!(
+            (10..=3600).contains(&self.paper.state_save_every_secs),
+            "paper.state_save_every_secs must be 10..=3600"
+        );
+        anyhow::ensure!(
+            !self.paper.enabled || !self.paper.policies.trim().is_empty(),
+            "paper.policies must name the policies file"
+        );
         Ok(())
     }
 }
@@ -226,6 +252,23 @@ mod tests {
             ),
             (32, 3)
         );
+        assert!(cfg.paper.enabled);
+        assert_eq!(cfg.paper.policies, "/etc/cute-trading/policies.toml");
+        assert_eq!(
+            (
+                cfg.paper.resolver_every_secs,
+                cfg.paper.state_save_every_secs
+            ),
+            (600, 60)
+        );
+    }
+
+    #[test]
+    fn rejects_a_hammering_resolver_or_odd_save_cadence() {
+        let fast = REPO.replace("resolver_every_secs = 600", "resolver_every_secs = 10");
+        assert!(Config::parse(&fast).is_err());
+        let never = REPO.replace("state_save_every_secs = 60", "state_save_every_secs = 0");
+        assert!(Config::parse(&never).is_err());
     }
 
     #[test]

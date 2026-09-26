@@ -52,3 +52,9 @@ window_secs = 600
 [store]
 flush_ms = 100                  # spec §10
 max_pending_rows = 200000
+
+[paper]
+enabled = true                  # spec §11: P0–P3 paper accounts, live and in replay
+policies = "/etc/cute-trading/policies.toml"   # frozen per evaluation run; its sha256 joins config_hash
+resolver_every_secs = 600       # ask Gamma about held markets (and 30 s after a ws market_resolved)
+state_save_every_secs = 60      # live account state → paper_state (restored at the next start)

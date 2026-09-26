@@ -9,6 +9,7 @@ publish.workspace = true
 arb-core = { path = "../../crates/arb-core" }
 pm-api = { path = "../../crates/pm-api" }
 store = { path = "../../crates/store" }
+sim = { path = "../../crates/sim" }
 tokio = { workspace = true, features = ["signal"] }
 serde.workspace = true
 serde_json.workspace = true
