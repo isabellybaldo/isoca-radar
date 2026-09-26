@@ -2,8 +2,8 @@
 //! write keeps the batch and retries with backoff; receiving never stops, so the engine never blocks
 //! on Postgres. A batch Postgres rejects for its DATA (`StoreError::is_data_error`, SQLSTATE 22/23)
 //! is quarantined row by row so one poison row can't stall every later flush. Above `max_rows`, the
-//! oldest health, then integrity, then observation rows are dropped and counted (episodes never are,
-//! except a single episode row Postgres itself rejects).
+//! oldest health, then integrity, then observation rows are dropped and counted (episodes and
+//! paper rows never are, except a single row Postgres itself rejects).
 use crate::metrics::Metrics;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -19,17 +19,23 @@ pub enum WriterMsg {
     Observation(ObservationRow),
     Integrity(IntegrityRow),
     Health(HealthRow),
+    /// Paper-trader rows (S3c). Only the batch's `paper_*` fields are used.
+    Paper(Box<Batch>),
     Flush(oneshot::Sender<()>),
 }
 
-/// Rows waiting for the next flush. Episodes are deduplicated by id (latest version wins);
-/// the other rows are FIFO queues, so the cap evicts the oldest in O(1).
+/// Rows waiting for the next flush. Episodes are deduplicated by id (latest version wins). The
+/// other rows are FIFO queues, so the cap evicts the oldest in O(1). Paper rows are kept in
+/// arrival order and, like episodes, are never evicted: a gap in `paper_ledger` would break the
+/// equity identity.
 #[derive(Debug, Default)]
 pub struct Pending {
     episodes: Vec<EpisodeWrite>,
     observations: VecDeque<ObservationRow>,
     integrity: VecDeque<IntegrityRow>,
     health: VecDeque<HealthRow>,
+    /// Only the `paper_*` fields are ever filled.
+    paper: Batch,
     ep_index: HashMap<String, usize>,
     max_rows: usize,
     pub dropped: u64,
@@ -44,7 +50,11 @@ impl Pending {
     }
 
     pub fn rows(&self) -> usize {
-        self.episodes.len() + self.observations.len() + self.integrity.len() + self.health.len()
+        self.episodes.len()
+            + self.observations.len()
+            + self.integrity.len()
+            + self.health.len()
+            + self.paper.paper_rows()
     }
 
     fn upsert_episode(&mut self, w: EpisodeWrite, overwrite: bool) {
@@ -68,20 +78,21 @@ impl Pending {
             WriterMsg::Observation(o) => self.observations.push_back(o),
             WriterMsg::Integrity(i) => self.integrity.push_back(i),
             WriterMsg::Health(h) => self.health.push_back(h),
+            WriterMsg::Paper(b) => self.paper.extend_paper(*b),
             WriterMsg::Flush(_) => {}
         }
         self.enforce_cap();
     }
 
-    /// Over the cap, drop the oldest health, then integrity, then observation rows (episodes
-    /// never), counting each.
+    /// Over the cap, drop the oldest health, then integrity, then observation rows (episodes and
+    /// paper rows never), counting each.
     fn enforce_cap(&mut self) {
         while self.rows() > self.max_rows {
             let evicted = self.health.pop_front().is_some()
                 || self.integrity.pop_front().is_some()
                 || self.observations.pop_front().is_some();
             if !evicted {
-                break; // only episodes left: never dropped
+                break; // only episodes and paper rows left: never dropped
             }
             self.dropped += 1;
         }
@@ -89,19 +100,20 @@ impl Pending {
 
     pub fn take(&mut self) -> Batch {
         self.ep_index.clear();
-        Batch {
-            episodes: std::mem::take(&mut self.episodes),
-            observations: std::mem::take(&mut self.observations).into(),
-            integrity: std::mem::take(&mut self.integrity).into(),
-            health: std::mem::take(&mut self.health).into(),
-            ..Batch::default()
-        }
+        let mut b = std::mem::take(&mut self.paper);
+        b.episodes = std::mem::take(&mut self.episodes);
+        b.observations = std::mem::take(&mut self.observations).into();
+        b.integrity = std::mem::take(&mut self.integrity).into();
+        b.health = std::mem::take(&mut self.health).into();
+        b
     }
 
     /// Put back a batch whose write failed. It is OLDER than anything pushed since, so newer
     /// episode versions already here win, and its other rows go first.
-    pub fn restore(&mut self, older: Batch) {
-        let newer = self.take();
+    pub fn restore(&mut self, mut older: Batch) {
+        let mut newer = self.take();
+        let mut paper = older.take_paper();
+        paper.extend_paper(newer.take_paper());
         for w in older.episodes {
             self.upsert_episode(w, false);
         }
@@ -115,6 +127,7 @@ impl Pending {
             .collect();
         self.integrity = older.integrity.into_iter().chain(newer.integrity).collect();
         self.health = older.health.into_iter().chain(newer.health).collect();
+        self.paper = paper;
         self.enforce_cap();
     }
 }
@@ -168,59 +181,27 @@ pub async fn run_writer(
     }
 }
 
-/// Write each row of a data-rejected batch on its own; returns how many rows still failed (dropped).
-/// Episodes go first so observations referencing them can still land.
+/// Write each row of a data-rejected batch on its own; returns how many rows still failed
+/// (dropped). `Batch::into_singles` puts episodes before their observations and paper accounts
+/// before the paper rows that reference them.
 async fn quarantine(store: &Store, b: Batch) -> u64 {
     let mut dropped = 0;
-    // Same 10 s bound as the main flush: a stalled row must not freeze the writer (it's dropped).
-    let one = |batch: Batch| async move {
-        match tokio::time::timeout(Duration::from_secs(10), store.write_batch(&batch)).await {
-            Ok(r) => r.map_err(|e| e.to_string()),
-            Err(_) => Err("timed out".to_string()),
-        }
-    };
-    for w in b.episodes {
-        let id = w.row.episode_id.clone();
-        if let Err(e) = one(Batch {
-            episodes: vec![w],
-            ..Batch::default()
-        })
-        .await
-        {
-            eprintln!("writer: dropped episode {id}: {e}");
-            dropped += 1;
-        }
-    }
-    for o in b.observations {
-        if one(Batch {
-            observations: vec![o],
-            ..Batch::default()
-        })
-        .await
-        .is_err()
-        {
-            dropped += 1;
-        }
-    }
-    for i in b.integrity {
-        if one(Batch {
-            integrity: vec![i],
-            ..Batch::default()
-        })
-        .await
-        .is_err()
-        {
-            dropped += 1;
-        }
-    }
-    for h in b.health {
-        if one(Batch {
-            health: vec![h],
-            ..Batch::default()
-        })
-        .await
-        .is_err()
-        {
+    for single in b.into_singles() {
+        // Same 10 s bound as the main flush: a stalled row must not freeze the writer (it's dropped).
+        let r =
+            match tokio::time::timeout(Duration::from_secs(10), store.write_batch(&single)).await {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err("timed out".to_string()),
+            };
+        if let Err(e) = r {
+            if let Some(w) = single.episodes.first() {
+                eprintln!("writer: dropped episode {}: {e}", w.row.episode_id);
+            } else if let Some(l) = single.paper_ledger.first() {
+                eprintln!(
+                    "writer: dropped paper ledger row {}#{}: {e}",
+                    l.account_id, l.seq
+                );
+            }
             dropped += 1;
         }
     }
@@ -249,10 +230,7 @@ async fn flush(store: &Store, pending: &mut Pending, fails: &mut u32) -> bool {
             true
         }
         Ok(Err(e)) => {
-            eprintln!(
-                "writer: batch failed ({} rows): {e}",
-                b.episodes.len() + b.observations.len() + b.integrity.len() + b.health.len()
-            );
+            eprintln!("writer: batch failed ({} rows): {e}", b.rows());
             pending.restore(b);
             *fails += 1;
             false
@@ -339,6 +317,30 @@ mod tests {
         })
     }
 
+    fn paper_ledger(seq: i64) -> WriterMsg {
+        WriterMsg::Paper(Box::new(Batch {
+            paper_ledger: vec![store::PaperLedgerRow {
+                run_id: 1,
+                account_id: "a".into(),
+                seq,
+                t_ms: seq,
+                kind: "mark".into(),
+                episode_id: None,
+                market_id: None,
+                yes_token: None,
+                outcome: None,
+                qty: 0.into(),
+                price: None,
+                cash_delta: 0.into(),
+                fees: 0.into(),
+                realized_delta: 0.into(),
+                cash_after: 1000.into(),
+                equity: Some(1000.into()),
+            }],
+            ..Batch::default()
+        }))
+    }
+
     #[test]
     fn keeps_only_the_latest_version_of_an_episode() {
         let mut p = Pending::new(100);
@@ -397,6 +399,43 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "eviction must be O(1) per row: {:?}",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn paper_rows_are_never_evicted_by_the_cap() {
+        let mut p = Pending::new(3);
+        for s in 1..=5 {
+            p.push(paper_ledger(s));
+        }
+        for t in 0..3 {
+            p.push(integ(t));
+        }
+        assert_eq!(p.rows(), 5, "only the integrity rows could go");
+        assert_eq!(p.dropped, 3);
+        let b = p.take();
+        assert_eq!(
+            b.paper_ledger.iter().map(|l| l.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(b.integrity.is_empty());
+        assert_eq!(p.rows(), 0);
+    }
+
+    #[test]
+    fn restore_keeps_older_paper_rows_first() {
+        let mut p = Pending::new(100);
+        p.push(paper_ledger(1));
+        let failed = p.take();
+        p.push(paper_ledger(2)); // arrived while the write was failing
+        p.restore(failed);
+        assert_eq!(
+            p.take()
+                .paper_ledger
+                .iter()
+                .map(|l| l.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 }
