@@ -5,28 +5,149 @@
 **Goal:** Run the pure `sim::PaperTrader` (S3b) inside the scanner, both live and in `scanner replay`. It writes every intent, fill, ledger entry, markout and mark to new `paper_*` tables. Markets settle from Gamma's payout vector. Live accounts survive restarts, and two replays of one capture produce identical ledgers (spec §19 Phase 3 exit: "Deterministic replay; equity identity holds").
 
 **Architecture:**
-- The engine owns an optional `PaperTrader` and lends it its own YES books through a zero-copy `Books` impl, built from split field borrows. It follows the S3b call contract: `on_frame` before a frame's events (so before any delta, deferred top-check or phantom-level trim of that frame), `on_level` after each applied delta **and for each level S3a's `Book::trim_to_top` removes** (a trim is a removal the consumed-liquidity ledger must see), `on_snapshot` after each applied ws snapshot and each accepted REST snapshot, `on_open` at each episode Open (wherever it happens: a frame, a deferred check's re-evaluation, a REST snapshot).
-- Paper rows leave the engine as `Out::Paper`. Live, they go through the existing batching writer. In replay they go straight into the replay batch. Both paths use one mapping function, `paper::push_sim`.
+- The engine owns an optional `PaperTrader` and lends it its own YES books through a zero-copy `Books` impl, built from split field borrows. It follows the S3b call contract: `on_frame` before a frame's events (so before any delta, deferred top-check or phantom-level trim of that frame), `on_level` after each applied delta **and for each level S3a's `Book::trim_to_top` removes** (a trim is a removal the consumed-liquidity ledger must see), `on_snapshot` after each applied ws snapshot and each accepted REST snapshot, `on_open` at each episode Open (wherever it happens: a frame, a deferred check's re-evaluation, a REST snapshot). A resolution and the final close are driven to their instant with `on_frame(t)` first (S3b: `close()` must follow `on_frame(t)`), then `on_resolution(t, …, books)` / `close(t, books)`.
+- Paper rows leave the engine as `Out::Paper`. Live, they go through the existing batching writer. In replay they go through `replay_dir_with`'s streaming sink (aba9ce5) into bounded chunks that a writer task commits as they come, so a long replay never holds its outputs in memory. Both paths use one mapping function, `paper::push_sim`.
+- The per-frame cost stays O(the trader's queued work + accounts), never O(universe) (soak run 2 lesson). The engine's pending-top indexes (S3a-2) are untouched: no new code reads or writes `pending_tops`.
 - Resolutions reach the engine only as capture control lines (`Ctl::Resolved`), so replay settles exactly as live did. A live resolver task asks Gamma's read-only `/markets` route about the markets the trader holds.
 
 **Tech Stack:** Rust 1.98.1 (pinned), tokio 1.x, `sim` (S3b), `store` (sqlx 0.8, Postgres 17), `pm-api` (reqwest via its own client), `arb-core` (`stats::{parse_rfc3339_ms, days_to_end, annualized}` from S3b Task 1). No new external crates.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-arb-scanner-design.md`: §5.5 (lock-up figures), §5.6 (accounting, payout vector), §8.2/§8.3 (paper trader beside the engine, same core for live and replay), §10 (storage, roles, zero is a measurement), §11 (policies, pre-registration hash, replay), §15 (sim/replay golden tests, role tests), §16 (route table), §18 Q19 (non-binary payouts), §19 (Phase 3 exit). Earlier plans that land **before** this one:
 - `docs/superpowers/plans/2026-09-25-s3a-scanner-hardening.md` (**landed**: commits `4b68be2..088c43d` on `refactor`): migration 0003 (explicit grants; `unit_oversize` kind), store `build.rs` (`rerun-if-changed=migrations`), `SET LOCAL statement_timeout = '60s'` in the universe transactions, `mark_suspect(event_id, until_ms, now_ms) -> Vec<Out>`, deferred top-checks (`pending_tops`, `resolve_pending(token, recv_ms, out)`, `check_book(conn, token, ts, recv_ms, server, out)`), the phantom-level trim (`Book::trim_to_top`) and per-(kind, token) integrity throttle (`EngineCtx.issue_throttle_ms`), held-closed episodes and `suspect(g, until, since, out)`, `close_all`'s flush of suppressed throttle counts, sticky shards, REST classes (`Limiter::new(per_sec, reserved)`, `run_rechecks(.., max_in_flight, ..)`), the `VecDeque` writer, and the single shutdown deadline (`SHUTDOWN_BUDGET`, `by_deadline`, `wait_thread`).
-- `docs/superpowers/plans/2026-09-25-s3b-sim.md`: the `sim` crate, `config/policies.toml`, and the call contract. Its interfaces are used exactly as that plan writes them.
+- `docs/superpowers/plans/2026-09-25-s3b-sim.md`: the `sim` crate and `config/policies.toml` (**landed**: `bbf0a3e..027485f`). Where its landed code differs from that plan's text, **the code in `crates/sim/src/*.rs` wins** and this plan uses it:
+  - `PaperTrader::on_resolution(t_ms, market_id, payout_yes, payout_no, books: &impl Books)` takes the books (its `AccountRow` values the account's OTHER open positions at the bid).
+  - `PaperTrader::close(t_ms, books)` must be preceded by `on_frame(t_ms, books)`: `close` only disposes of what is still outstanding (completes conversions at `t_ms`, drops intents/unwinds/markouts, marks).
+  - One global due-work timeline ordered by `(due_ms, Rank, seq)`: pending < unwind < conversion < markout < mark at the same ms.
+  - `decide` sizes by bisection plus `settle()` (venue-rounding fixpoint); `decide_for` narrows the open context to the account's own consumed liquidity (`filtered_ctx`) and has the `SkipReason::Consumed` short-circuit (fixed below, carry-over).
+  - `PaperTrader::restore(cfg, state)` already starts an account fresh when its saved spec differs, and releases reservations.
+  - Unwinds that cannot trade (below `min_order_shares`, or no book) still emit a `FillRow` with side `"sell"`, `filled` 0 and `vwap` None.
+  - `FillRow.levels_used: u32`, `LedgerEntry.seq: u64`, `FillRow.side: &'static str`; `Books` is `fn yes_book(&self, yes_token: &str) -> Option<&Book>`.
+- S3a-2 (**landed**: `22050be..2c5b84d`): `Engine::evaluate` runs a detector only when its exact top-of-book gate (`yes_basket_may_signal` / `no_basket_may_signal`) is true or an episode is open for its key (`set_threshold_gate`, `detector_calls`); `pending_tops` has two secondary indexes kept in step by `pending_insert` / `pending_remove` (plus `pending_by_conn`, `pending_by_group`); `run_live` logs a per-minute `FrameTiming` line (`engine: frames=… parse_us … on_frame_us …`). Any engine code that inserts or removes a pending top-check must go through those helpers. This plan adds none.
+- `aba9ce5`: replay streams its outputs: `replay_dir_with(dir, ctx, sink: impl FnMut(Out)) -> anyhow::Result<ReplayStats>`, `replay_dir` is a collecting wrapper (tests), and `replay_cmd` passes a sink.
+- VPS soak run 2 (`8a16757`): replay equality passed; the drops came from per-frame engine CPU (an O(pending) scan). The trader hooks in this plan are costed in ruling 23.
 
-Every "current code" anchor below was checked against the tree at `088c43d` (S3a landed) plus the S3b plan text. Refreshed 2026-09-25 after S3a: see rulings 14–18.
+Every "current code" anchor below was checked against the tree at `8a16757` (S3a, S3b, S3a-2, aba9ce5 landed). Refreshed 2026-09-25 (second refresh): rulings 19–25.
 
 ## Carry-over from the S3b final review (do this FIRST, before Task 1)
 
 The S3b final re-review left one open finding in `crates/sim/src/trader.rs` `decide_for` (commit 027485f). Because S3c persists skip reasons into `paper_intents`, it must be fixed before those rows are written.
-- **The problem:** `decide_for` returns `Skip(Consumed)` whenever the consumed-filtered edge is ≤ 0. That includes signals whose RAW edge is already ≤ 0: gross-only episodes the detector emits because `gross.pnl_gross > 0`. It also hides the policy gates: `PairNotApproved` for P2, and `TooLong` / `AnnualizedTooLow` / `NoLockupFigures` for P1.
+- **The problem:** today `decide_for` checks `takes_kind`, builds `filtered_ctx`, and returns `Skip(Consumed)` whenever the filtered edge (net, or gross for P3) is ≤ 0 or the filtered full-set depth is 0, BEFORE `decide` runs. That includes signals whose RAW edge is already ≤ 0: gross-only episodes the detector emits because `gross.pnl_gross > 0`. It also hides the policy gates: `PairNotApproved` for P2, and `TooLong` / `AnnualizedTooLow` / `NoLockupFigures` for P1.
 - **Controller ruling:** first run `decide(cfg, spec, free_cash, ctx)` on the UNFILTERED ctx. If that returns `NotMine` or `Skip(_)`, return it unchanged. Only when the raw decision is `Take` do you apply the consumed filter, returning `Skip(Consumed)` if the filtered edge ≤ 0 or its depth is 0, and otherwise the filtered `decide`.
-- **Tests:**
-  - A trader-level test with a fee schedule where gross > 0 and net ≤ 0, on a fresh P0 account, must yield skip reason `not_net_positive`, not `consumed`.
-  - A P2 episode with `pair_approved = false` on a consumed book must yield `pair_not_approved`.
-  - The existing e3 `consumed` test must stay unchanged.
-- **Also:** fix the stale `row_from` doc comment in trader.rs (it still says `on_resolution` values positions at 0).
+
+**Files:**
+- Modify: `crates/sim/src/trader.rs` (`decide_for`, the `policy` import, the `row_from` doc comment)
+- Test: `crates/sim/tests/trader.rs`
+
+- [ ] **Step 1: Write the failing tests.** Append to `crates/sim/tests/trader.rs` (its imports already include `Group`, `detect_no_basket`, `FeeSchedule`, `Outcome`, `PaperTrader`, `PolicyKind`, `SimOut`; `books_of`, `fills`, `cfg` and `NO3` are defined at the top of the file):
+```rust
+/// S3b final review carry-over: consumption can only explain a skip the raw feed would have
+/// taken. A gross-positive, net-negative signal on a FRESH account (nothing consumed) is
+/// `not_net_positive`, never `consumed`.
+#[test]
+fn a_fresh_account_skips_a_net_negative_signal_as_not_net_positive() {
+    let g = no_group(common::fee("0.25", 1)); // Σφ ≈ 0.169 > gross edge 0.05
+    let sig = detect_no_basket(&g).unwrap();
+    assert!(sig.gross.pnl_gross > Decimal::ZERO && sig.quote.pnl <= Decimal::ZERO);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    let outs = t.on_open(&ctx("e1", 1000, &g, sig, &NO3));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.as_deref() == Some("not_net_positive")),
+        "{outs:?}"
+    );
+}
+
+/// The policy gate speaks first: an unapproved P2 pair on a book this account already consumed
+/// is `pair_not_approved`, not `consumed`.
+#[test]
+fn an_unapproved_pair_on_a_consumed_book_is_pair_not_approved() {
+    let a = common::live(Some("0.60"), None, FeeSchedule::ZERO); // NO_A ask 0.40 × 100
+    let b = common::live(None, Some("0.55"), FeeSchedule::ZERO); // YES_B ask 0.55 × 100
+    let sig = arb_core::detect::detect_implication(&a, &b).unwrap();
+    let g = Group {
+        legs: vec![a, b],
+        augmented: false,
+    };
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P2Combo, "1000")])).unwrap();
+    // An approved pair trades the whole level on both legs (100 × 0.95 = 95 ≤ per_trade 100)...
+    let mut approved = ctx("e1", 1000, &g, sig.clone(), &[Outcome::No, Outcome::Yes]);
+    approved.pair_approved = true;
+    let outs = t.on_open(&approved);
+    assert!(matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.is_none()), "{outs:?}");
+    assert_eq!(
+        fills(&t.on_frame(1100, &books)),
+        vec![("m0".into(), d("100")), ("m1".into(), d("100"))]
+    );
+    // ...so both levels are now fully consumed by this account. The next, unapproved episode on
+    // the same book is skipped by the policy, whatever consumption says.
+    let outs = t.on_open(&ctx("e2", 1200, &g, sig, &[Outcome::No, Outcome::Yes]));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.skip_reason.as_deref() == Some("pair_not_approved")),
+        "{outs:?}"
+    );
+}
+```
+
+- [ ] **Step 2: Run them to verify they fail.**
+Run: `cargo test -p sim --test trader -- a_fresh_account_skips an_unapproved_pair`
+Expected: both FAIL: the skip reason is `consumed` (a fresh account's filtered edge equals its raw edge, ≤ 0; a fully consumed book's filtered depth is 0).
+
+- [ ] **Step 3: Fix `decide_for`.** In `crates/sim/src/trader.rs`, drop `takes_kind` from the `crate::policy::{…}` import (`decide` already returns `NotMine`), and replace `decide_for` (doc comment included) with:
+```rust
+    /// `decide` on the raw feed first, then, only for a raw `Take`, narrowed to what account
+    /// `a`'s own consumed liquidity leaves available (spec §5.6, controller rulings): a real bot
+    /// can't refill an order it already took unless the feed shows genuine turnover. Consumption
+    /// can only explain a skip the raw feed would have taken, so every policy verdict
+    /// (`NotMine`, `NotNetPositive`, P1's lock-up gates, `PairNotApproved`, `NoCash`,
+    /// `BelowMinSize`, `BadInput`) keeps its own reason (S3b final review carry-over).
+    fn decide_for(&self, a: usize, ctx: &OpenCtx) -> Decision {
+        let acct = &self.accounts[a];
+        let free = acct.free_cash();
+        let raw = decide(&self.cfg, &acct.spec, free, ctx);
+        if !matches!(raw, Decision::Take(_)) {
+            return raw;
+        }
+        let Some(fctx) = self.filtered_ctx(a, ctx) else {
+            // Unreachable after a raw Take: `decide` rejects the same malformed shapes
+            // (mismatched lengths, a used leg missing from `ctx.legs`) as BadInput.
+            return Decision::Skip(SkipReason::BadInput);
+        };
+        let naive = acct.spec.policy == PolicyKind::P3Naive;
+        let quote = if naive {
+            &fctx.signal.gross
+        } else {
+            &fctx.signal.quote
+        };
+        let edge = if naive { quote.pnl_gross } else { quote.pnl };
+        let depth = quote
+            .legs
+            .iter()
+            .map(|l| l.filled)
+            .min()
+            .unwrap_or(Decimal::ZERO);
+        if edge <= Decimal::ZERO || depth <= Decimal::ZERO {
+            return Decision::Skip(SkipReason::Consumed);
+        }
+        decide(&self.cfg, &acct.spec, free, &fctx)
+    }
+```
+In the same file, replace the stale doc comment on `row_from` (`/// Builds an AccountRow … shared by account_row (valued at the bid) and on_resolution (valued at 0; no books there).`) with:
+```rust
+    /// Builds an `AccountRow` from an account and an already-computed valuation. `account_row`
+    /// is its only caller: marks, resolutions and the close all value open positions at the bid.
+```
+
+- [ ] **Step 4: Run the tests to verify they pass.**
+Run: `cargo test -p sim`
+Expected: PASS, including the two new tests and the unchanged `a_second_episode_cannot_refill_consumed_liquidity` (its e3 is still `consumed`: the raw feed takes it, the filtered book has no depth) and `consumed_liquidity_is_not_shared_across_accounts`.
+
+- [ ] **Step 5: Lint and commit.**
+Run: `cargo fmt --all --check && cargo clippy -p sim --all-targets -- -D warnings`
+Expected: clean (no unused `takes_kind`).
+```bash
+git add crates/sim/src/trader.rs crates/sim/tests/trader.rs
+git commit -m "sim: policy verdicts before the consumed-liquidity skip (S3b final review carry-over)"
+```
 
 ## Global Constraints
 
@@ -39,6 +160,8 @@ The S3b final re-review left one open finding in `crates/sim/src/trader.rs` `dec
 - After migration 0003, `scanner_rw` has **no** default INSERT/UPDATE (nor sequence USAGE): every new table needs an explicit `GRANT` in its own migration. Default SELECT (0001) still applies to both roles, but 0004 grants it explicitly too. `analyze_ro` only ever reads. The paper migration is **0004**, after 0003.
 - `paper_state` is **live only**. Replay never reads it and never writes it: each replay starts every account fresh.
 - The whole graceful stop, including the paper close and the state save, fits S3a's `SHUTDOWN_BUDGET` (20 s) inside compose's 30 s `stop_grace_period`.
+- **Engine per-frame cost** (soak run 2): nothing added to `Engine::on_frame` may be O(universe) or O(pending top-checks). The trader's hooks cost O(its queued work + accounts) per frame. Any code that adds or removes a pending top-check uses `pending_insert` / `pending_remove` (this plan adds none).
+- **Replay memory stays bounded** (aba9ce5): replay outputs go through `replay_dir_with`'s sink. No code path collects a whole replay's outputs (or rows) into one `Vec`, except the small test fixtures through `replay_dir`.
 - Disk budget: the project stays under 30 GB. Debug `cargo test`/`clippy` only: no `--release`, no `docker build` in this plan.
 - Commit messages are plain, with **no** `Co-Authored-By` or any other attribution trailer. Stage only the files you touch.
 - Bash prefix for every command: `cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH" &&`
@@ -53,6 +176,8 @@ The S3b final re-review left one open finding in `crates/sim/src/trader.rs` `dec
 5. **A Postgres outage long enough to hit `max_pending_rows`.** It must never evict paper rows: a gap in `paper_ledger` breaks the equity identity. Pinned in Task 6 (`paper_rows_are_never_evicted_by_the_cap`).
 6. **A phantom level (S3a soak) that an account already consumed.** When S3a's stream repair trims it, the account's consumed amount at that price must clear, as for any removal; otherwise every later episode on that leg fills short forever. Pinned in Task 4 (`a_trimmed_phantom_level_clears_consumed_liquidity`).
 7. **An episode opened by a REST snapshot.** `rest_snapshot` evaluates with `recv_ms = server ts` (often minutes old), so an execution clock taken from it would fill "in the past". Pinned in Task 4 (`an_episode_opened_by_a_rest_snapshot_executes_after_the_latest_frame`).
+8. **A resolution or a shutdown that arrives before any later frame**, while an execution is already due. The due execution must run at its own time first (S3b: `close` follows `on_frame(t)`); otherwise a stop silently drops a trade whose t_x already passed, or a settlement runs before the buy it should include. Pinned in Task 4 (`close_first_runs_the_work_due_before_the_close_instant`, `a_resolution_first_runs_the_work_due_before_it`).
+9. **A busy feed with the trader attached.** Attaching the trader must not change one scanner output (episodes, integrity, rechecks, resnapshots) and must stay cheap per frame. Pinned in Task 4 (`the_paper_trader_never_changes_the_scanners_own_outputs` on the S3a-2 synthetic high-rate script, and the ignored bench `engine_us_per_frame_with_and_without_the_paper_trader`).
 
 ---
 
@@ -73,7 +198,9 @@ crates/pm-api/tests/routes.rs                MODIFY: the new table
 crates/pm-api/tests/resolutions.rs           NEW: fixture-based payout parsing
 crates/pm-api/tests/live.rs                  MODIFY: ignored live smoke of the new route
 docs/superpowers/specs/2026-09-22-arb-scanner-design.md  MODIFY: §16 route list
-crates/sim/src/trader.rs                     MODIFY: held_markets()
+crates/sim/src/trader.rs                     MODIFY: decide_for (carry-over); held_markets(); on_level/on_snapshot early-out
+crates/sim/src/consumed.rs                   MODIFY: on_snapshot skips the book copy when the token has nothing consumed
+crates/sim/tests/trader.rs                   MODIFY: carry-over skip-reason tests
 crates/sim/tests/lifecycle.rs                MODIFY: held_markets test
 bins/scanner/Cargo.toml                      MODIFY: depend on sim
 bins/scanner/src/config.rs                   MODIFY: [paper] section
@@ -83,9 +210,10 @@ bins/scanner/src/paper.rs                    NEW: policies + hash, SimOut → ro
 bins/scanner/src/lib.rs                      MODIFY: pub mod paper
 bins/scanner/src/engine.rs                   MODIFY: PaperTrader field, EngineBooks, call contract (incl. S3a trims), OpenCtx, lock-up fields, on_resolution
 bins/scanner/tests/engine_paper.rs           NEW: engine ↔ trader wiring
+bins/scanner/tests/bench_engine.rs           MODIFY: ignored bench, engine µs/frame with and without the trader
 bins/scanner/src/capture.rs                  MODIFY: Ctl::Resolved
-bins/scanner/src/replay.rs                   MODIFY: replay_dir_paper; Resolved; paper close
-bins/scanner/src/run.rs                      MODIFY: replay_cmd writes paper rows (Task 5); live wiring (Task 7)
+bins/scanner/src/replay.rs                   MODIFY: replay_dir_paper_with (replay_dir_with wraps it); Resolved; paper close
+bins/scanner/src/run.rs                      MODIFY: replay_cmd streams paper rows in bounded chunks (Task 5); live wiring (Task 7)
 bins/scanner/src/main.rs                     MODIFY: policies + run hash (Task 5 replay, Task 7 run)
 bins/scanner/tests/replay.rs                 MODIFY: paper replay golden test
 bins/scanner/src/writer.rs                   MODIFY: WriterMsg::Paper, Pending paper rows (never evicted), quarantine via into_singles
@@ -1985,7 +2113,8 @@ pub fn state_batch(st: &TraderState, updated_ms: i64) -> anyhow::Result<Batch> {
 
 /// Rebuild the live trader from `paper_state`. A saved account whose spec differs from the
 /// policies file (same id, e.g. a new per_trade) is a different pre-registered experiment: it
-/// starts fresh, with a log line. A row that isn't a saved account is an error.
+/// starts fresh. `PaperTrader::restore` (S3b) already does that on its own; filtering here only
+/// adds the log line. A row that isn't a saved account is an error, never a silent reset.
 pub fn restore_trader(p: &Policies, rows: &[PaperStateRow]) -> anyhow::Result<PaperTrader> {
     let mut accounts = Vec::new();
     for r in rows {
@@ -2059,28 +2188,30 @@ git commit -m "scanner: [paper] config, policies hash, SimOut→row mapping, sta
 ### Task 4: engine: the paper trader rides the engine's own books (call contract, open context, lock-up, resolutions)
 
 **Files:**
-- Modify: `crates/sim/src/trader.rs`, `crates/sim/tests/lifecycle.rs`
-- Modify: `bins/scanner/src/engine.rs`, `bins/scanner/src/run.rs` (one placeholder `Io::route` arm; Task 7 replaces it)
+- Modify: `crates/sim/src/trader.rs`, `crates/sim/src/consumed.rs`, `crates/sim/tests/lifecycle.rs`
+- Modify: `bins/scanner/src/engine.rs`, `bins/scanner/src/run.rs` (one placeholder `Io::route` arm; Task 7 replaces it), `bins/scanner/tests/bench_engine.rs`
 - Create: `bins/scanner/tests/engine_paper.rs`
 
 **Interfaces:**
-- Consumes: `sim::trader::{PaperTrader, Books, TraderState}`, `sim::policy::{OpenCtx, LegInfo}`, `sim::rows::SimOut`, `sim::types::BookSide`; `arb_core::stats::{parse_rfc3339_ms, days_to_end, annualized}`; `arb_core::fill::BasketQuote`. The S3b call contract: `on_frame(recv_ms, books)` BEFORE a frame's events, `on_level`/`on_snapshot` AFTER each applied change, `on_open` at each Open.
-- The S3a engine this task hooks into (current code, `bins/scanner/src/engine.rs`):
-  - `on_frame(conn, recv_ms, events)` applies snapshots immediately (their crossed check runs at frame end via `check_book(conn, token, ts, recv_ms, None, out)`, no trim) and defers every delta's top-check into `pending_tops`. A deferred check is settled by `resolve_pending(token, recv_ms, out)` either mid-frame (a later-ts delta for the same token arrives, BEFORE that delta is applied) or at frame end (same conn, `p.ts + 1_000 < ts`).
+- Consumes: `sim::trader::{PaperTrader, Books, TraderState}`, `sim::policy::{OpenCtx, LegInfo}`, `sim::rows::SimOut`, `sim::types::BookSide`; `arb_core::stats::{parse_rfc3339_ms, days_to_end, annualized}`; `arb_core::fill::BasketQuote`. The S3b call contract as landed: `on_frame(recv_ms, books)` BEFORE a frame's events, `on_level`/`on_snapshot` AFTER each applied change, `on_open` at each Open; `on_resolution(t, market, payout_yes, payout_no, books)`; `close(t, books)` only after `on_frame(t, books)`.
+- The engine this task hooks into (current code at `8a16757`, `bins/scanner/src/engine.rs`):
+  - `on_frame(conn, recv_ms, events)` declares `let mut frame_tokens: Vec<String> = Vec::new();` and then loops `for ev in events`. A `Snapshot` is applied at once through `on_book`; inside `if self.on_book(…) { … }` it calls `self.pending_remove(token)` and pushes the token onto `frame_tokens` (its crossed check runs at frame end via `check_book(conn, token, ts, recv_ms, None, out)`, no trim). A `Delta` first settles an older-ts pending check for its token (`resolve_pending(token, recv_ms, out)`, BEFORE applying the delta), applies the delta through `on_book` (`let found = …`), then `if found { self.pending_insert(token, PendingTop { conn, ts, bid: bb, ask: ba }); }`. At frame end, the conn's stale pending checks (`p.ts < ts − 1 000`) are found through the `pending_by_conn` index and resolved in token order, then `frame_tokens` are checked, then every touched group is evaluated.
+  - `evaluate(g, ts, recv_ms, out)` runs a detector only when its exact top-of-book gate is true or its key has an open episode (S3a-2); a skipped detector is provably `None`, so outputs are unchanged.
   - `check_book(conn, token, ts, recv_ms, server: Option<(Option<Price>, Option<Price>)>, out)`: on a top mismatch it calls `Book::trim_to_top(best_bid, best_ask) -> bool` on the token's book (bids strictly above the server's best bid and asks strictly below its best ask are removed), throttles the integrity row per (kind, token) (`issue_throttle_ms`), marks the group suspect via `suspect(g, until, since, out)`, and, if the trim changed the book, re-evaluates the group at `max(ts, group_last_ts)` with the resolving frame's `recv_ms`. **A trim is a book mutation outside the delta path: the paper trader must hear about each removed level.**
-  - `rest_snapshot(token, book)` replaces a group leg's book when `book.server_ts_ms() >= ours`, drops its pending check, and evaluates with `recv_ms = eval_ts` (a server timestamp, not a receive time).
+  - `rest_snapshot(token, book)` replaces a group leg's book when `book.server_ts_ms() >= ours` (`self.groups[g].legs[l].book = book;`), then `self.pending_remove(token)`, and evaluates with `recv_ms = eval_ts` (a server timestamp, not a receive time).
   - `open_episode(id, key, at, s, out)` is reached from `evaluate`, which runs from frame ends, `check_book` re-evaluations and `rest_snapshot`.
-  - `close_all(ts)` also flushes suppressed throttle counts as integrity rows; `mark_suspect` and held-closed re-flags only re-emit episode rows.
+  - `close_all(ts)` clears `pending_tops` and both indexes, closes every episode, and flushes suppressed throttle counts as integrity rows; `mark_suspect` and held-closed re-flags only re-emit episode rows.
+  - None of the code below touches `pending_tops` or its indexes.
 - Produces:
   - `PaperTrader::held_markets(&self) -> BTreeSet<String>` (sim): markets with a position or returned YES in any account.
   - `Out::Paper(Box<SimOut>)` and `Out::ResolvedHint`.
   - `Engine::set_paper(&mut self, PaperTrader)`, `Engine::paper(&self) -> Option<&PaperTrader>`.
-  - `Engine::paper_held_markets(&self) -> Vec<String>` (sorted), `Engine::paper_state(&self) -> Option<TraderState>`, `Engine::paper_close(&mut self, t_ms: i64) -> Vec<Out>`.
-  - `Engine::on_resolution(&mut self, t_ms: i64, market_id: &str, payout_yes: Decimal, payout_no: Decimal) -> Vec<Out>`. A non-binary vector also yields an `Out::Integrity` of kind `non_binary_payout`.
+  - `Engine::paper_held_markets(&self) -> Vec<String>` (sorted), `Engine::paper_state(&self) -> Option<TraderState>`, `Engine::paper_close(&mut self, t_ms: i64) -> Vec<Out>` (runs the trader's `on_frame(t_ms)` then `close(t_ms)`).
+  - `Engine::on_resolution(&mut self, t_ms: i64, market_id: &str, payout_yes: Decimal, payout_no: Decimal) -> Vec<Out>` (runs the trader's `on_frame(t_ms)` then `on_resolution(…, books)`). A non-binary vector also yields an `Out::Integrity` of kind `non_binary_payout`.
   - `EpisodeRow.days_to_end / annualized_return / post_end` are now filled when an end date is known.
-  - Private: `Engine.last_recv_ms` (latest frame receive time seen) and the free fn `gone_levels(bids_before, asks_before, now: &Book) -> Vec<(BookSide, Decimal)>` (levels a trim removed).
+  - Private: `Engine.last_recv_ms` (the latest input instant the trader has been driven to: frame receive times, resolutions, the close) and the free fn `gone_levels(bids_before, asks_before, now: &Book) -> Vec<(BookSide, Decimal)>` (levels a trim removed).
 
-- [ ] **Step 1: Write the failing sim test.** Append to `crates/sim/tests/lifecycle.rs`:
+- [ ] **Step 1: Write the failing sim test.** Append to `crates/sim/tests/lifecycle.rs` (it already has `cfg(&[PolicyKind])`, `NO3`, `books_of`, and imports `ctx`, `d`, `no_group`, `detect_no_basket`, `FeeSchedule`):
 ```rust
 #[test]
 fn held_markets_lists_positions_and_returned_yes() {
@@ -2097,7 +2228,7 @@ fn held_markets_lists_positions_and_returned_yes() {
         vec!["m3"],
         "after conversion only the returned YES is held"
     );
-    t.on_resolution(9_000, "m3", d("1"), d("0"));
+    t.on_resolution(9_000, "m3", d("1"), d("0"), &books);
     assert!(t.held_markets().is_empty());
 }
 ```
@@ -2106,7 +2237,7 @@ fn held_markets_lists_positions_and_returned_yes() {
 Run: `cargo test -p sim --test lifecycle held_markets`
 Expected: compile error, no method `held_markets` on `PaperTrader`.
 
-- [ ] **Step 3: Implement it.** In `crates/sim/src/trader.rs`, change `use std::collections::HashMap;` to `use std::collections::{BTreeSet, HashMap};` and add to `impl PaperTrader` (after `accounts`):
+- [ ] **Step 3: Implement it, plus two per-frame cost guards.** In `crates/sim/src/trader.rs`, change `use std::collections::HashMap;` to `use std::collections::{BTreeSet, HashMap};` and add to `impl PaperTrader` (after `accounts`):
 ```rust
     /// Markets any account holds a position or returned YES in: what the live resolver asks
     /// Gamma about (S3c). Sorted, so callers can compare snapshots cheaply.
@@ -2117,11 +2248,72 @@ Expected: compile error, no method `held_markets` on `PaperTrader`.
             .map(|k| k.market_id.clone())
             .collect()
     }
-```
-Run: `cargo test -p sim --test lifecycle`
-Expected: PASS (7).
 
-- [ ] **Step 4: Write the failing engine tests.** Create `bins/scanner/tests/engine_paper.rs`:
+    /// Does any account hold consumed liquidity at all? The engine calls `on_level` for every
+    /// applied delta and `on_snapshot` for every applied snapshot: with nothing consumed (the
+    /// common case between trades) both return before allocating a key or copying a book.
+    fn any_consumed(&self) -> bool {
+        self.consumed.iter().any(|c| !c.is_empty())
+    }
+```
+In the same file, make `on_level` and `on_snapshot` start with the guard (the rest of each body is unchanged):
+```rust
+    pub fn on_level(&mut self, yes_token: &str, side: BookSide, price: Decimal, new_size: Decimal) {
+        if !self.any_consumed() {
+            return;
+        }
+        let key = crate::consumed::LevelKey {
+            yes_token: yes_token.to_string(),
+            side,
+            price,
+        };
+        for c in &mut self.consumed {
+            c.on_level(&key, new_size);
+        }
+    }
+
+    pub fn on_snapshot(&mut self, yes_token: &str, book: &Book) {
+        if !self.any_consumed() {
+            return;
+        }
+        for c in &mut self.consumed {
+            c.on_snapshot(yes_token, book);
+        }
+    }
+```
+In `crates/sim/src/consumed.rs`, reorder `ConsumedLiquidity::on_snapshot` so it collects this token's keys FIRST and returns before copying the book's levels into the two maps when there are none (today it builds both maps, for every account, on every snapshot):
+```rust
+    /// A full book for `yes_token` arrived: re-check every consumed level of that token.
+    pub fn on_snapshot(&mut self, yes_token: &str, book: &Book) {
+        let keys: Vec<LevelKey> = self
+            .levels
+            .keys()
+            .filter(|k| k.yes_token == yes_token)
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            return; // nothing consumed on this token: don't copy its book
+        }
+        let side_map = |v: Vec<(arb_core::money::Price, arb_core::money::Shares)>| -> BTreeMap<Decimal, Decimal> {
+            v.into_iter().map(|(p, s)| (p.get(), s.get())).collect()
+        };
+        let bids = side_map(book.bids_best_first());
+        let asks = side_map(book.asks_best_first());
+        for k in keys {
+            let side = match k.side {
+                BookSide::Bid => &bids,
+                BookSide::Ask => &asks,
+            };
+            let size = side.get(&k.price).copied().unwrap_or(Decimal::ZERO);
+            self.on_level(&k, size);
+        }
+    }
+```
+Both guards change no output (an empty ledger has nothing to clear); `tests/consumed.rs` and `tests/trader.rs` cover the clearing rules.
+Run: `cargo test -p sim`
+Expected: PASS. `lifecycle` has 9 tests (the 8 from S3b plus `held_markets_lists_positions_and_returned_yes`).
+
+- [ ] **Step 4: Write the failing engine tests.** Create `bins/scanner/tests/engine_paper.rs`. It uses the shared helpers in `tests/common/mod.rs` (`engine`, `ctx`, `meta`, `snap`, `ask`, `seed`, `episodes`, `p`, `sh`, and the S3a-2 synthetic script `Synth`, `synth_engine`, `drive`). Every fill figure below comes from `decide`'s landed sizing: the raw feed must `Take` first (carry-over), then the account's consumed-filtered depth caps `q_target`.
 ```rust
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
@@ -2227,7 +2419,7 @@ fn bid(token: &str, ts: i64, price: &str, size: &str) -> MarketEvent {
 }
 
 /// ΣNO = 3 × 0.70 = 2.10 first (nothing), then NO asks 0.60/0.65/0.70 (Σ 1.95 < 2): a NO basket
-/// opens at recv 2 100, so the account's execution is due at 2 200.
+/// opens at recv 2 100, so the account's execution is due at 2 200 (budget 100 / 1.95 → 51.2).
 fn open_no_basket(e: &mut Engine) -> Vec<Out> {
     books(e, 1_100, 1_000, ["0.30", "0.30", "0.30"]);
     books(e, 2_100, 2_000, ["0.40", "0.35", "0.30"])
@@ -2266,13 +2458,16 @@ fn an_emptied_level_clears_consumed_liquidity() {
     let mut e = paper_engine(PolicyKind::P0Converter);
     open_no_basket(&mut e);
     assert_eq!(fills(&quiet(&mut e, 2_300)), all3(dec!(51.2), dec!(51.2), dec!(51.2)));
-    // leg 0's YES bid 0.40 empties (the basket closes) and comes back (episode 2 opens)
+    // leg 0's YES bid 0.40 empties (the basket closes) and comes back with 60 (episode 2 opens)
     let outs = e.on_frame(0, 2_400, &[bid("e1-y0", 2_400, "0.40", "0")]);
     assert!(episodes(&outs).iter().any(|r| r.closed_server_ms.is_some()));
-    let outs = e.on_frame(0, 2_500, &[bid("e1-y0", 2_500, "0.40", "100")]);
+    let outs = e.on_frame(0, 2_500, &[bid("e1-y0", 2_500, "0.40", "60")]);
     assert!(episodes(&outs).iter().any(|r| r.episode_id == "live-7-00000002"));
-    // on_level cleared leg 0's consumed 51.2; legs 1 and 2 still carry ours (100 − 51.2)
-    assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(51.2), dec!(48.8), dec!(48.8)));
+    // on_level cleared leg 0's consumed 51.2, so it offers all 60; legs 1 and 2 still carry ours
+    // (100 − 51.2 = 48.8), which caps the second basket at 48.8. Had the removal not reached
+    // on_level, leg 0 would offer only 60 − 51.2 = 8.8 (a re-added 60 is no shrink below 48.8)
+    // and every leg would fill 8.8.
+    assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(48.8), dec!(48.8), dec!(48.8)));
 }
 
 /// A YES-bid delta whose message reports the server's final best bid (S3a deferred top-check).
@@ -2298,14 +2493,15 @@ fn a_trimmed_phantom_level_clears_consumed_liquidity() {
     let outs = e.on_frame(0, 2_400, &[bid_top("e1-y0", 2_400, "0.30", "100", "0.30")]);
     assert!(!outs.iter().any(|o| matches!(o, Out::Integrity(_))), "deferred, not yet checked");
     // ...which the next update on the token proves: S3a trims 0.40 (the basket closes), then
-    // this frame's delta re-adds 0.40 with fresh size (episode 2 opens at recv 2 500).
-    let outs = e.on_frame(0, 2_500, &[bid_top("e1-y0", 2_500, "0.40", "100", "0.40")]);
+    // this frame's delta re-adds 0.40 with 60 (episode 2 opens at recv 2 500).
+    let outs = e.on_frame(0, 2_500, &[bid_top("e1-y0", 2_500, "0.40", "60", "0.40")]);
     assert!(outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "top_mismatch")));
     assert!(episodes(&outs).iter().any(|r| r.closed_server_ms.is_some()));
     assert!(episodes(&outs).iter().any(|r| r.episode_id == "live-7-00000002"));
     // The trim reached on_level as a removal: leg 0's consumed 51.2 cleared, exactly as for a
-    // size-0 delta. Without it, leg 0 would fill 48.8 (a re-added size is not a shrink).
-    assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(51.2), dec!(48.8), dec!(48.8)));
+    // size-0 delta, and legs 1 and 2 (48.8 left each) cap the basket. Without the trim report,
+    // leg 0 would offer only 60 − 51.2 = 8.8 and every leg would fill 8.8.
+    assert_eq!(fills(&quiet(&mut e, 2_700)), all3(dec!(48.8), dec!(48.8), dec!(48.8)));
 }
 
 #[test]
@@ -2329,8 +2525,8 @@ fn an_episode_opened_by_a_rest_snapshot_executes_after_the_latest_frame() {
     assert_eq!(intents[0].exec_ms, Some(5_100));
 }
 
-/// P3 buys a YES basket (asks 0.30/0.35/0.30, size 10) and holds it to resolution.
-fn yes_basket_held() -> Engine {
+/// P3 opens a YES basket (asks 0.30/0.35/0.30, size 10): execution due at 2 250, not yet run.
+fn yes_basket_open() -> Engine {
     let mut e = paper_engine(PolicyKind::P3Naive);
     seed(&mut e);
     e.on_frame(
@@ -2338,6 +2534,12 @@ fn yes_basket_held() -> Engine {
         2_150,
         &[ask("e1-y0", 2_000, "0.30", "10"), ask("e1-y0", 2_000, "0.40", "0")],
     );
+    e
+}
+
+/// ...and holds it to resolution.
+fn yes_basket_held() -> Engine {
+    let mut e = yes_basket_open();
     assert_eq!(fills(&quiet(&mut e, 2_300)), all3(dec!(10), dec!(10), dec!(10)));
     e
 }
@@ -2373,6 +2575,16 @@ fn a_repeated_resolution_settles_once() {
     // the ws hint and the periodic poll both found it
     let again = e.on_resolution(9_500, "e1-m1", dec!(1), dec!(0));
     assert!(sims(&again).iter().all(|s| !matches!(s, SimOut::Ledger(_))), "{again:?}");
+}
+
+#[test]
+fn a_resolution_first_runs_the_work_due_before_it() {
+    // No frame arrives between the open and the resolution: the execution due at 2 250 must
+    // still run (on_frame(2 260) first), so the settlement includes the shares it bought.
+    let mut e = yes_basket_open();
+    let outs = e.on_resolution(2_260, "e1-m0", dec!(1), dec!(0));
+    assert_eq!(fills(&outs), all3(dec!(10), dec!(10), dec!(10)));
+    assert_eq!(settles(&outs), vec![(dec!(10), Some(dec!(1)), dec!(10))]);
 }
 
 #[test]
@@ -2418,6 +2630,17 @@ fn close_completes_conversions_marks_every_account_and_exposes_state() {
 }
 
 #[test]
+fn close_first_runs_the_work_due_before_the_close_instant() {
+    // The stop comes at 2 250 with no frame since the open: the execution due at 2 200 runs at
+    // its own time first (S3b: close follows on_frame), then close completes its conversion.
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    open_no_basket(&mut e);
+    let outs = e.paper_close(2_250);
+    assert_eq!(fills(&outs), all3(dec!(51.2), dec!(51.2), dec!(51.2)));
+    assert!(sims(&outs).iter().any(|s| matches!(s, SimOut::Ledger(l) if l.kind == EntryKind::Convert && l.t_ms == 2_250)));
+}
+
+#[test]
 fn a_ws_market_resolved_asks_for_a_resolver_poll() {
     let mut e = engine();
     let outs = e.on_frame(
@@ -2426,6 +2649,74 @@ fn a_ws_market_resolved_asks_for_a_resolver_poll() {
         &[MarketEvent::Resolved { market: Some("0xabc".into()), server_ts_ms: Some(90) }],
     );
     assert!(outs.contains(&Out::ResolvedHint) && outs.contains(&Out::UniverseChanged));
+}
+
+#[test]
+fn the_paper_trader_never_changes_the_scanners_own_outputs() {
+    // The S3a-2 synthetic high-rate script: YES and NO baskets open and close, 1 in 50 deltas
+    // carries a wrong server top (trims), conn 0 drops every 4 000 frames. With all 15 repo
+    // accounts attached, every non-paper output must be byte-identical to the bare engine's.
+    let mut s = Synth::new(200, 42);
+    let frames = s.script(20_000, 50);
+    let policies: SimConfig = toml::from_str(include_str!("../../../config/policies.toml")).unwrap();
+    let run = |paper: bool| {
+        let mut e = synth_engine(&s, true);
+        if paper {
+            e.set_paper(PaperTrader::new(policies.clone()).unwrap());
+        }
+        let mut outs: Vec<Out> = Vec::new();
+        drive(&mut e, &frames, 4_000, &mut |o| outs.push(o));
+        outs
+    };
+    let (bare, with) = (run(false), run(true));
+    let scanner_only: Vec<String> = with
+        .iter()
+        .filter(|o| !matches!(o, Out::Paper(_)))
+        .map(|o| format!("{o:?}"))
+        .collect();
+    let bare_txt: Vec<String> = bare.iter().map(|o| format!("{o:?}")).collect();
+    assert_eq!(scanner_only.len(), bare_txt.len(), "output counts differ");
+    for (i, (a, b)) in scanner_only.iter().zip(&bare_txt).enumerate() {
+        assert_eq!(a, b, "scanner output {i} differs with the trader attached");
+    }
+    // the fixture exercises the trader: every open reaches the P3 accounts (they take every kind)
+    assert!(
+        with.iter().any(|o| matches!(o, Out::Paper(s) if matches!(**s, SimOut::Intent(_)))),
+        "no paper intent: the trader never saw an open"
+    );
+}
+```
+Also add an ignored bench to `bins/scanner/tests/bench_engine.rs` (after the existing test; the file already imports `common::*`, `Out`, `Instant` and has `env_usize`):
+```rust
+#[test]
+#[ignore = "profiling: run by hand (S3c plan, Task 4)"]
+fn engine_us_per_frame_with_and_without_the_paper_trader() {
+    let groups = env_usize("BENCH_GROUPS", 2_000);
+    let n = env_usize("BENCH_FRAMES", 100_000);
+    let mut s = Synth::new(groups, 7);
+    let frames = s.script(n, 0);
+    let policies: sim::config::SimConfig =
+        toml::from_str(include_str!("../../../config/policies.toml")).unwrap();
+    for paper in [false, true] {
+        let mut e = synth_engine(&s, true);
+        if paper {
+            e.set_paper(sim::trader::PaperTrader::new(policies.clone()).unwrap());
+        }
+        let mut paper_rows = 0_usize;
+        let t = Instant::now();
+        drive(&mut e, &frames, 0, &mut |o| {
+            if matches!(o, Out::Paper(_)) {
+                paper_rows += 1;
+            }
+        });
+        let ns = t.elapsed().as_nanos() / u128::try_from(frames.len()).unwrap();
+        println!(
+            "paper={paper:<5} groups={groups} frames={} engine={}.{:03} µs/frame paper_rows={paper_rows}",
+            frames.len(),
+            ns / 1_000,
+            ns % 1_000,
+        );
+    }
 }
 ```
 
@@ -2462,8 +2753,9 @@ Add two fields to `pub struct Engine` (after S3a's `issue_throttle`), and `paper
 ```rust
     /// The paper trader (S3c), fed by the S3b call contract. None = scanner only.
     paper: Option<PaperTrader>,
-    /// Latest frame receive time seen (an input, so replay sees the same). The paper trader's
-    /// open clock never runs behind it (see `open_ctx`).
+    /// The latest input instant the trader has been driven to: frame receive times, and the
+    /// instants of `on_resolution` and `paper_close` (all inputs, so replay sees the same). The
+    /// paper trader's open clock never runs behind it (see `open_ctx`).
     last_recv_ms: i64,
 ```
 Add these free items below `fn leg_fee`:
@@ -2526,7 +2818,7 @@ In `on_frame`, directly after `let mut frame_tokens: Vec<String> = Vec::new();` 
             paper_outs(t.on_frame(recv_ms, &books), &mut out);
         }
 ```
-In the `MarketEvent::Snapshot` arm, inside `if self.on_book(token, &mut touched, |b| b.apply_snapshot(bids, asks, ts)) { … }`, after the `frame_tokens` push block (`on_book` also returns true for canary tokens, hence the `token_ix` lookup):
+In the `MarketEvent::Snapshot` arm, inside `if self.on_book(token, &mut touched, |b| b.apply_snapshot(bids, asks, ts)) { … }`, after S3a-2's `self.pending_remove(token);` line and the `frame_tokens` push block (`on_book` also returns true for canary tokens, hence the `token_ix` lookup):
 ```rust
                         if let (Some(t), Some(&(g, l))) =
                             (self.paper.as_mut(), self.token_ix.get(token.as_str()))
@@ -2534,11 +2826,11 @@ In the `MarketEvent::Snapshot` arm, inside `if self.on_book(token, &mut touched,
                             t.on_snapshot(token, &self.groups[g].legs[l].book);
                         }
 ```
-In the `MarketEvent::Delta` arm, after the `if found { self.pending_tops.insert(token.clone(), PendingTop { … }); }` block. (`side`, `price` and `size` are the copied locals of `let (side, price, size) = (*side, *price, *size);`. Any `resolve_pending` this delta triggered ran BEFORE `on_book`, and reports its own trim through `check_book` below.)
+In the `MarketEvent::Delta` arm, after S3a-2's `if found { self.pending_insert(token, PendingTop { conn, ts, bid: bb, ask: ba }); }` block (leave that block exactly as it is: the pending index helpers stay the only writers of `pending_tops`). `side`, `price` and `size` are the copied locals of `let (side, price, size) = (*side, *price, *size);`. Any `resolve_pending` this delta triggered ran BEFORE `on_book`, and reports its own trim through `check_book` below. The trader check comes first, so the bare engine pays nothing extra per delta:
 ```rust
                     if found
-                        && self.token_ix.contains_key(token.as_str())
                         && let Some(t) = self.paper.as_mut()
+                        && self.token_ix.contains_key(token.as_str())
                     {
                         t.on_level(token, BookSide::from_core(side), price.get(), size.get());
                     }
@@ -2558,8 +2850,9 @@ with (same trim, plus the removal report; canary tokens have no `group` and are 
 ```rust
             let (sb, sa) = server.unwrap_or((None, None));
             // S3c: a trimmed level is a removal the paper trader's consumed-liquidity ledger must
-            // see, exactly like a size-0 delta. Remember the levels before the trim (group legs
-            // only, and only when a trader is attached: this path is rare, the copy is cheap).
+            // see, exactly like a size-0 delta. Remember the levels before the trim: group legs
+            // only, only when a trader is attached, and only on a top mismatch (one book's levels,
+            // never a scan of the universe).
             let before = match (group, self.paper.is_some()) {
                 (Some(_), true) => self
                     .book_of(token)
@@ -2586,7 +2879,13 @@ with (same trim, plus the removal report; canary tokens have no `group` and are 
             }
 ```
 The rest of `check_book` (throttled `top_mismatch` row, `Resnapshot` when not repaired, `suspect`, re-evaluation when `changed`, crossed check) is unchanged. The removal is reported BEFORE the re-evaluation, so an episode that re-opens on the trimmed book is decided against a ledger that already forgot the phantom.
-Replace the `MarketEvent::Resolved { .. } | MarketEvent::NewMarket { .. } => out.push(Out::UniverseChanged)` arm with:
+Replace the arm
+```rust
+                MarketEvent::Resolved { .. } | MarketEvent::NewMarket { .. } => {
+                    out.push(Out::UniverseChanged)
+                }
+```
+with:
 ```rust
                 MarketEvent::Resolved { .. } => {
                     out.push(Out::UniverseChanged);
@@ -2665,7 +2964,7 @@ Split `snap` so the open context can reuse its levels. Replace `fn snap` with:
             event_id: meta.event_id.clone(),
             // A frame (or a deferred check it settled) passes its own recv; `rest_snapshot`
             // passes the REST book's SERVER ts, which can be far behind. Never start the paper
-            // clock before the latest frame the engine received (ruling 15).
+            // clock before the latest instant the trader was driven to (rulings 15, 24).
             r_open_ms: at.recv_ms.max(self.last_recv_ms),
             signal: s.clone(),
             legs: meta
@@ -2735,18 +3034,25 @@ Add these methods at the end of `impl Engine`:
     }
 
     /// Shutdown at `t_ms` (live: the Ctl::Shutdown instant; replay: the same line, or the last
-    /// input): pending conversions complete, other pending work is dropped, every account marks.
+    /// input). S3b contract: `close` must follow `on_frame(t_ms)`, so work due at or before the
+    /// close instant first runs at its own due time; then pending conversions complete at
+    /// `t_ms`, other pending work is dropped, and every account marks.
     pub fn paper_close(&mut self, t_ms: i64) -> Vec<Out> {
         let mut out = Vec::new();
+        self.last_recv_ms = self.last_recv_ms.max(t_ms);
         if let Some(t) = self.paper.as_mut() {
             let books = EngineBooks { token_ix: &self.token_ix, groups: &self.groups };
+            paper_outs(t.on_frame(t_ms, &books), &mut out);
             paper_outs(t.close(t_ms, &books), &mut out);
         }
         out
     }
 
     /// A market resolved with this payout vector (live: from Gamma via `Ctl::Resolved`; replay:
-    /// the same line). A vector other than {1,0}/{0,1} is also a Q19 integrity row.
+    /// the same line). A vector other than {1,0}/{0,1} is also a Q19 integrity row. The trader is
+    /// first driven to `t_ms` (`on_frame`), so an execution already due settles with the shares
+    /// it bought; then every account holding the market settles, and its `AccountRow` values the
+    /// account's other open positions on the current books.
     pub fn on_resolution(
         &mut self,
         t_ms: i64,
@@ -2776,8 +3082,14 @@ Add these methods at the end of `impl Engine`:
                 },
             ));
         }
+        self.last_recv_ms = self.last_recv_ms.max(t_ms);
         if let Some(t) = self.paper.as_mut() {
-            paper_outs(t.on_resolution(t_ms, market_id, payout_yes, payout_no), &mut out);
+            let books = EngineBooks { token_ix: &self.token_ix, groups: &self.groups };
+            paper_outs(t.on_frame(t_ms, &books), &mut out);
+            paper_outs(
+                t.on_resolution(t_ms, market_id, payout_yes, payout_no, &books),
+                &mut out,
+            );
         }
         out
     }
@@ -2789,47 +3101,55 @@ Add these methods at the end of `impl Engine`:
 
 - [ ] **Step 7: Run the tests to verify they pass.**
 Run: `cargo test -p scanner --test engine_paper`
-Expected: PASS (10). If a fill quantity differs, recompute it from the fixture before touching the code. The per-trade budget is 100 / 1.95 → 51.2 (sizes must keep price × size at ≤ 2 dp for limits 0.60/0.65/0.70). The second episode sees 100 − 51.2 = 48.8 on the legs whose consumption did not clear. In `a_trimmed_phantom_level_clears_consumed_liquidity`, first confirm the top_mismatch row and the episode-2 open (S3a's path); only then look at the fills: 48.8 on leg 0 means the trim never reached `on_level`.
+Expected: PASS (13). If a fill quantity differs, recompute it from the fixture before touching the code:
+- The per-trade budget is 100 / 1.95 → 51.2 (sizes must keep price × size at ≤ 2 dp for limits 0.60/0.65/0.70; `settle()` finds that fixpoint).
+- A second episode is sized by the raw feed first (it must `Take`), then capped by the account's consumed-filtered depth: 48.8 when leg 0's consumption cleared (legs 1 and 2 still carry 51.2 of their 100), 8.8 when it did not (leg 0 re-added at 60, 51.2 still consumed).
+- In `a_trimmed_phantom_level_clears_consumed_liquidity`, first confirm the top_mismatch row and the episode-2 open (S3a's path); only then look at the fills: 8.8 means the trim never reached `on_level`.
+- In `the_paper_trader_never_changes_the_scanners_own_outputs`, a differing scanner output means a hook mutated engine state (a book, the tracker, a pending check): the trader may only read.
 Run: `cargo test -p scanner && cargo test -p sim`
-Expected: PASS. The existing engine, engine_checks and replay tests are unchanged: without a paper trader the engine emits exactly what it did before, plus `ResolvedHint` on `market_resolved` (`last_recv_ms` only feeds the paper clock; the `before` copy in `check_book` is skipped when no trader is attached).
+Expected: PASS. The existing engine, engine_checks and replay tests are unchanged: without a paper trader the engine emits exactly what it did before, plus `ResolvedHint` on `market_resolved` (no existing test covers that event). `last_recv_ms` only feeds the paper clock, and the `before` copy in `check_book` is skipped when no trader is attached.
+Run (by hand, debug build, the ratio matters, not the absolute): `cargo test -p scanner --test bench_engine -- --ignored --nocapture engine_us_per_frame_with_and_without_the_paper_trader`
+Expected: two lines, `paper=false` and `paper=true`. Note both in the task report. If `paper=true` costs more than 2× `paper=false` µs/frame, stop and profile before continuing (the budget is the S3a-2 bench line: ~232 µs/frame on the VPS, shared with `parse_frame`).
 
 - [ ] **Step 8: Lint and commit.**
 Run: `cargo fmt --all --check && cargo clippy -p scanner -p sim --all-targets -- -D warnings`
 Expected: clean.
 ```bash
-git add crates/sim/src/trader.rs crates/sim/tests/lifecycle.rs bins/scanner/src/engine.rs bins/scanner/src/run.rs bins/scanner/tests/engine_paper.rs
+git add crates/sim/src/trader.rs crates/sim/src/consumed.rs crates/sim/tests/lifecycle.rs bins/scanner/src/engine.rs bins/scanner/src/run.rs bins/scanner/tests/engine_paper.rs bins/scanner/tests/bench_engine.rs
 git commit -m "scanner/engine: paper trader on the engine's own books (call contract, open context, lock-up, resolutions)"
 ```
 
 ---
 
-### Task 5: capture `Ctl::Resolved` + replay with the paper trader (golden test) + `replay_cmd`
+### Task 5: capture `Ctl::Resolved` + replay with the paper trader (golden test) + streaming `replay_cmd`
 
 **Files:**
 - Modify: `bins/scanner/src/capture.rs`, `bins/scanner/src/replay.rs`, `bins/scanner/src/run.rs` (`replay_cmd` only), `bins/scanner/src/main.rs`
 - Test: `bins/scanner/tests/replay.rs`
 
 **Interfaces:**
-- Consumes: `Engine::{set_paper, on_resolution, paper_close}` (Task 4); `paper::{push_sim, account_rows, with_policies, Policies}` (Task 3); `Batch::rows` (Task 1). S3a's replay: the `Ctl::Suspect` arm (`out.outs.extend(engine.mark_suspect(&event_id, until_ms, ms))`), the `Ctl::Shutdown` arm (`out.outs.extend(engine.close_all(ms)); shut_down = true;`, which now also flushes suppressed throttle counts) and the crash close `engine.close_all(last_ms)`. The test file's `ctx()` already sets S3a's `issue_throttle_ms: 5_000`.
+- Consumes: `Engine::{set_paper, on_resolution, paper_close}` (Task 4); `paper::{push_sim, account_rows, with_policies, Policies}` (Task 3); `Batch::rows` (Task 1). The current replay (`aba9ce5`): `replay_dir_with(dir: &Path, ctx: EngineCtx, mut sink: impl FnMut(Out)) -> anyhow::Result<ReplayStats>` walks the hour files in order and hands every engine output to `sink`. Its arms: `Ctl::Down` → `engine.disconnect`, `Ctl::Universe` → `apply_universe`, `Ctl::RestSnapshot` → `rest_snapshot`, `Ctl::Suspect` → `mark_suspect(&event_id, until_ms, ms)`, `Ctl::Shutdown` → `for o in engine.close_all(ms) { sink(o); } shut_down = true;`, and after the loop the crash close `if !shut_down { for o in engine.close_all(last_ms) { sink(o); } }`. `replay_dir(dir, ctx) -> ReplayOut { outs, frames, parse_errors }` collects through `replay_dir_with` (tests only). `run::replay_cmd(cfg, cfg_hash, dir, dry_run)` passes a sink. The test file's `ctx()` already sets S3a's `issue_throttle_ms: 5_000`.
 - Produces:
   - `capture::Ctl::Resolved { market_id: String, payout_yes: String, payout_no: String }`. The decimals are exact strings, like `RestSnapshot`, serialized as `{"kind":"resolved",…}`.
-  - `replay::replay_dir_paper(dir: &Path, ctx: EngineCtx, paper: Option<PaperTrader>) -> anyhow::Result<ReplayOut>`. `replay_dir(dir, ctx)` is unchanged and equals `replay_dir_paper(dir, ctx, None)`.
-  - `run::replay_cmd(cfg, cfg_hash, dir, dry_run, policies: Option<&Policies>)`.
+  - `replay::replay_dir_paper_with(dir: &Path, ctx: EngineCtx, paper: Option<PaperTrader>, sink: impl FnMut(Out)) -> anyhow::Result<ReplayStats>`: the old `replay_dir_with` body plus the trader. `replay_dir_with(dir, ctx, sink)` keeps its signature and calls `replay_dir_paper_with(dir, ctx, None, sink)`; `replay_dir` is unchanged.
+  - `run::replay_cmd(cfg, cfg_hash, dir, dry_run, policies: Option<&Policies>)`: the replay runs on a blocking thread and its rows reach Postgres in chunks of `REPLAY_CHUNK` (2 000) over a bounded channel (ruling 21).
 
-- [ ] **Step 1: Write the failing golden test.** In `bins/scanner/tests/replay.rs`, change the replay import to
+- [ ] **Step 1: Write the failing golden tests.** In `bins/scanner/tests/replay.rs`, change the replay import to
 ```rust
-use scanner::replay::{ReplayOut, replay_dir, replay_dir_paper};
+use scanner::replay::{replay_dir, replay_dir_paper_with, replay_dir_with};
 ```
 add these imports
 ```rust
 use scanner::paper::push_sim;
 use sim::config::SimConfig;
 use sim::trader::PaperTrader;
+use std::path::Path;
 use store::Batch;
 ```
 and append:
 ```rust
 const POLICIES: &str = include_str!("../../../config/policies.toml");
+const T0: i64 = 1_790_121_600_000; // a whole minute: the first mark boundary is T0 + 60 000
 
 /// Book snapshots for y0..y2 with one bid and one ask level each, size 100.
 fn paper_frame(ts: i64, bids: [&str; 3], asks: [&str; 3]) -> String {
@@ -2844,9 +3164,48 @@ fn paper_frame(ts: i64, bids: [&str; 3], asks: [&str; 3]) -> String {
     format!("[{}]", items.join(","))
 }
 
-fn paper_rows(r: &ReplayOut) -> Batch {
+/// A NO basket opens at T0 + 1 100, every scenario executes by T0 + 2 000 and converts by
+/// T0 + 4 000; m0 resolves 50-50 at T0 + 5 000; the capture ends with a Shutdown line at
+/// T0 + 6 000, or (a crash) without one.
+fn write_paper_capture(dir: &Path, clean_stop: bool) {
+    let u = universe();
+    let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
+    let ufile = universe_file_name(u.taken_ms, 1);
+    let asks = ["0.45", "0.40", "0.35"]; // ΣA = 1.20: never a YES basket
+    let open = ["0.40", "0.35", "0.30"]; // NO asks 0.60/0.65/0.70: Σ 1.95 < 2
+    let mut msgs = vec![
+        CaptureMsg::Universe(Box::new(UniverseRecord { universe: u.clone(), conn_of, file: ufile.clone() })),
+        line(T0, None, Some(Ctl::Universe { taken_ms: u.taken_ms, file: ufile })),
+        line(T0 + 100, Some(paper_frame(T0, ["0.30", "0.30", "0.30"], asks)), None), // ΣNO 2.10: nothing
+        line(T0 + 1_100, Some(paper_frame(T0 + 1_000, open, asks)), None), // the NO basket opens
+        line(T0 + 2_000, Some(paper_frame(T0 + 1_900, open, asks)), None), // every scenario's t_x has passed
+        line(T0 + 4_000, Some(paper_frame(T0 + 3_900, open, asks)), None), // conversions due (+2 s)
+        line(
+            T0 + 5_000,
+            None,
+            Some(Ctl::Resolved { market_id: "m0".into(), payout_yes: "0.5".into(), payout_no: "0.5".into() }),
+        ),
+    ];
+    if clean_stop {
+        msgs.push(line(T0 + 6_000, None, Some(Ctl::Shutdown)));
+    }
+    let mut w = Writer::new(dir.to_path_buf());
+    for m in &msgs {
+        w.write(m).unwrap();
+    }
+    w.finish();
+}
+
+fn replay_paper(dir: &Path, policies: &SimConfig) -> Vec<Out> {
+    let mut outs = Vec::new();
+    replay_dir_paper_with(dir, ctx(), Some(PaperTrader::new(policies.clone()).unwrap()), |o| outs.push(o))
+        .unwrap();
+    outs
+}
+
+fn paper_rows(outs: &[Out]) -> Batch {
     let mut b = Batch::default();
-    for o in &r.outs {
+    for o in outs {
         if let Out::Paper(s) = o {
             push_sim(1, (**s).clone(), &mut b);
         }
@@ -2857,54 +3216,46 @@ fn paper_rows(r: &ReplayOut) -> Batch {
 #[test]
 fn replay_paper_trades_deterministically_and_keeps_the_equity_identity() {
     let dir = tmp("paper");
-    let u = universe();
-    let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
-    let t0 = 1_790_121_600_000_i64;
-    let ufile = universe_file_name(u.taken_ms, 1);
-    let asks = ["0.45", "0.40", "0.35"]; // ΣA = 1.20: never a YES basket
-    let open = ["0.40", "0.35", "0.30"]; // NO asks 0.60/0.65/0.70: Σ 1.95 < 2
-    let msgs = vec![
-        CaptureMsg::Universe(Box::new(UniverseRecord { universe: u.clone(), conn_of, file: ufile.clone() })),
-        line(t0, None, Some(Ctl::Universe { taken_ms: u.taken_ms, file: ufile })),
-        line(t0 + 100, Some(paper_frame(t0, ["0.30", "0.30", "0.30"], asks)), None), // ΣNO 2.10: nothing
-        line(t0 + 1_100, Some(paper_frame(t0 + 1_000, open, asks)), None), // the NO basket opens
-        line(t0 + 2_000, Some(paper_frame(t0 + 1_900, open, asks)), None), // every scenario's t_x has passed
-        line(t0 + 4_000, Some(paper_frame(t0 + 3_900, open, asks)), None), // conversions due (+2 s)
-        line(
-            t0 + 5_000,
-            None,
-            Some(Ctl::Resolved { market_id: "m0".into(), payout_yes: "0.5".into(), payout_no: "0.5".into() }),
-        ),
-        line(t0 + 6_000, None, Some(Ctl::Shutdown)),
-    ];
-    let mut w = Writer::new(dir.clone());
-    for m in &msgs {
-        w.write(m).unwrap();
-    }
-    w.finish();
-
+    write_paper_capture(&dir, true);
     let policies: SimConfig = toml::from_str(POLICIES).unwrap();
-    let run = || replay_dir_paper(&dir, ctx(), Some(PaperTrader::new(policies.clone()).unwrap())).unwrap();
-    let (a, b) = (run(), run());
-    assert_eq!(a.outs, b.outs, "same capture, same outputs, paper rows included");
+    let (a, b) = (replay_paper(&dir, &policies), replay_paper(&dir, &policies));
+    assert_eq!(a, b, "same capture, same outputs, paper rows included");
     let (ra, rb) = (paper_rows(&a), paper_rows(&b));
     assert_eq!(ra, rb, "same paper ledger rows");
     assert!(!ra.paper_ledger.is_empty());
 
-    assert!(a.outs.iter().any(|o| matches!(o, Out::Episode(w) if w.row.kind == "no_basket")));
-    assert!(a.outs.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "non_binary_payout" && i.ts_ms == t0 + 5_000)));
+    assert!(a.iter().any(|o| matches!(o, Out::Episode(w) if w.row.kind == "no_basket")));
+    assert!(a.iter().any(|o| matches!(o, Out::Integrity(i) if i.kind == "non_binary_payout" && i.ts_ms == T0 + 5_000)));
     let p0 = "P0-converter/colo-idle";
     assert!(ra.paper_execs.iter().any(|x| x.account_id == p0 && x.q_eff == dec!(51.2)));
     assert!(ra.paper_ledger.iter().any(|l| l.account_id == p0 && l.kind == "convert"));
 
     // Ctl::Shutdown closes the trader: one final mark per account, and the identity holds on each
-    let finals: Vec<_> = ra.paper_marks.iter().filter(|m| m.t_ms == t0 + 6_000).collect();
+    let finals: Vec<_> = ra.paper_marks.iter().filter(|m| m.t_ms == T0 + 6_000).collect();
     assert_eq!(finals.len(), policies.accounts.len());
     for m in &finals {
         assert_eq!(m.equity, dec!(1000) + m.realized + m.unrealized, "{}", m.account_id);
     }
     let p0_final = finals.iter().find(|m| m.account_id == p0).unwrap();
     assert_eq!(p0_final.realized, dec!(2.56), "51.2 sets × (2 − 1.95)");
+
+    // the bare replay (no trader) emits exactly the scanner outputs of the paper replay
+    let mut bare = Vec::new();
+    replay_dir_with(&dir, ctx(), |o| bare.push(o)).unwrap();
+    let scanner_only: Vec<Out> = a.iter().filter(|o| !matches!(o, Out::Paper(_))).cloned().collect();
+    assert_eq!(scanner_only, bare);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_capture_without_a_shutdown_line_closes_the_trader_at_its_last_instant() {
+    let dir = tmp("paper-crash");
+    write_paper_capture(&dir, false);
+    let policies: SimConfig = toml::from_str(POLICIES).unwrap();
+    let rows = paper_rows(&replay_paper(&dir, &policies));
+    // the last captured instant is the Resolved line (T0 + 5 000): every account marks there
+    let finals = rows.paper_marks.iter().filter(|m| m.t_ms == T0 + 5_000).count();
+    assert!(finals >= policies.accounts.len(), "{finals} marks at the crash close");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2921,10 +3272,11 @@ fn a_resolved_line_round_trips_through_the_capture_format() {
     assert_eq!(serde_json::from_str::<Line>(&json).unwrap(), l);
 }
 ```
+(In the crash test the count is `>=`: an account that held m0 would also write its resolution `AccountRow` at T0 + 5 000. After the conversions nobody holds m0 in this fixture, so it is exactly 15 today; the table keeps the first row per `(run, account, t_ms)` anyway, ruling 4.)
 
 - [ ] **Step 2: Run them to verify they fail.**
 Run: `cargo test -p scanner --test replay`
-Expected: compile errors: no variant `Ctl::Resolved`, no function `replay_dir_paper`.
+Expected: compile errors: no variant `Ctl::Resolved`, no function `replay_dir_paper_with`.
 
 - [ ] **Step 3: Implement the control line.** In `bins/scanner/src/capture.rs`, add a variant to `enum Ctl` before `Shutdown`:
 ```rust
@@ -2940,15 +3292,18 @@ Extend the module doc's list of control lines to "(down, universe, rest_snapshot
 
 - [ ] **Step 4: Implement replay.** In `bins/scanner/src/replay.rs`:
 - add the imports `use rust_decimal::Decimal;` and `use sim::trader::PaperTrader;`;
-- rename `pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {` to
+- rename `pub fn replay_dir_with(` (with its doc comment) to:
 ```rust
-/// Replay with the paper trader (S3c). The trader starts FRESH (never from `paper_state`), so two
-/// replays of one capture produce identical paper rows. Resolutions come from `Ctl::Resolved`.
-pub fn replay_dir_paper(
+/// Replay a capture directory, delivering every engine output to `sink` in order instead of
+/// collecting them, so a long replay does not have to hold millions of `Out`s in memory. With a
+/// paper trader (S3c) the trader starts FRESH (never from `paper_state`), so two replays of one
+/// capture produce identical paper rows; resolutions come only from `Ctl::Resolved` lines.
+pub fn replay_dir_paper_with(
     dir: &Path,
     ctx: EngineCtx,
     paper: Option<PaperTrader>,
-) -> anyhow::Result<ReplayOut> {
+    mut sink: impl FnMut(Out),
+) -> anyhow::Result<ReplayStats> {
 ```
 - directly after `let mut engine = Engine::new(ctx);` add
 ```rust
@@ -2956,7 +3311,7 @@ pub fn replay_dir_paper(
         engine.set_paper(t);
     }
 ```
-- add an arm before `Some(Ctl::Shutdown)`:
+- add an arm before `Some(Ctl::Shutdown) => {`:
 ```rust
                 Some(Ctl::Resolved {
                     market_id,
@@ -2967,28 +3322,55 @@ pub fn replay_dir_paper(
                         .with_context(|| format!("bad payout_yes {payout_yes:?}"))?;
                     let n = Decimal::from_str_exact(&payout_no)
                         .with_context(|| format!("bad payout_no {payout_no:?}"))?;
-                    out.outs.extend(engine.on_resolution(ms, &market_id, y, n));
+                    for o in engine.on_resolution(ms, &market_id, y, n) {
+                        sink(o);
+                    }
                 }
 ```
-- in the `Some(Ctl::Shutdown)` arm, add `out.outs.extend(engine.paper_close(ms));` after `out.outs.extend(engine.close_all(ms));`;
-- replace the final crash-close block with
+- replace the `Some(Ctl::Shutdown)` arm with (live does the same, in the same order, on the same instant):
+```rust
+                Some(Ctl::Shutdown) => {
+                    for o in engine.close_all(ms) {
+                        sink(o);
+                    }
+                    for o in engine.paper_close(ms) {
+                        sink(o);
+                    }
+                    shut_down = true;
+                }
+```
+- replace the crash-close block after the loop with:
 ```rust
     if !shut_down {
         // crash: close at the last captured instant
-        out.outs.extend(engine.close_all(last_ms));
-        out.outs.extend(engine.paper_close(last_ms));
+        for o in engine.close_all(last_ms) {
+            sink(o);
+        }
+        for o in engine.paper_close(last_ms) {
+            sink(o);
+        }
     }
 ```
-- add the wrapper above `replay_dir_paper`:
+- add the unchanged-signature wrapper directly below `replay_dir_paper_with` (above `replay_dir`, which keeps calling `replay_dir_with`):
 ```rust
-pub fn replay_dir(dir: &Path, ctx: EngineCtx) -> anyhow::Result<ReplayOut> {
-    replay_dir_paper(dir, ctx, None)
+/// Replay without a paper trader (the S2 scanner outputs only).
+pub fn replay_dir_with(
+    dir: &Path,
+    ctx: EngineCtx,
+    sink: impl FnMut(Out),
+) -> anyhow::Result<ReplayStats> {
+    replay_dir_paper_with(dir, ctx, None, sink)
 }
 ```
 
-- [ ] **Step 5: Write paper rows from `scanner replay`.** In `bins/scanner/src/run.rs`:
-- change `use crate::replay::replay_dir;` to `use crate::replay::replay_dir_paper;`;
+- [ ] **Step 5: Write paper rows from `scanner replay`, streamed.** In `bins/scanner/src/run.rs`:
+- change `use crate::replay::replay_dir_with;` to `use crate::replay::replay_dir_paper_with;`;
 - add `use crate::paper::{self, Policies};` and `use sim::trader::PaperTrader;`;
+- add below `END_RUN_TIMEOUT`:
+```rust
+/// Rows per `scanner replay` write, and per message on its bounded replay → writer channel.
+const REPLAY_CHUNK: usize = 2_000;
+```
 - replace `replay_cmd` with:
 ```rust
 pub async fn replay_cmd(
@@ -3006,60 +3388,93 @@ pub async fn replay_cmd(
             .context("paper trader")
     };
     if dry_run {
-        let r = replay_dir_paper(dir, engine_ctx(cfg, cfg_hash, 0, "replay"), trader()?)?;
-        let eps: std::collections::HashSet<&str> = r
-            .outs
-            .iter()
-            .filter_map(|o| match o {
-                Out::Episode(w) => Some(w.row.episode_id.as_str()),
-                _ => None,
-            })
-            .collect();
-        let paper_rows = r.outs.iter().filter(|o| matches!(o, Out::Paper(_))).count();
+        let mut eps: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut paper_rows = 0_u64;
+        let stats = replay_dir_paper_with(
+            dir,
+            engine_ctx(cfg, cfg_hash, 0, "replay"),
+            trader()?,
+            |o| match o {
+                Out::Episode(w) => {
+                    eps.insert(w.row.episode_id.clone());
+                }
+                Out::Paper(_) => paper_rows += 1,
+                _ => {}
+            },
+        )?;
         println!(
-            "frames {} parse_errors {} episodes {} paper_rows {}",
-            r.frames,
-            r.parse_errors,
-            eps.len(),
-            paper_rows
+            "frames {} parse_errors {} episodes {} paper_rows {paper_rows}",
+            stats.frames,
+            stats.parse_errors,
+            eps.len()
         );
         return Ok(());
     }
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
     let store = Store::connect(&url, 2).await?;
     let run_id = store.start_run(&new_run(cfg_hash, "replay")).await?;
-    let r = replay_dir_paper(dir, engine_ctx(cfg, cfg_hash, run_id, "replay"), trader()?)?;
-    let mut batch = Batch::default();
     if let Some(p) = policies {
-        batch.paper_accounts = paper::account_rows(run_id, p); // before any row that references them
+        // Pre-registration first: every other paper row references its account row.
+        store
+            .write_batch(&Batch {
+                paper_accounts: paper::account_rows(run_id, p),
+                ..Batch::default()
+            })
+            .await?;
     }
-    for o in r.outs {
-        match o {
-            // DEVIATION: unbox, same reason as in Io::route.
-            Out::Episode(w) => batch.episodes.push(*w),
-            Out::Integrity(i) => batch.integrity.push(i),
-            Out::Paper(s) => paper::push_sim(run_id, *s, &mut batch),
-            _ => {}
-        }
-        if batch.rows() >= 2_000 {
-            store.write_batch(&std::mem::take(&mut batch)).await?;
+    // The replay runs on a blocking thread and hands full chunks to this task, which writes
+    // them as they come: at most a few chunks are ever in memory, whatever the capture's length
+    // (aba9ce5). A failed write closes the channel; the thread then finishes without sending.
+    let (tx, mut rx) = mpsc::channel::<Batch>(4);
+    let (dir_buf, ctx, t) = (
+        dir.to_path_buf(),
+        engine_ctx(cfg, cfg_hash, run_id, "replay"),
+        trader()?,
+    );
+    let replay = tokio::task::spawn_blocking(move || -> anyhow::Result<crate::replay::ReplayStats> {
+        let mut batch = Batch::default();
+        let stats = replay_dir_paper_with(&dir_buf, ctx, t, |o| {
+            match o {
+                // DEVIATION: unbox, same reason as in Io::route.
+                Out::Episode(w) => batch.episodes.push(*w),
+                Out::Integrity(i) => batch.integrity.push(i),
+                Out::Paper(s) => paper::push_sim(run_id, *s, &mut batch),
+                _ => return,
+            }
+            if batch.rows() >= REPLAY_CHUNK {
+                let _ = tx.blocking_send(std::mem::take(&mut batch));
+            }
+        })?;
+        let _ = tx.blocking_send(batch);
+        Ok(stats)
+    });
+    let mut write_err = None;
+    while let Some(b) = rx.recv().await {
+        if let Err(e) = store.write_batch(&b).await {
+            write_err = Some(e);
+            break;
         }
     }
-    store.write_batch(&batch).await?;
+    drop(rx); // never leave the replay thread blocked on a full channel
+    let stats = replay.await.context("replay thread")??;
+    if let Some(e) = write_err {
+        return Err(anyhow::Error::new(e).context("write replay rows"));
+    }
     store
         .end_run(
             run_id,
             now_ms(),
-            &format!("replay of {} ({} frames)", dir.display(), r.frames),
+            &format!("replay of {} ({} frames)", dir.display(), stats.frames),
         )
         .await?;
     println!(
         "replay run {run_id}: {} frames, {} parse errors",
-        r.frames, r.parse_errors
+        stats.frames, stats.parse_errors
     );
     Ok(())
 }
 ```
+(`mpsc` is already imported from `tokio::sync`; `Batch` from `store`. Several versions of one episode can share a chunk: `write_batch` keeps the last, as before.)
 In `bins/scanner/src/main.rs`, replace the `Cmd::Replay` arm with:
 ```rust
         Cmd::Replay { dir, dry_run } => {
@@ -3070,7 +3485,7 @@ In `bins/scanner/src/main.rs`, replace the `Cmd::Replay` arm with:
 
 - [ ] **Step 6: Run the tests to verify they pass.**
 Run: `cargo test -p scanner --test replay`
-Expected: PASS. That includes the two new tests and `replay_reproduces_episodes_and_censoring_byte_for_byte`, which still calls `replay_dir(dir, ctx)`.
+Expected: PASS. That includes the three new tests, `replay_reproduces_episodes_and_censoring_byte_for_byte` (still `replay_dir`) and `replay_dir_with_streams_the_same_outputs_as_replay_dir` (still `replay_dir_with`).
 Run: `cargo test -p scanner`
 Expected: PASS.
 
@@ -3079,7 +3494,7 @@ Run: `cargo fmt --all --check && cargo clippy -p scanner --all-targets -- -D war
 Expected: clean.
 ```bash
 git add bins/scanner/src/capture.rs bins/scanner/src/replay.rs bins/scanner/src/run.rs bins/scanner/src/main.rs bins/scanner/tests/replay.rs
-git commit -m "scanner/replay: paper trader in replay (fresh accounts, Ctl::Resolved, close at shutdown) + golden test"
+git commit -m "scanner/replay: paper trader in replay (fresh accounts, Ctl::Resolved, close at shutdown), streamed replay writes + golden test"
 ```
 
 ---
@@ -3326,7 +3741,7 @@ git commit -m "scanner/writer: paper rows ride the batching writer, never evicte
 - Test: `mod tests` in `run.rs`
 
 **Interfaces:**
-- Consumes: everything above. From S3a (current `run.rs`): `SHUTDOWN_BUDGET` (20 s) + `END_RUN_TIMEOUT` (5 s) < compose's 30 s; `by_deadline(deadline, step, fut)` (a ready step still completes after the deadline, a stuck one is skipped); `wait_thread`; and `run_live`'s stop block, in this order: `let deadline = …; drop(plan_tx); supervisor_task.abort(); refresher_task.abort(); let t = now_ms(); io.ctl(0, Ctl::Shutdown, t); close_all(t) → by_deadline("close episodes"); Flush → by_deadline("writer flush"); abort health/rechecks/resnapshots/samplers; drop(io), drop(capture_tx), drop(writer_tx); by_deadline("writer exit", writer_task); wait_thread(capture)`. `Io` today has exactly `writer, capture, recheck, resnap, refresh, metrics, run_id, l1_window_ms, suspect_window_ms`.
+- Consumes: everything above. From S3a (current `run.rs`): `SHUTDOWN_BUDGET` (20 s) + `END_RUN_TIMEOUT` (5 s) < compose's 30 s; `by_deadline(deadline, step, fut)` (a ready step still completes after the deadline, a stuck one is skipped); `wait_thread`; and `run_live`'s stop block, in this order: `let deadline = …; drop(plan_tx); supervisor_task.abort(); refresher_task.abort(); let t = now_ms(); io.ctl(0, Ctl::Shutdown, t); close_all(t) → by_deadline("close episodes"); Flush → by_deadline("writer flush"); abort health/rechecks/resnapshots/samplers; drop(io), drop(capture_tx), drop(writer_tx); by_deadline("writer exit", writer_task); wait_thread(capture)`. `Io` today has exactly `writer, capture, recheck, resnap, refresh, metrics, run_id, l1_window_ms, suspect_window_ms`. From S3a-2: the engine loop records every frame's `parse_frame` / `engine.on_frame` time in `FrameTiming` (`timing.record(parse_us, on_frame_us, now_ms())`) and logs one `engine: frames=… on_frame_us p50=… p99=… max=…` line a minute; the trader's per-frame hook runs inside `engine.on_frame`, so that line measures it too (the runbook reads it). Before the loop: `let mut tick = tokio::time::interval(Duration::from_secs(1)); tick.set_missed_tick_behavior(…Delay); let shutdown = shutdown_signal(); tokio::pin!(shutdown); let mut timing = FrameTiming::new(now_ms());`. `Engine::paper_close(t)` drives the trader to `t` (`on_frame`) before `close` (Task 4).
 - Produces:
   - `run::run(cfg: Config, cfg_hash: String, policies: Option<Policies>)`.
   - `Io` gains `resolve_hint: Arc<Notify>`. `Io::route` sends `Out::Paper` to the writer as `WriterMsg::Paper` (rows stamped with the run id) and turns `Out::ResolvedHint` into a resolver wake-up.
@@ -3538,10 +3953,11 @@ async fn run_live(
 ```
   - directly after `let _ = by_deadline(deadline, "close episodes", io.route(&mut engine, outs)).await;` and BEFORE the `WriterMsg::Flush` step, add:
 ```rust
-    // Paper (S3c): complete pending conversions and mark at `t`, the Ctl::Shutdown instant (replay
-    // does the same after close_all on that line), then queue the account state. Both go BEFORE
-    // the flush, so the final flush commits them, inside the same deadline. `paper_close` is pure
-    // CPU (15 accounts); the two sends are the only waits and are bounded like every other step.
+    // Paper (S3c): drive the trader to `t`, the Ctl::Shutdown instant (work already due runs at
+    // its own time), complete pending conversions and mark every account at `t` (replay does the
+    // same after close_all on that line), then queue the account state. Both go BEFORE the flush,
+    // so the final flush commits them, inside the same deadline. `paper_close` is pure CPU (15
+    // accounts); the route and the send are the only waits, bounded like every other step.
     let outs = engine.paper_close(t);
     let _ = by_deadline(deadline, "close paper", io.route(&mut engine, outs)).await;
     if let Some(st) = engine.paper_state() {
@@ -3570,7 +3986,7 @@ In `bins/scanner/src/main.rs`, replace the `Cmd::Run` arm with:
 
 - [ ] **Step 5: Run the tests to verify they pass.**
 Run: `cargo test -p scanner --lib run::tests`
-Expected: PASS: the new test plus S3a's `the_whole_stop_fits_the_compose_grace_period`, `shutdown_steps_never_outlive_the_deadline`, `waiting_for_a_busy_thread_stops_at_the_deadline`, `breaker_trips_at_max_starts`, `warm_start_only_when_fresh` and `an_oversize_unit_becomes_an_integrity_row_naming_it`.
+Expected: PASS: the new test plus S3a's `the_whole_stop_fits_the_compose_grace_period`, `shutdown_steps_never_outlive_the_deadline`, `waiting_for_a_busy_thread_stops_at_the_deadline`, `breaker_trips_at_max_starts`, `warm_start_only_when_fresh`, `an_oversize_unit_becomes_an_integrity_row_naming_it` and S3a-2's `percentiles_us_sorts_then_indexes_with_integer_math`.
 
 - [ ] **Step 6: Write the Phase 3 exit runbook.** Create `docs/superpowers/runbooks/s3-paper.md`:
 ````markdown
@@ -3672,6 +4088,15 @@ from paper_marks m join paper_accounts a using (run_id, account_id) where m.run_
 select count(*), max(updated_ms) from paper_state;                                       -- 15, within the last ~60 s
 select kind, count(*) from paper_ledger where run_id = <LIVE> group by 1;
 ```
+Engine cost with the trader attached (S3a-2 timing line, one per minute; it includes the trader's
+per-frame hooks):
+```bash
+docker compose logs --since 5m scanner | grep "engine: frames"
+```
+Pass: `on_frame_us` p50 and p99 in the same range as the last pre-S3c soak's lines (write both
+down), and `select coalesce(sum(drops), 0) from health where run_id = <LIVE>` is 0 (the
+shard→engine channel never filled). A p99 that doubled means a paper hook is too expensive: stop
+and profile before the soak.
 Restart and check that the accounts carry over (the restored cash equals the last saved cash):
 ```bash
 docker compose --profile core restart scanner
@@ -3685,12 +4110,12 @@ mark, unless that account traded in between. Then `docker compose --profile core
 (or keep it running for the soak).
 
 ## Results
-(fill in: date, POLICIES_SHA, R1/R2, ledger rows, only_a/only_b, marks/broken, LIVE, restart carry-over)
+(fill in: date, POLICIES_SHA, R1/R2, ledger rows, only_a/only_b, marks/broken, LIVE, on_frame_us p50/p99 before and after, restart carry-over)
 ````
 
 - [ ] **Step 7: Full verification.**
 Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
-Expected: clean, all PASS (the `live` tests show as ignored).
+Expected: clean, all PASS (the `live` tests and the two `bench_engine` tests show as ignored).
 Run: `set -a; . ./.env; set +a; export TEST_DATABASE_URL="postgres://ct_owner:${POSTGRES_PASSWORD}@127.0.0.1:55432/postgres" && cargo test -p store`
 Expected: PASS, no `SKIPPED`.
 Run: `grep -rnE "private_key|mnemonic|sign\(|post_order|create_order" bins/scanner/src crates/sim/src || echo "no order or signing code"`
@@ -3740,6 +4165,27 @@ Added when this plan was refreshed against the landed S3a (2026-09-25):
     - The resolver's Gamma `/markets` calls do not go through S3a's CLOB `Limiter`: a different host, at most ⌈held/50⌉ requests per 10 min or per hint.
     - Migration 0004 spells out every grant under 0003's regime: SELECT+INSERT on the seven history tables, SELECT+INSERT+UPDATE on `paper_state`, no DELETE anywhere, and no sequences.
 
+Added when this plan was refreshed against the landed S3b, S3a-2 and aba9ce5 (2026-09-25, second refresh at `8a16757`):
+
+19. **Policy verdicts before consumption (S3b carry-over, done first).** `decide_for` runs `decide` on the raw open context; only a raw `Take` meets the consumed filter (`Skip(Consumed)` when the filtered edge ≤ 0 or its depth is 0, else the filtered `decide`). `paper_intents.skip_reason = 'consumed'` therefore always means "the raw feed would have traded". Cost: up to two `decide` calls (each a bisection walk) per account per episode open, never per frame.
+20. **A resolution and the close drive the trader to their instant first.** `Engine::on_resolution(t, …)` runs the trader's `on_frame(t)` before `on_resolution(t, …, books)`, and `Engine::paper_close(t)` runs `on_frame(t)` before `close(t)` (the landed S3b contract for `close`). Work already due (an execution, an unwind, a conversion, a markout, a minute mark) happens at its own due time, never skipped by a stop or settled out of order. Replay does the same on the same captured instants, so outputs stay identical. Each such call also counts once in the trader's burst-rate window, identically live and in replay. This amends rulings 13 and 17.
+21. **Replay streams paper rows in bounded chunks.** `replay_dir_paper_with(dir, ctx, paper, sink)` is the replay core; `replay_dir_with(dir, ctx, sink)` keeps its signature as the no-trader wrapper, and `replay_dir` stays the collecting test helper. `scanner replay` writes the accounts first, then runs the replay on `spawn_blocking`. Its sink maps each episode, integrity and paper output straight into a `Batch` and sends every 2 000 rows (`REPLAY_CHUNK`) over a bounded channel (capacity 4) to the async side, which commits each chunk. Memory is bounded whatever the capture's length. This replaces the collect-then-write that aba9ce5 had narrowed to episode and integrity rows. A failed write closes the channel; the replay finishes without sending, and the error is returned without `end_run`, as before.
+22. **The consumed-clearing fixtures re-add the level at 60, not 100.** The landed `decide_for` sizes a later episode by the account's filtered depth. With a re-added 100, a cleared leg 0 (100 available) and an uncleared one (100 − 51.2 = 48.8 available) would both leave legs 1 and 2 (48.8) as the cap, so the tests could not tell them apart. At 60 the cleared case fills 48.8 on every leg and the uncleared case 8.8.
+23. **Per-frame cost of the trader (soak budget).** The trader never adds O(universe) or O(pending top-checks) work per frame:
+    - `on_frame`: `FrameRate::push` is amortized O(1); `earliest_due` scans only the trader's own queues (intents, unwinds, conversions, markouts), once per due item, which is O(due × queued). The queues hold in-flight trades only, a few per account.
+    - `EngineBooks::yes_book` is one `token_ix` hash lookup plus two index reads.
+    - `on_level` per applied delta: returns at once while no account has consumed anything; otherwise one key allocation and one ordered-map lookup per account (15). The engine checks `self.paper` before the `token_ix` lookup, so the bare engine pays nothing.
+    - `on_snapshot` per applied snapshot: the same early-out, and `ConsumedLiquidity::on_snapshot` no longer copies the book's levels into two maps unless that account consumed something on that token.
+    - The trim report copies one book's levels, and only on a top mismatch of a group leg with a trader attached.
+    - `open_ctx` (legs and open levels) runs once per episode open; `paper_held_markets` once per 1 s tick (O(positions)); `paper_state` clones 15 accounts once per `state_save_every_secs`.
+
+    Pinned by `the_paper_trader_never_changes_the_scanners_own_outputs` (S3a-2's synthetic high-rate script with trims and drops), measured by the ignored bench `engine_us_per_frame_with_and_without_the_paper_trader`, and checked live through the S3a-2 `engine:` timing line (runbook §3).
+24. **The paper open clock follows every instant the trader is driven to.** `Engine.last_recv_ms` now takes the max over frame receive times AND the instants of `on_resolution` and `paper_close`, so an open from a REST snapshot after a resolution never schedules t_x before the trader's own horizon. All are inputs, so replay reproduces it. This amends ruling 15.
+25. **Row-shape notes from the landed `sim`:**
+    - An unwind that cannot trade (below `min_order_shares`, or no book) is still a `paper_fills` row: side `sell`, `filled` 0, `vwap` NULL, a measured zero. The fills key (ruling 4) still holds: at most one buy and one unwind per (episode, leg).
+    - A mark, a resolution's `AccountRow` and the close's mark can share one millisecond (e.g. a close exactly on a minute boundary). `paper_marks` keeps the first per `(run, account, t_ms)` (ruling 4); `paper_ledger` keeps every entry, since each has its own `seq`.
+    - `PaperTrader::restore` already starts a changed account fresh and releases reservations; `paper::restore_trader` keeps its filter only for the log line (amends ruling 9's wording, not its effect).
+
 ## Self-review
 
 - **Spec coverage:**
@@ -3754,19 +4200,29 @@ Added when this plan was refreshed against the landed S3a (2026-09-25):
   - §19 exit runbook (Task 7).
 - **Types across tasks:**
   - `Batch` paper fields and helpers (T1) → `paper.rs` (T3), writer (T6), replay_cmd (T5).
+  - `replay_dir_paper_with` (T5) → `replay_cmd` (T5); `replay_dir_with` keeps its signature.
   - `Resolution` (T2) → resolver (T3), run (T7).
   - `push_sim`, `account_rows`, `state_batch`, `restore_trader`, `with_policies`, `run_resolver`, `RESOLVE_HINT_DELAY` (T3) → T5 and T7.
   - `Out::{Paper, ResolvedHint}`, `Engine::{set_paper, paper_close, paper_state, paper_held_markets, on_resolution}` (T4) → T5 and T7.
   - `WriterMsg::Paper` (T6) → T7.
   - `Ctl::Resolved` (T5) → T7.
-- **S3a refresh (checked against `088c43d`):**
+- **First refresh, S3a (checked against `088c43d`, still true at `8a16757`):**
   - `EngineCtx` literals carry `issue_throttle_ms` (Task 7 test; the scanner test helpers already do).
   - Paper hooks cover every book mutation: ws snapshot, delta, trim (in `check_book`), accepted REST snapshot.
   - `on_frame` runs before any of them.
   - Migration 0004 comes after 0003, with explicit grants; its kind list extends 0003's.
   - The writer patch matches the `VecDeque` `Pending`.
   - The shutdown additions sit inside the `SHUTDOWN_BUDGET` block.
+- **Second refresh (checked against `8a16757`):**
+  - The carry-over matches the landed `decide_for` (`takes_kind` → `filtered_ctx` → `Consumed` short-circuit → `decide`); its import change keeps clippy clean.
+  - Every `on_resolution` call site passes books: `Engine::on_resolution` (Task 4) builds `EngineBooks`, and the lifecycle test passes `&books`. The replay (Task 5) and live (Task 7) paths reach the trader only through `Engine::on_resolution`.
+  - Every `close` call follows `on_frame(t)`: `Engine::paper_close` is its only caller.
+  - No new code touches `pending_tops`; the Delta and Snapshot anchors name S3a-2's `pending_insert` / `pending_remove` lines, which stay as they are.
+  - The replay task builds on `replay_dir_with` (now a wrapper of `replay_dir_paper_with`), keeps `replay_dir_with_streams_the_same_outputs_as_replay_dir` green, and never collects a whole replay.
+  - Shutdown: resolver abort → `Ctl::Shutdown` line → `close_all(t)` → `paper_close(t)` (on_frame + close) → state save → flush, all under the one `SHUTDOWN_BUDGET` deadline; replay's `Ctl::Shutdown` arm runs `close_all` then `paper_close` on the same instant.
+  - Test counts: `lifecycle` 9, `engine_paper` 13, `replay` +3, `paper::tests` 6, `config::tests` 3.
 - **Build stays green between tasks:**
+  - The carry-over only touches `sim`.
   - T1 patches S3a's `Pending::take` literal.
   - T4 adds a placeholder `Io::route` arm that T7 replaces.
   - T5 changes `replay_cmd`'s signature together with `main.rs`; T7 does the same for `run`.
