@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod batch;
+mod card_io;
 pub mod error;
 mod paper;
 mod read;
@@ -13,6 +14,10 @@ mod text;
 mod universe;
 
 pub use batch::{Listener, Table};
+pub use card_io::{
+    CARD_TABLES, CardCellRow, CardEpisode, CardResultRow, ChangedSpan, LatencyMinute,
+    MAX_CARD_EPISODES, MAX_CHANGED_PAGE, MarkPoint, PremiseRun,
+};
 pub use error::StoreError;
 pub use read::{
     DAY_MS, EpisodeFilter, EpisodePage, EpisodeSummary, HealthNow, IntegritySummary, MAX_OPEN,

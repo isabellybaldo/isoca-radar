@@ -4,6 +4,9 @@ pub enum StoreError {
     Db(#[from] sqlx::Error),
     #[error("migration: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// A bounded read hit its row cap: the caller must narrow the range (never a silent truncation).
+    #[error("too many rows: {0}")]
+    TooManyRows(&'static str),
 }
 
 impl StoreError {
