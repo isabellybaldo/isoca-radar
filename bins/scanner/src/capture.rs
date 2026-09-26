@@ -361,6 +361,21 @@ pub fn stale_universe_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// How often the capture thread runs its housekeeping (disk-pause guard, retention, the byte
+/// budget, stale universe files).
+pub const HOUSEKEEPING_EVERY_MS: i64 = 30_000;
+
+/// Whether housekeeping is due: always on the first message (`last` = None), then every
+/// [`HOUSEKEEPING_EVERY_MS`]; a wall clock that stepped backwards also counts as due, so a clock
+/// step never pauses housekeeping. Overflow-free (a sentinel `i64::MIN` start once wrapped in
+/// release and silently disabled the 10 GB cap, soak run 3).
+pub fn housekeeping_due(last: Option<i64>, now_ms: i64) -> bool {
+    match last {
+        None => true,
+        Some(t) => now_ms < t || now_ms.saturating_sub(t) >= HOUSEKEEPING_EVERY_MS,
+    }
+}
+
 /// The capture thread: never panics, never blocks the engine (the engine uses try_send).
 pub fn spawn(
     cfg: CaptureCfg,
@@ -371,11 +386,11 @@ pub fn spawn(
         let dir = PathBuf::from(&cfg.dir);
         let mut writer = Writer::new(dir.clone());
         let mut guard = DiskGuard::new(cfg.pause_below_gb, cfg.resume_above_gb);
-        let mut last_check = i64::MIN;
+        let mut last_check: Option<i64> = None;
         while let Some(msg) = rx.blocking_recv() {
             let now = crate::now_ms();
-            if now - last_check >= 30_000 {
-                last_check = now;
+            if housekeeping_due(last_check, now) {
+                last_check = Some(now);
                 if let Ok(free) = fs4::available_space(&dir) {
                     let paused = guard.update(free);
                     if paused {
