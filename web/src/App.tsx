@@ -3,6 +3,7 @@ import { useStream } from './api/StreamContext';
 import { EmptyState } from './components/EmptyState';
 import { FakeToggle } from './components/FakeToggle';
 import { LiveDot } from './components/LiveDot';
+import { Radar } from './pages/Radar';
 
 const NAV = [
   { to: '/', label: 'RADAR', end: true },
@@ -39,6 +40,7 @@ export function App() {
       <Header />
       <main className="body">
         <Routes>
+          <Route path="/" element={<Radar />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>
