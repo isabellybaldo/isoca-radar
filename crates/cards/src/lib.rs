@@ -3,7 +3,10 @@
 //! `bins/analyze` reads Postgres through `store` and calls into this crate.
 #![forbid(unsafe_code)]
 
+pub mod body;
 pub mod cells;
+pub mod gebele;
+pub mod papers;
 pub mod stats;
 pub mod window;
 
