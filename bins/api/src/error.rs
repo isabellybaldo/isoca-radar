@@ -59,3 +59,48 @@ impl IntoResponse for ApiError {
 pub async fn not_found() -> ApiError {
     ApiError::NotFound
 }
+
+/// `method_not_allowed_fallback`: a route exists, but not for this HTTP method. Without this,
+/// axum answers with an empty 405 body.
+pub async fn method_not_allowed() -> impl IntoResponse {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "error": "method_not_allowed",
+            "detail": "This method is not supported on this route."
+        })),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unavailable_body_is_exactly_the_busy_detail() {
+        let resp = ApiError::Unavailable("db_unavailable", BUSY_DETAIL).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v,
+            json!({ "error": "db_unavailable", "detail": "The database is thinking. Try again in a moment." })
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_body_is_exact() {
+        let resp = ApiError::Internal.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v,
+            json!({ "error": "internal", "detail": "Something broke on our side. It has been written down." })
+        );
+    }
+}

@@ -67,3 +67,41 @@ fn crate_graph_matches_spec_9_2() {
         );
     }
 }
+
+/// Pulls the `["a", "b", ...]` string list assigned to `const NAME: [&str; N] = [...]` out of
+/// a guard.rs source file, regardless of whether it's written on one line or several.
+fn denylist(src: &str, name: &str) -> Vec<String> {
+    let after_name = src
+        .split(&format!("const {name}"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("{name} not found"));
+    let after_eq = &after_name[after_name.find('=').expect("=")..];
+    let open = after_eq.find('[').expect("[");
+    let close = open + after_eq[open..].find(']').expect("]");
+    after_eq[open + 1..close]
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// bins/api/src/guard.rs is a hand-kept copy of bins/scanner/src/guard.rs's denylist (the api
+/// can't import scanner's guard without pulling in pm-api). Keep the two in step.
+#[test]
+fn scanner_and_api_guard_denylists_are_identical() {
+    let scanner_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/guard.rs"))
+        .expect("scanner guard.rs");
+    let api_src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../api/src/guard.rs"))
+            .expect("api guard.rs");
+    assert_eq!(
+        denylist(&scanner_src, "CONTAINS"),
+        denylist(&api_src, "CONTAINS"),
+        "CONTAINS denylist drifted between scanner and api guard.rs"
+    );
+    assert_eq!(
+        denylist(&scanner_src, "PREFIXES"),
+        denylist(&api_src, "PREFIXES"),
+        "PREFIXES denylist drifted between scanner and api guard.rs"
+    );
+}

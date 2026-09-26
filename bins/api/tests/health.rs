@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use store::*;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn health_now_is_null_before_any_row() {
@@ -79,6 +81,30 @@ async fn health_series_returns_the_window_and_rejects_bad_hours() {
         assert_eq!(v["error"], "bad_hours");
         assert!(v["detail"].is_string());
     }
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_wrong_method_is_a_json_405_not_an_empty_body() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (app, _st) = common::app(&db).await;
+    let resp = app
+        .oneshot(
+            Request::post("/api/health/now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(v["error"].is_string(), "{v}");
+    assert!(v["detail"].is_string(), "{v}");
     db.drop(owner).await;
 }
 

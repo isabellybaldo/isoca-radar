@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 store = { path = "../../crates/store" }
 axum.workspace = true
+tower-http.workspace = true
 tokio = { workspace = true, features = ["net", "signal"] }
 serde.workspace = true
 serde_json.workspace = true
