@@ -6,20 +6,38 @@
 //! exactly the one stored in card_cells.
 //!
 //! Carried Task 5 finding: `km` in release mode trusts its inputs, so a subtraction that drives a
-//! count negative (a hour removed twice, or removed before it was ever added) would silently
-//! produce a negative Ŝ and a wrong median. The sliding windows below never call `C::sub` on an
-//! hour's cell unless this struct's own bookkeeping (`span_present`, and `maxes` for `all`) shows
-//! that hour is currently included in that sum — a caller-supplied `old` for an hour that was
-//! never added is ignored instead of subtracted, so `spans`/`all` can never be pushed negative by
-//! this arithmetic. See `apply_ignores_a_cell_that_was_never_added` in `tests/window_property.rs`.
+//! count negative (an hour removed twice, removed before it was ever added, or removed with the
+//! wrong value) would silently produce a negative Ŝ and a wrong median. `apply`'s `old` is
+//! caller-supplied and is the realistic failure point (a caller bug can pass a stale, wrong, or
+//! missing `old`), so every call is checked against a per-hour fingerprint kept alongside `maxes`:
+//! `old`'s fingerprint (`None` counts as its own fingerprint) must match the one on record for
+//! that hour, including the case where `old = None` is sent for an hour that already has a
+//! fingerprint on record (a caller forgetting a rebuild, which would otherwise double-count). A
+//! mismatch trips a `debug_assert!`, sets `needs_rebuild()`, and leaves every sum untouched (ADD
+//! and SUB are both skipped for that call) — the sliding windows can never be pushed negative, or
+//! silently corrupted, by a bad `old`. Recovery is a full rebuild of this key's `Windows` from
+//! `card_cells` (Task 9), not incremental patching. See `tests/window_property.rs` for the three
+//! cases this guards: a never-applied hour, a wrong-value `old`, and a missing `old`.
 use crate::HOUR_MS;
 use crate::cells::CellData;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 
 /// Rolling spans in hours, ending on (and including) the current, partial hour.
 pub const SPANS: [(&str, i64); 3] = [("24h", 24), ("7d", 168), ("30d", 720)];
 /// Cells kept in memory: today's window and the 24h window's expiring hour.
 pub const RECENT_HOURS: i64 = 48;
+
+/// A cheap, process-local fingerprint of a cell's canonical JSON (not stable across versions or
+/// processes — only used to detect a mismatched `old` within one running `Windows`).
+fn fingerprint<C: CellData>(c: &C) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match c.to_json() {
+        Ok(json) => json.hash(&mut hasher),
+        Err(_) => "cards::window: a cell that failed to serialize".hash(&mut hasher),
+    }
+    hasher.finish()
+}
 
 #[derive(Debug, Clone)]
 pub struct Windows<C: CellData> {
@@ -36,6 +54,13 @@ pub struct Windows<C: CellData> {
     /// Hours currently summed into each `spans` entry. Bookkeeping only (not part of the public
     /// contract): guards `spans[i].sub(..)` against an hour that isn't actually part of that sum.
     span_present: [BTreeSet<i64>; 3],
+    /// `fingerprint()` of the cell currently applied for each hour on record (every hour ever
+    /// applied, alongside `maxes`). `apply`'s `old` is checked against this before anything is
+    /// touched: see the module doc.
+    fingerprints: BTreeMap<i64, u64>,
+    /// Set once `apply` sees an `old` that doesn't match the fingerprint on record. Sticky: only
+    /// a full rebuild of this `Windows` (Task 9, from `card_cells`) is expected to clear it.
+    dirty: bool,
 }
 
 impl<C: CellData> Windows<C> {
@@ -47,6 +72,8 @@ impl<C: CellData> Windows<C> {
             maxes: BTreeMap::new(),
             recent: BTreeMap::new(),
             span_present: Default::default(),
+            fingerprints: BTreeMap::new(),
+            dirty: false,
         }
     }
 
@@ -56,6 +83,15 @@ impl<C: CellData> Windows<C> {
 
     fn recent_floor(&self) -> i64 {
         self.now_hour - (RECENT_HOURS - 1) * HOUR_MS
+    }
+
+    /// True once `apply` has seen an `old` that doesn't match the fingerprint on record for its
+    /// hour (a never-applied hour claimed as applied, a wrong-value `old`, or `None` for an hour
+    /// that already has one on record). The caller must rebuild this key's `Windows` from
+    /// `card_cells` (Task 9): the sums are left exactly as they were at the point of mismatch, not
+    /// patched incrementally.
+    pub fn needs_rebuild(&self) -> bool {
+        self.dirty
     }
 
     /// Subtract `cell` from `spans[i]` only if `hour` is currently tracked as part of that span's
@@ -126,9 +162,14 @@ impl<C: CellData> Windows<C> {
                     self.span_add(i, *h, c);
                 }
             }
-            if !self.maxes.contains_key(h) {
-                self.all.add(c);
-            }
+            // Every hour reaching this loop is strictly newer than the previous now_hour, so it
+            // can never already be on record: `apply` only ever touches hours ≤ now_hour.
+            debug_assert!(
+                !self.maxes.contains_key(h),
+                "cards::window: advance() is entering hour {h} that's already on record"
+            );
+            self.all.add(c);
+            self.fingerprints.insert(*h, fingerprint(c));
             self.maxes.insert(*h, c.max_part());
             self.recent.insert(*h, c.clone());
         }
@@ -139,12 +180,27 @@ impl<C: CellData> Windows<C> {
 
     /// Replace hour `hour`'s applied cell `old` (None: nothing applied yet) with `new` in every
     /// window holding it. Hours after now_hour are left to `advance` (it adds their stored cell).
-    /// `old` is trusted only to decide *whether* a hand-off happened (and even then, is only ever
-    /// subtracted from a sum this struct itself tracks `hour` as part of, see `checked_span_sub` /
-    /// `checked_all_sub`): a stale or mistaken `old` for an hour this struct never added can only
-    /// be ignored, never subtracted, so it can never drive a count negative.
+    ///
+    /// `old` is checked against the fingerprint this struct has on record for `hour` *before*
+    /// anything is touched: a mismatch (a never-applied hour claimed as applied, a wrong-value
+    /// `old`, or `None` sent for an hour that already has a fingerprint, which would otherwise
+    /// double-count) trips a `debug_assert!`, sets `needs_rebuild()`, and the call is a no-op —
+    /// neither `old` nor `new` change any sum. See the module doc.
     pub fn apply(&mut self, hour: i64, old: Option<&C>, new: &C) {
         if hour > self.now_hour {
+            return;
+        }
+        let stored_fp = self.fingerprints.get(&hour).copied();
+        let old_fp = old.map(fingerprint);
+        if old_fp != stored_fp {
+            // Set the flag *before* the assert: a debug build panics right here (this always
+            // signals a caller bug), but a release build carries on with `needs_rebuild()` set.
+            self.dirty = true;
+            debug_assert!(
+                false,
+                "cards::window: apply({hour}) called with old fingerprint {old_fp:?}, but {stored_fp:?} \
+                 is on record; flagging for a full rebuild instead of touching any sum"
+            );
             return;
         }
         for (i, (_, span)) in SPANS.iter().enumerate() {
@@ -160,6 +216,7 @@ impl<C: CellData> Windows<C> {
             self.checked_all_sub(hour, o);
         }
         self.all.add(new);
+        self.fingerprints.insert(hour, fingerprint(new));
         self.maxes.insert(hour, new.max_part());
         if hour >= self.recent_floor() {
             self.recent.insert(hour, new.clone());

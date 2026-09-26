@@ -6,8 +6,9 @@ use crate::HOUR_MS;
 use crate::stats::{self, CountMap, DurMap};
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::Debug;
+use std::str::FromStr;
 
 /// Flicker-merge sensitivity (parent spec §5.5: runs separated by ≤ {0, 250 ms, 1 s}).
 pub const MERGE_GAPS_MS: [i64; 3] = [0, 250, 1_000];
@@ -36,12 +37,26 @@ impl Side {
     }
 }
 
-/// A decimal stored as a JSON string, never a JSON number.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct Num(#[serde(with = "rust_decimal::serde::str")] pub Decimal);
+/// A decimal stored as a JSON string, never a JSON number, normalized like the api's own decimal
+/// strings (Global Constraints: trailing zeros dropped, `-0` written as `"0"`). Deserializing
+/// still accepts any valid decimal string, including one with trailing zeros (e.g. `"0.410"`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Num(pub Decimal);
+
+impl Serialize for Num {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&stats::dec(self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Num {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Decimal::from_str(&s)
+            .map(Num)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerSide<T> {
@@ -337,7 +352,7 @@ impl CellData for DurCell {
             if first && last {
                 c.hour_long += 1;
             }
-            if e.uncensored() {
+            if e.uncensored() && !e.flagged() {
                 bump(&mut c.clipped, t - s);
             }
         }

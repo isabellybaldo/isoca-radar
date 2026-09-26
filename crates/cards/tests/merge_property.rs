@@ -13,7 +13,15 @@ const HOURS: i64 = 6;
 
 fn arb_ep() -> impl Strategy<Value = Ep> {
     (
-        (0..HOURS * H, 0..3 * H, any::<bool>(), any::<bool>()),
+        (
+            0..HOURS * H,
+            // Tie-heavy: a small, dense range of durations alongside the full one, so events and
+            // censorings often land on the same t (Kaplan-Meier ties) and durations recur across
+            // hours (merge-exactness on repeated keys), not just on a diffuse spread.
+            prop_oneof![0..3 * H, (0..20i64).prop_map(|k| k * 1_000)],
+            any::<bool>(),
+            any::<bool>(),
+        ),
         (
             any::<[bool; 5]>(),
             -2i64..8,
@@ -132,7 +140,12 @@ proptest! {
                 if s >= t { continue; }
                 observed += 1;
                 if e.opened_ms < h + 300_000 && e.end_ms > h + H - 300_000 { long += 1; }
-                if e.closed_ms.is_some() && !e.censor_left && !e.censor_right && !e.censor_gap {
+                if e.closed_ms.is_some()
+                    && !e.censor_left
+                    && !e.censor_right
+                    && !e.censor_gap
+                    && !e.flagged()
+                {
                     *clipped.entry(t - s).or_insert(0) += 1;
                 }
             }

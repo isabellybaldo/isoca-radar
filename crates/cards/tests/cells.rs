@@ -187,9 +187,26 @@ fn cells_add_subtract_and_round_trip_through_json() {
     assert_eq!(DurCell::from_json(&json).unwrap(), a);
     let g1 = G1Cell::build(&input(0, &eps));
     assert_eq!(G1Cell::from_json(&g1.to_json().unwrap()).unwrap(), g1);
+    let g4 = G4Cell::build(&input(0, &eps));
+    assert_eq!(
+        G4Cell::from_json(&g4.to_json().unwrap()).unwrap(),
+        g4,
+        "G4Cell round-trips through JSON too"
+    );
     assert_eq!(
         serde_json::to_string(&Num(dec!(0.410))).unwrap(),
-        "\"0.410\""
+        "\"0.41\"",
+        "Num drops trailing zeros"
+    );
+    assert_eq!(
+        serde_json::to_string(&Num(dec!(-0))).unwrap(),
+        "\"0\"",
+        "Num writes -0 as \"0\""
+    );
+    assert_eq!(
+        serde_json::from_str::<Num>("\"0.410\"").unwrap(),
+        Num(dec!(0.41)),
+        "deserializing still accepts trailing zeros"
     );
     assert_eq!(
         serde_json::from_str::<Num>("\"12345678901234567.89\"").unwrap(),

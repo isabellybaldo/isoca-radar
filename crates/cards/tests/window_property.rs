@@ -104,38 +104,115 @@ fn a_clock_that_goes_back_changes_nothing() {
     assert!(w.needed_ranges(90 * H).is_empty());
 }
 
-/// Carried Task 5 finding: a subtraction that removes a cell that was never actually added would
-/// drive a count negative (and `km` would silently produce a negative Ŝ). `apply`'s `old` is
-/// caller-supplied, so a caller bug could pass `Some(..)` for an hour this window never added.
-/// The window must ignore that phantom `old` instead of subtracting it, in every sum it feeds.
+/// `apply`'s fingerprint check trips a `debug_assert!` on a mismatch (so a debug build — every
+/// build on the dev machine — fails loudly and immediately, per the project's convention), which
+/// `cargo test` also runs under (`debug_assertions` is on). Exercising the mismatch path here
+/// therefore has to survive that panic with `catch_unwind`, exactly as a `#[should_panic]` test
+/// would, but so the state left behind (the flag, the untouched sums) can still be inspected —
+/// that surviving state is what a release build (where `debug_assert!` compiles out) sees instead
+/// of a panic, and is what Task 9's rebuild path reads.
+fn apply_expecting_a_debug_panic(
+    w: &mut Windows<G1Cell>,
+    hour: i64,
+    old: Option<&G1Cell>,
+    new: &G1Cell,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.apply(hour, old, new)));
+    assert!(
+        result.is_err(),
+        "a fingerprint mismatch must trip apply()'s debug_assert!"
+    );
+}
+
+/// Carried Task 5 finding, fix round 1: a subtraction that removes a cell that was never actually
+/// added (or removes the wrong value) would drive a count negative, and `km` would silently
+/// produce a negative Ŝ. `apply`'s `old` is caller-supplied, so a caller bug could pass a phantom
+/// `old` for an hour this window never added. `apply` must flag it (`needs_rebuild()`) and leave
+/// every sum exactly as it was, instead of touching anything.
 #[test]
-fn apply_ignores_a_cell_that_was_never_added() {
+fn apply_flags_a_phantom_old_for_a_never_applied_hour_and_touches_nothing() {
     let mut w: Windows<G1Cell> = Windows::new(100 * H);
     let hour = 100 * H; // never applied before this call
     let phantom_old = cell(999); // large, nonzero: subtracting it from zero would go negative
     let new = cell(3);
 
-    w.apply(hour, Some(&phantom_old), &new);
+    apply_expecting_a_debug_panic(&mut w, hour, Some(&phantom_old), &new);
 
-    // Had `phantom_old` been subtracted, every sum below would be `new` minus a nonzero cell,
-    // which for G1Cell's plain i64 counts would go negative. Instead every sum is exactly `new`.
+    assert!(
+        w.needs_rebuild(),
+        "a phantom `old` for a never-applied hour must be flagged"
+    );
     assert_eq!(
-        w.all, new,
-        "a phantom `old` for a never-applied hour must not be subtracted from `all`"
+        w.all,
+        G1Cell::default(),
+        "nothing must be touched once the mismatch is detected: `new` is not applied either"
     );
     for span in &w.spans {
-        assert_eq!(
-            span, &new,
-            "a phantom `old` for a never-applied hour must not be subtracted from a span"
-        );
+        assert_eq!(span, &G1Cell::default());
     }
 
-    // A second, legitimate rebuild of the same hour behaves normally: the real previous value
-    // (`new`) is subtracted and the fresh one added, since the window now genuinely tracks it.
-    let rebuilt = cell(7);
-    w.apply(hour, Some(&new), &rebuilt);
-    assert_eq!(w.all, rebuilt);
+    // The window still isn't tracking `hour`, so a genuine first application (the correct
+    // `old = None`) succeeds normally — the dirty flag stays set (only a rebuild clears it).
+    w.apply(hour, None, &new);
+    assert!(
+        w.needs_rebuild(),
+        "the flag is sticky until the caller rebuilds"
+    );
+    assert_eq!(w.all, new);
     for span in &w.spans {
-        assert_eq!(span, &rebuilt);
+        assert_eq!(span, &new);
+    }
+}
+
+/// A wrong-value `old` for an hour that genuinely was applied before (e.g. a partial failure left
+/// a caller's cache of the previous cell stale) must be flagged and ignored, not subtracted.
+#[test]
+fn apply_flags_a_wrong_value_old_for_an_already_applied_hour() {
+    let mut w: Windows<G1Cell> = Windows::new(100 * H);
+    let hour = 100 * H;
+    let first = cell(3);
+    w.apply(hour, None, &first);
+    assert!(!w.needs_rebuild());
+
+    let wrong_old = cell(4); // not what was actually applied (`first`)
+    let second = cell(7);
+    apply_expecting_a_debug_panic(&mut w, hour, Some(&wrong_old), &second);
+
+    assert!(
+        w.needs_rebuild(),
+        "a wrong-value `old` must be flagged, not trusted"
+    );
+    assert_eq!(
+        w.all, first,
+        "the sums must stay exactly as they were before the mismatched call"
+    );
+    for span in &w.spans {
+        assert_eq!(span, &first);
+    }
+}
+
+/// `old = None` for an hour that already has a fingerprint on record must be flagged too: trusting
+/// it would double-count (both the never-removed first value and the new one end up summed).
+#[test]
+fn apply_flags_a_missing_old_for_an_already_applied_hour() {
+    let mut w: Windows<G1Cell> = Windows::new(100 * H);
+    let hour = 100 * H;
+    let first = cell(3);
+    w.apply(hour, None, &first);
+
+    let second = cell(7);
+    // bug: claims this is the first application, but it isn't
+    apply_expecting_a_debug_panic(&mut w, hour, None, &second);
+
+    assert!(
+        w.needs_rebuild(),
+        "`old = None` for an hour that already has a fingerprint must be flagged"
+    );
+    assert_eq!(
+        w.all, first,
+        "the sums must stay exactly as they were before the mismatched call (no double-count)"
+    );
+    for span in &w.spans {
+        assert_eq!(span, &first);
     }
 }
