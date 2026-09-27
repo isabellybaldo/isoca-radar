@@ -75,4 +75,15 @@ describe('CardView', () => {
     renderCard(cardFixture(), true);
     expect(screen.getByText('YES-side episodes').closest('tr')).toHaveClass('dim');
   });
+
+  it('shows the premise key in the footer, next to n and the hash, dim and wrapping', () => {
+    renderCard(cardFixture());
+    const card = screen.getByRole('article', { name: 'G1 · Side asymmetry' });
+    const nLine = within(card).getByText(/n = 1240/);
+    const premise = within(card).getByText(cardFixture().premise_key);
+    expect(premise.tagName).toBe('P');
+    expect(premise).toHaveClass('meta', 'premise');
+    // "next to": the premise line immediately follows the n/hash line in the footer.
+    expect(nLine.nextElementSibling).toBe(premise);
+  });
 });

@@ -57,6 +57,7 @@ export function LineChart({
   xMax,
   markers = [],
   yLabels,
+  xLabels,
 }: {
   series: Series[];
   label: string;
@@ -64,6 +65,8 @@ export function LineChart({
   xMax: number;
   markers?: number[];
   yLabels?: { top: string; bottom: string };
+  /** The x-axis range, already formatted (e.g. a duration string): "0.10 s" … "24 h 0 min". */
+  xLabels?: { left: string; right: string };
 }) {
   const cols = series.map((s) => ({ ...s, points: toColumns(s.points, xMin, xMax, W) }));
   const all = cols.flatMap((s) => s.points);
@@ -89,6 +92,12 @@ export function LineChart({
           </g>
         ))}
       </svg>
+      {xLabels && (
+        <div className="chart-axis">
+          <span>{xLabels.left}</span>
+          <span>{xLabels.right}</span>
+        </div>
+      )}
       {yLabels && (
         <div className="chart-axis">
           <span>low {yLabels.bottom}</span>

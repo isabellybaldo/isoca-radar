@@ -57,6 +57,7 @@ export function CardView({ card, stale = false }: { card: CardBody; stale?: bool
       <p className="meta">
         n = {card.n} · <span title={card.hash}>#{shortHash(card.hash)}</span>
       </p>
+      <p className="meta premise">{card.premise_key}</p>
       {card.episode_link && (
         <p>
           <Link to={`/episodes/${encodeURIComponent(card.episode_link)}`}>biggest opportunity →</Link>

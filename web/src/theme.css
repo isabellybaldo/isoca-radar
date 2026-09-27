@@ -119,6 +119,9 @@ svg.tl { display: block; width: 100%; height: 70px; }
 /* F8 (controller ruling): .meta and .note carry sentences (n = …, PAPER: … notes), so they stay at
    the 15 px body size — only the color is dimmed here, no smaller font-size override. */
 .cardv .meta, .cardv .note { color: var(--dim); }
+/* Fix round 1: the premise key (long, unbroken key=hash pairs) must wrap instead of widening the
+   card at 360 px; overflow-wrap: anywhere is already inherited from body, this makes it explicit. */
+.cardv .premise { overflow-wrap: anywhere; }
 svg.bars { display: block; width: 100%; height: 40px; }
 .bar.b0 { fill: var(--teal); }
 .bar.b1 { fill: var(--salmon); }
