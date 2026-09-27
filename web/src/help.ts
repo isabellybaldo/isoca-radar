@@ -1,3 +1,5 @@
+import { FLAG_WORDS } from './lib/flags';
+
 /** (?) copy for every section of every page (spec §8.3): short, plain, deadpan but clear. */
 export interface HelpText {
   title: string;
@@ -43,7 +45,7 @@ export const HELP = {
   },
   flags: {
     title: 'What do the flags mean?',
-    text: 'Suspect: a nearby book looked wrong (mirror or top mismatch), so the edge may be a data artifact. Stale: the feed lagged past the threshold. Censored: part of the episode was not observed. OUR METHOD on the cards drops suspect and stale episodes and says how many.',
+    text: `Flags mark episodes the engine did not fully trust. ${FLAG_WORDS.suspect} ${FLAG_WORDS.stale} ${FLAG_WORDS.censor_left} ${FLAG_WORDS.censor_right} ${FLAG_WORDS.censor_gap} OUR METHOD on the cards drops suspect and stale episodes and says how many.`,
   },
   legs: {
     title: 'What are legs and S?',

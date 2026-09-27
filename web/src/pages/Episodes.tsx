@@ -3,11 +3,13 @@ import { api, type EpisodeQuery } from '../api/client';
 import type { EpisodeSummary } from '../api/types';
 import { useApi } from '../api/useApi';
 import { Box } from '../components/Box';
+import { Help } from '../components/Help';
 import { EmptyState } from '../components/EmptyState';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
+import { CENSORED_WORDS, FLAG_WORDS } from '../lib/flags';
 import { kindTag } from '../lib/labels';
 import { formatDecimal } from '../lib/money';
 import { DAY_MS, fmtDuration, fmtLocal, fmtUtcDateTime, parseIsoDay } from '../lib/time';
@@ -40,10 +42,32 @@ export function queryFromParams(sp: URLSearchParams): EpisodeQuery {
 function FlagTags({ e }: { e: EpisodeSummary }) {
   return (
     <>
-      {e.suspect && <Tag tone="flag">SUSPECT</Tag>}
-      {e.stale && <Tag tone="flag">STALE</Tag>}
-      {e.censored && <Tag tone="flag">CENSORED</Tag>}
+      {e.suspect && <Tag tone="flag" title={FLAG_WORDS.suspect}>SUSPECT</Tag>}
+      {e.stale && <Tag tone="flag" title={FLAG_WORDS.stale}>STALE</Tag>}
+      {e.censored && <Tag tone="flag" title={CENSORED_WORDS}>CENSORED</Tag>}
     </>
+  );
+}
+
+const LEGEND = [
+  FLAG_WORDS.stale,
+  FLAG_WORDS.suspect,
+  FLAG_WORDS.censor_left,
+  FLAG_WORDS.censor_right,
+  FLAG_WORDS.censor_gap,
+  `YES? (kind): ${FLAG_WORDS.incomplete}`,
+];
+
+function FlagLegend() {
+  return (
+    <div className="legend-note" aria-label="flag legend">
+      <ul className="plain dim">
+        {LEGEND.map((w) => (
+          <li key={w}>{w}</li>
+        ))}
+      </ul>
+      <Help id="flags" />
+    </div>
   );
 }
 
@@ -123,6 +147,7 @@ export function Episodes() {
             ) : (
               <>
                 <Table columns={columns} rows={d.items} rowKey={(r) => r.id} />
+                <FlagLegend />
                 <div className="pager">
                   <button type="button" disabled={!q.cursor} onClick={() => update('cursor', null)}>
                     NEWEST

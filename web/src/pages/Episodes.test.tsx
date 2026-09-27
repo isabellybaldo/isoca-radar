@@ -1,9 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { episodeSummaryFixture } from '../test/fixtures';
 import { jsonResponse, mockApi } from '../test/mockApi';
+import { FLAG_WORDS } from '../lib/flags';
+import { HELP } from '../help';
 import { Episodes, NO_EPISODES } from './Episodes';
 
 function Loc() {
@@ -77,5 +79,27 @@ describe('Episodes', () => {
     });
     renderAt('/episodes?from=2026-09-01&to=2026-09-25');
     expect(await screen.findByText('from must be before to, and seven days apart at most.')).toBeInTheDocument();
+  });
+
+  it('explains every flag it renders in a legend near the table, in the same words as the detail page', async () => {
+    mockApi({ '/api/episodes': { items: [episodeSummaryFixture({ suspect: true, stale: true, censored: true })], next_cursor: null } });
+    renderAt('/episodes');
+    const legend = await screen.findByLabelText('flag legend');
+    for (const w of [FLAG_WORDS.stale, FLAG_WORDS.suspect, FLAG_WORDS.censor_left, FLAG_WORDS.censor_right, FLAG_WORDS.censor_gap, FLAG_WORDS.incomplete]) {
+      expect(legend).toHaveTextContent(w);
+    }
+    expect(screen.getByRole('button', { name: `Help: ${HELP.flags.title}` })).toBeInTheDocument();
+    expect(HELP.flags.text).toContain(FLAG_WORDS.stale);
+    expect(HELP.flags.text).toContain(FLAG_WORDS.censor_gap);
+  });
+
+  it('gives each flag tag a tooltip with its sentence', async () => {
+    mockApi({ '/api/episodes': { items: [episodeSummaryFixture({ suspect: true, stale: true, censored: true })], next_cursor: null } });
+    renderAt('/episodes');
+    const row = (await screen.findByRole('link', { name: 'Bitcoin price on September 26?' })).closest('tr') as HTMLTableRowElement;
+    expect(within(row).getByText('SUSPECT')).toHaveAttribute('title', FLAG_WORDS.suspect);
+    expect(within(row).getByText('STALE')).toHaveAttribute('title', FLAG_WORDS.stale);
+    const censored = within(row).getByText('CENSORED').getAttribute('title') ?? '';
+    for (const w of [FLAG_WORDS.censor_left, FLAG_WORDS.censor_right, FLAG_WORDS.censor_gap]) expect(censored).toContain(w);
   });
 });

@@ -7,20 +7,12 @@ import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
+import { FLAG_WORDS } from '../lib/flags';
 import { kindTag } from '../lib/labels';
 import { formatDecimal, signOf } from '../lib/money';
 import { fmtDuration, fmtLocal, fmtUtcTime } from '../lib/time';
 
-export const FLAG_WORDS = {
-  suspect:
-    "SUSPECT: one leg's book disagreed with the server's top while this was open. The stream repaired it; the numbers may still be optimistic.",
-  stale: "STALE: at least one leg's feed went quiet while this was open, so its book may have been out of date.",
-  censor_left: 'CENSORED (LEFT): it was already open when we started watching, so the real start is earlier.',
-  censor_right: 'CENSORED (RIGHT): we stopped watching before it closed, so the real end is later.',
-  censor_gap: 'CENSORED (GAP): the feed had a gap while it was open; the duration spans the gap.',
-  incomplete: 'INCOMPLETE SET: the listed outcomes may not cover every result. Not an arbitrage if "Other" wins.',
-  below_min: 'BELOW MIN SIZE: the size at the best price is under the venue minimum order.',
-};
+export { FLAG_WORDS };
 
 export function flagSentences(e: Episode): string[] {
   const out: string[] = [];
