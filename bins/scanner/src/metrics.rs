@@ -1,4 +1,6 @@
 //! Shared counters for the health task (spec §10 `health`). Counters are drained per minute; gauges are read.
+use crate::clock;
+use pm_api::clob::TimeSample;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -25,6 +27,8 @@ pub struct Metrics {
     pub rest_ms: Mutex<Vec<i64>>,
     pub rtt_ms: Mutex<Vec<i64>>,
     pub ok: Mutex<Option<bool>>,
+    /// CLOB `/time` samples for this minute's clock-offset estimate (scanner-clock-offset brief).
+    pub clock: Mutex<Vec<TimeSample>>,
 }
 
 /// Sorted-index percentile: element at (len − 1) · pct / 100 of an ascending slice.
@@ -69,15 +73,24 @@ impl Metrics {
         *self.ok.lock().unwrap_or_else(|p| p.into_inner()) = Some(ok);
     }
 
+    /// One CLOB `/time` sample for this minute's clock-offset estimate.
+    pub fn push_clock(&self, s: TimeSample) {
+        self.clock.lock().unwrap_or_else(|p| p.into_inner()).push(s);
+    }
+
     pub fn minute_row(&self, run_id: i64, minute_ms: i64) -> HealthRow {
         let lags = take_sorted(&self.lags);
         let rest = take_sorted(&self.rest_ms);
         let rtt = take_sorted(&self.rtt_ms);
+        let clock_samples =
+            std::mem::take(&mut *self.clock.lock().unwrap_or_else(|p| p.into_inner()));
         let p = |v: &[i64], q: usize| {
             percentile(v, q).map(|x| {
                 i32::try_from(x.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
             })
         };
+        let clock_offset_ms = clock::estimate(&clock_samples)
+            .map(|x| i32::try_from(x.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0));
         HealthRow {
             run_id,
             minute_ms,
@@ -91,7 +104,7 @@ impl Metrics {
             rest_p99_ms: p(&rest, 99),
             lag_p50_ms: p(&lags, 50),
             lag_p99_ms: p(&lags, 99),
-            clock_offset_ms: None, // not measured in-process (Phase 0 bounded it at ≈ 100 ms)
+            clock_offset_ms,
             ok: *self.ok.lock().unwrap_or_else(|p| p.into_inner()),
             capture_paused: self.capture_paused.load(Ordering::Relaxed),
             parked_shards: i32_of(self.parked.load(Ordering::Relaxed)),
@@ -142,5 +155,31 @@ mod tests {
         );
         let r2 = m.minute_row(1, 120_000);
         assert_eq!((r2.msgs, r2.shards, r2.lag_p50_ms), (0, 3, None));
+    }
+
+    #[test]
+    fn minute_row_fills_clock_offset_from_samples_and_drains_them() {
+        let m = Metrics::default();
+        m.push_clock(TimeSample {
+            sent_ms: 1_000,
+            recv_ms: 1_040,
+            server_s: 2,
+        });
+        m.push_clock(TimeSample {
+            sent_ms: 1_500,
+            recv_ms: 1_530,
+            server_s: 2,
+        });
+        let r = m.minute_row(1, 60_000);
+        assert!(r.clock_offset_ms.is_some(), "{r:?}");
+        let r2 = m.minute_row(1, 120_000);
+        assert_eq!(r2.clock_offset_ms, None, "drained, no samples this minute");
+    }
+
+    #[test]
+    fn minute_row_clock_offset_is_none_with_no_samples() {
+        let m = Metrics::default();
+        let r = m.minute_row(1, 60_000);
+        assert_eq!(r.clock_offset_ms, None);
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod capture;
 pub mod checks;
+pub mod clock;
 pub mod config;
 pub mod engine;
 pub mod feed;
