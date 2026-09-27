@@ -176,22 +176,23 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .iv-track { grid-area: track; display: block; width: 100%; height: 14px; background: var(--bg); }
 .iv-num { grid-area: num; }
 .iv-meta { grid-area: meta; font-size: 13px; }
-.iv .zero { fill: var(--fg); }
+.iv .zero { stroke: var(--fg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
 .iv .bar { stroke-width: 4px; vector-effect: non-scaling-stroke; }
 .iv .bar.dashed { stroke-dasharray: 3 3; }
-.iv.good .bar { stroke: var(--good); } .iv.good .dot { fill: var(--good); }
-.iv.bad .bar { stroke: var(--bad); } .iv.bad .dot { fill: var(--bad); }
-.iv.dim .bar { stroke: var(--line2); } .iv.dim .dot { fill: var(--dim); }
-.iv .dot.hollow { fill: var(--bg); stroke: var(--bad); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.iv.good .bar { stroke: var(--good); } .iv.good .iv-dot { fill: var(--good); }
+.iv.bad .bar { stroke: var(--bad); } .iv.bad .iv-dot { fill: var(--bad); }
+.iv.dim .bar { stroke: var(--line2); } .iv.dim .iv-dot { fill: var(--dim); }
+.iv .iv-dot.hollow { fill: var(--bg); stroke: var(--bad); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 @media (max-width: 600px) { .iv { grid-template-columns: 1fr auto; grid-template-areas: 'name num' 'track track' 'meta meta'; } }
 .latency { display: grid; gap: 2px; margin: 8px 0; }
 .lat-row { display: grid; grid-template-columns: minmax(min(100%, 160px), 1fr) minmax(0, 1.2fr); gap: 10px; align-items: center; }
 .lat-track { display: block; width: 100%; height: 16px; }
 .lat-track .axis { fill: var(--line2); }
 .lat-track .measured { fill: var(--salmon); }
-.lat-track .dot { fill: var(--teal); }
-.lat-track .dot.head { fill: var(--mint); }
-.lat-track .dot.hollow { fill: var(--bg); stroke: var(--teal); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.lat-track .lat-dot { fill: var(--teal); }
+.lat-track .lat-dot.head { fill: var(--mint); }
+.lat-track .lat-dot.hollow { fill: var(--bg); stroke: var(--teal); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.lat-track .lat-dot.head.hollow { stroke: var(--mint); }
 .lat-label.head { font-weight: 700; }
 .split { display: grid; gap: 4px; margin: 8px 0; }
 .split-labels { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }

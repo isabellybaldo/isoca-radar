@@ -18,11 +18,11 @@ describe('IntervalChart', () => {
     expect(screen.getByRole('list', { name: 'NO by hour at sp-idle' })).toBeInTheDocument();
     const cand = container.querySelector('li[data-label="candidate"]')!;
     const neg = container.querySelector('li[data-label="negative"]')!;
-    const zeroX = num(cand.querySelector('rect.zero'), 'x');
+    const zeroX = num(cand.querySelector('line.zero'), 'x1');
     expect(num(cand.querySelector('line.bar'), 'x1')).toBeGreaterThan(zeroX);
     expect(num(neg.querySelector('line.bar'), 'x2')).toBeLessThan(zeroX);
-    expect(cand.querySelector('rect.dot')).not.toHaveClass('hollow');
-    expect(neg.querySelector('rect.dot')).toHaveClass('hollow');
+    expect(cand.querySelector('rect.iv-dot')).not.toHaveClass('hollow');
+    expect(neg.querySelector('rect.iv-dot')).toHaveClass('hollow');
     expect(within(cand as HTMLElement).getByText('CANDIDATE')).toHaveAttribute('title', 'survives here; worth a real small-order test.');
     expect(within(cand as HTMLElement).getByText('12–16 UTC')).toBeInTheDocument();
     expect(within(cand as HTMLElement).getByText('n 40 · C 33')).toBeInTheDocument();
@@ -34,7 +34,7 @@ describe('IntervalChart', () => {
     expect(container.querySelector('li[data-label="thin"] line.bar')).toHaveClass('dashed');
     const nt = container.querySelector('li[data-label="not_tested"]')!;
     expect(nt.querySelector('line.bar')).toBeNull();
-    expect(nt.querySelector('rect.dot')).toBeNull();
+    expect(nt.querySelector('rect.iv-dot')).toBeNull();
     expect(within(nt as HTMLElement).getByText('—')).toBeInTheDocument();
   });
 

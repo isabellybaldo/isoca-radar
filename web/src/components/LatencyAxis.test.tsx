@@ -14,7 +14,7 @@ describe('LatencyAxis', () => {
     expect(screen.getByText('colo-idle · 52 ms → 24.8%')).toBeInTheDocument();
     expect(screen.getByText('sp-idle · 300 ms → 3.2%')).toBeInTheDocument();
     expect(screen.getByText('sp-burst · 450 ms → —')).toBeInTheDocument();
-    const dot = (s: string) => container.querySelector(`li[data-scenario="${s}"] rect.dot`);
+    const dot = (s: string) => container.querySelector(`li[data-scenario="${s}"] rect.lat-dot`);
     expect(x(dot('colo-idle'))).toBeLessThan(x(dot('sp-idle')));
     expect(x(dot('sp-idle'))).toBeLessThan(x(dot('sp-burst')));
     expect(dot('sp-idle')).toHaveClass('head');

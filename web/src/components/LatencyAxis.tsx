@@ -23,7 +23,7 @@ export function LatencyAxis({ points, measured }: { points: DecayPoint[]; measur
               <rect className="axis" x={0} y={H / 2} width={W} height={1} />
               {measured && <rect className="measured" x={sx(measured.latency_ms)} y={0} width={1} height={H} />}
               <rect
-                className={['dot', p.headline ? 'head' : null, p.rate_pct === null ? 'hollow' : null].filter(Boolean).join(' ')}
+                className={['lat-dot', p.headline ? 'head' : null, p.rate_pct === null ? 'hollow' : null].filter(Boolean).join(' ')}
                 x={sx(p.latency_ms) - 2}
                 y={1}
                 width={5}

@@ -43,11 +43,11 @@ export function IntervalChart({ rows, label }: { rows: SweetRow[]; label: string
           <li key={`${r.side}|${r.dimension}|${r.bucket}|${r.scenario}`} className={`iv ${look.tone}`} data-label={r.label}>
             <span className="iv-name">{rowName(r)}</span>
             <svg className="iv-track" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="presentation">
-              <rect className="zero" x={zero} y={0} width={1} height={H} />
+              <line className="zero" x1={zero} x2={zero} y1={0} y2={H} />
               {hasBar && (
                 <>
                   <line className={look.dashed ? 'bar dashed' : 'bar'} x1={x1} x2={Math.max(x2, x1 + 1)} y1={H / 2} y2={H / 2} />
-                  <rect className={look.hollow ? 'dot hollow' : 'dot'} x={sx(Number(r.mean)) - 1} y={1} width={3} height={H - 2} />
+                  <rect className={look.hollow ? 'iv-dot hollow' : 'iv-dot'} x={sx(Number(r.mean)) - 1} y={1} width={3} height={H - 2} />
                 </>
               )}
             </svg>
