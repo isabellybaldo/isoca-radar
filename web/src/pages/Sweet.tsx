@@ -16,7 +16,7 @@ import { useNow, useTicker } from '../lib/hooks';
 import { formatMoney, formatPercent } from '../lib/money';
 import {
   COLO_TITLE, DIMS, FEW_TRADES, HEADLINE_SCENARIO, LABEL_TAG, LABEL_TEXT, NOTHING_PAYS, ONE_LINE_CAVEAT, SWEET_CAVEAT,
-  SWEET_EMPTY, type SweetDim, type SweetSide, bucketText, candidateCount, footnote, grid, interval, nothingPays,
+  SWEET_EMPTY, type SweetDim, type SweetSide, bucketText, candidateCount, feeLine, footnote, grid, interval, nothingPays,
   recomputingText, rowsFor,
 } from '../lib/sweet';
 import { fmtLocal, fmtUtcDateTime } from '../lib/time';
@@ -105,6 +105,7 @@ function SweetBody({ card, s }: { card: CardBody; s: SweetSeries }) {
           { label: 'scenario', value: HEADLINE_SCENARIO },
         ]}
       />
+      {feeLine(s) && <p className="dim">{feeLine(s)}</p>}
       {nothingPays(s) && <p className="quip">{NOTHING_PAYS}</p>}
       <div className="filters">
         <Chips label="side" options={[['no', 'NO'], ['yes', 'YES']]} value={side} onChange={setSide} />

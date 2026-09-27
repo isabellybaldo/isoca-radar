@@ -30,6 +30,19 @@ describe('Sweet page', () => {
     const chart = screen.getByRole('list', { name: 'NO · ALL · sp-idle' });
     expect(within(chart).getByText('NEGATIVE')).toBeInTheDocument();
     expect(screen.getByText(NOTHING_PAYS)).toBeInTheDocument();
+    // no 10 bips fee entry in this fixture: I3's feeLine renders nothing.
+    expect(screen.queryByText(/whole NO side at 10 bips/)).toBeNull();
+  });
+
+  it('shows the 10 bips fee line under the tiles when the backend sent one', async () => {
+    mockApi({
+      '/api/cards': {
+        win: '30d',
+        cards: [card(rows, {}, { fees: [{ fee_bips: 10, captured: '-1', mean: '-0.1', label: 'negative' }] })],
+      },
+    });
+    renderPage();
+    expect(await screen.findByText('whole NO side at 10 bips: NEGATIVE, mean −$0.10')).toBeInTheDocument();
   });
 
   it('switches scenario, side and slice, hides CATEGORY without tags', async () => {

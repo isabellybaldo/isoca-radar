@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { sweetFixture, sweetRow } from '../test/fixtures';
 import type { SweetSeries } from '../api/types';
-import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, footnote, grid, headline, interval, nothingPays, recomputingText, rowName, rowsFor } from './sweet';
+import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, feeLine, footnote, grid, interval, nothingPays, recomputingText, rowName, rowsFor } from './sweet';
 
 const series = (rows = [sweetRow()], o: Partial<SweetSeries> = {}): SweetSeries => ({
   rows, m: rows.filter((r) => r.label !== 'thin' && r.label !== 'not_tested').length, z: '2.576',
@@ -19,22 +19,14 @@ describe('sweet helpers', () => {
     expect(footnote(34)).toBe("34 rows tested; each interval is widened so that, together, a false 'candidate' shows up less than 1 time in 20.");
   });
 
-  it('writes the headline per side at sp-idle with the 10 bips figure beside it', () => {
-    const rows = [
-      sweetRow({ label: 'negative' }),
-      sweetRow({ dimension: 'days', bucket: '1-7', label: 'inconclusive' }),
-      sweetRow({ fee_bips: 10, label: 'negative' }),
-    ];
-    expect(headline(series(rows, { fees: [{ fee_bips: 10, captured: '-1', mean: '-0.1', label: 'negative' }] }), 'no'))
-      .toBe('NO: 0 candidates in 2 tested rows (whole NO side at 10 bips: NEGATIVE, mean −$0.10).');
-    const cands = [sweetRow({ dimension: 'category', bucket: 'sports', label: 'candidate' }), sweetRow({ dimension: 's', bucket: '2', label: 'candidate' })];
-    expect(headline(series(cands), 'no')).toBe('NO: 2 candidates: sports, 2 legs.');
-    expect(headline(series([]), 'yes')).toBe('YES: 0 candidates in 0 tested rows.');
+  it('writes the 10 bips fee line for the whole NO side, or null when the backend sent none', () => {
+    expect(feeLine(series([sweetRow()], { fees: [{ fee_bips: 10, captured: '-1', mean: '-0.1', label: 'negative' }] })))
+      .toBe('whole NO side at 10 bips: NEGATIVE, mean −$0.10');
+    expect(feeLine(series([sweetRow()], { fees: [] }))).toBeNull();
   });
 
-  it('excludes dead_on_paper from the tested count and from "nothing pays", same as backend m', () => {
+  it('excludes dead_on_paper from "nothing pays", same as backend m', () => {
     const rows = [sweetRow({ scenario: 'sp-idle', label: 'dead_on_paper' })];
-    expect(headline(series(rows), 'no')).toBe('NO: 0 candidates in 0 tested rows.');
     expect(nothingPays(series(rows))).toBe(false);
   });
 

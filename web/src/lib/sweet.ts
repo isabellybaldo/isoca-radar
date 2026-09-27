@@ -74,22 +74,12 @@ export function footnote(m: number): string {
  *  dead_on_paper (a YES row P1 never traded, same as not_tested — spec §7.4) are all excluded. */
 const tested = (r: SweetRow) => r.label !== 'thin' && r.label !== 'not_tested' && r.label !== 'dead_on_paper';
 
-/** Spec 5d §8: one sentence per side at the headline scenario, the 10 bips figure beside it (NO). */
-export function headline(s: SweetSeries, side: SweetSide): string {
-  const rows = s.rows.filter((r) => r.side === side && r.scenario === HEADLINE_SCENARIO && r.fee_bips === 0);
-  const cands = rows.filter((r) => r.label === 'candidate');
+/** Redesign §5.1 / I3: replaces the dead headline(); the 10 bips figure shown dim under the /sweet
+ *  tiles, next to the whole NO side result at that fee. Null when the backend sent no 10 bips row. */
+export function feeLine(s: SweetSeries): string | null {
   const fee10 = s.fees.find((f) => f.fee_bips === 10);
-  const fee = side === 'no' && fee10
-    ? ` (whole NO side at 10 bips: ${LABEL_TAG[fee10.label]}, mean ${formatMoney(fee10.mean, { signed: true })})`
-    : '';
-  const SIDE = side.toUpperCase();
-  if (cands.length === 0) return `${SIDE}: 0 candidates in ${rows.filter(tested).length} tested rows${fee}.`;
-  const named = cands
-    .filter((r) => r.dimension !== 'all')
-    .slice(0, 3)
-    .map((r) => bucketText(r.dimension, r.bucket));
-  const list = named.length > 0 ? `: ${named.join(', ')}` : '';
-  return `${SIDE}: ${cands.length} ${cands.length === 1 ? 'candidate' : 'candidates'}${list}${fee}.`;
+  if (!fee10) return null;
+  return `whole NO side at 10 bips: ${LABEL_TAG[fee10.label]}, mean ${formatMoney(fee10.mean, { signed: true })}`;
 }
 
 /** True when both sides were tested at the headline scenario and neither has a candidate. */
