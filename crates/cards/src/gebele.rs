@@ -6,8 +6,8 @@ use crate::body::{
 };
 use crate::cells::{DurCell, EDGE_MINUTES_MS, G1Cell, G4Cell, LONG_MS, MERGE_GAPS_MS, Side};
 use crate::stats::{
-    CountMap, bins, dec, dur_total, emp_at, fp_to_dec, km, median_of, merge_sorted, nearest_rank,
-    pct, secs, total,
+    CountMap, KmSummary, bins, dec, emp_and_median, fp_to_dec, km, km_totals, median_of,
+    merge_sorted, pct, secs, total,
 };
 use rust_decimal::Decimal;
 
@@ -62,6 +62,10 @@ fn binned(m: &CountMap, width: i64, top: i64) -> (i64, Vec<(i64, i64)>) {
 }
 
 pub fn g1(c: &G1Cell, ctx: &BodyCtx<'_>) -> CardBody {
+    make(g1_parts(c), ctx)
+}
+
+fn g1_parts(c: &G1Cell) -> Parts {
     let mut thin = Vec::new();
     for (name, side) in sides() {
         let n = *c.ours.get(side);
@@ -136,21 +140,59 @@ pub fn g1(c: &G1Cell, ctx: &BodyCtx<'_>) -> CardBody {
         ],
         ..Series::default()
     };
-    make(
-        Parts {
-            card: "G1",
-            paper: PAPER_ID,
-            title: "G1 · Side asymmetry",
-            params: g1_params(),
-            n: c.their.yes + c.their.no,
-            columns,
-            series,
-            notes,
-            thin,
-            episode_link: None,
-        },
-        ctx,
-    )
+    Parts {
+        card: "G1",
+        paper: PAPER_ID,
+        title: "G1 · Side asymmetry",
+        params: g1_params(),
+        n: c.their.yes + c.their.no,
+        columns,
+        series,
+        notes,
+        thin,
+        episode_link: None,
+    }
+}
+
+/// What G2 and G3 both need from one window's merged DurCell, computed once per window: each
+/// side's Kaplan–Meier (its totals reused for the merged one) and each side's empirical curve and
+/// sample median in one walk (Review Focus 5: same numbers, far fewer passes).
+pub struct DurStats {
+    pub yes: SideStats,
+    pub no: SideStats,
+    /// Both sides merged, at τ = LONG_MS − 1 (G3's long-lived share).
+    pub merged: KmSummary,
+}
+
+pub struct SideStats {
+    pub km: KmSummary,
+    pub n_their: i64,
+    pub emp: Vec<Option<Decimal>>,
+    pub emp_med: Option<Decimal>,
+}
+
+impl DurStats {
+    pub fn of(c: &DurCell) -> Self {
+        let side = |s: Side| {
+            let their = c.their.get(s);
+            let n_their = total(their);
+            let (emp, emp_med) = emp_and_median(their, n_their, &GRID_MS);
+            SideStats {
+                km: km(c.ours.get(s).iter().map(|(t, v)| (*t, *v)), &GRID_MS),
+                n_their,
+                emp,
+                emp_med,
+            }
+        };
+        let (yes, no) = (side(Side::Yes), side(Side::No));
+        let merged = km_totals(
+            merge_sorted(&c.ours.yes, &c.ours.no, |a, b| (a.0 + b.0, a.1 + b.1)),
+            yes.km.events + no.km.events,
+            yes.km.censored + no.km.censored,
+            &[LONG_MS - 1],
+        );
+        Self { yes, no, merged }
+    }
 }
 
 fn grid_params() -> String {
@@ -159,6 +201,10 @@ fn grid_params() -> String {
 }
 
 pub fn g2(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
+    make(g2_parts(c, &DurStats::of(c)), ctx)
+}
+
+fn g2_parts(c: &DurCell, st: &DurStats) -> Parts {
     let mut thin = Vec::new();
     let mut notes = vec![
         format!(
@@ -171,16 +217,16 @@ pub fn g2(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
     let mut columns: Vec<Row> = Vec::new();
     let mut curves = Vec::new();
     let mut n = 0;
-    for ((name, side), (paper_med, paper_n)) in
-        sides().into_iter().zip([("16.15", "253"), ("7.99", "5")])
+    for (((name, _), (paper_med, paper_n)), sst) in sides()
+        .into_iter()
+        .zip([("16.15", "253"), ("7.99", "5")])
+        .zip([&st.yes, &st.no])
     {
-        let their = c.their.get(side);
-        let ours = c.ours.get(side);
-        let n_their = total(their);
+        let n_their = sst.n_their;
         n += n_their;
-        let (ev, ce) = dur_total(ours);
-        let k = km(ours.iter().map(|(t, v)| (*t, *v)), &GRID_MS);
-        let emp_med = median_of(their.iter().map(|(v, c)| (*v, *c)), n_their);
+        let k = &sst.km;
+        let (ev, ce) = (k.events, k.censored);
+        let emp_med = sst.emp_med;
         if n_their < THIN_MEDIAN_N {
             thin.push(format!("{name} side: {n_their} uncensored durations < {THIN_MEDIAN_N}; THEIR median is not reliable"));
         }
@@ -228,7 +274,7 @@ pub fn g2(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
                 // ever writing an empty `s` — never a third state alongside a real decimal string.
                 points: GRID_MS
                     .iter()
-                    .zip(emp_at(their, &GRID_MS))
+                    .zip(sst.emp.iter().copied())
                     .filter_map(|(t, v)| {
                         v.map(|x| CurvePoint {
                             t_ms: *t,
@@ -240,7 +286,7 @@ pub fn g2(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
             });
         }
     }
-    let right = dur_total(&c.ours.yes).1 + dur_total(&c.ours.no).1;
+    let right = st.yes.km.censored + st.no.km.censored;
     let gap_n = total(&c.gap.yes) + total(&c.gap.no);
     let gap_med = median_of(merge_sorted(&c.gap.yes, &c.gap.no, |a, b| a + b), gap_n);
     columns.push(row(
@@ -277,34 +323,34 @@ pub fn g2(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
         c.flagged.yes + c.flagged.no,
         c.open.yes + c.open.no
     ));
-    make(
-        Parts {
-            card: "G2",
-            paper: PAPER_ID,
-            title: "G2 · Durations and survival",
-            params: grid_params(),
-            n,
-            columns,
-            series: Series {
-                curves,
-                ..Series::default()
-            },
-            notes,
-            thin,
-            episode_link: None,
+    Parts {
+        card: "G2",
+        paper: PAPER_ID,
+        title: "G2 · Durations and survival",
+        params: grid_params(),
+        n,
+        columns,
+        series: Series {
+            curves,
+            ..Series::default()
         },
-        ctx,
-    )
+        notes,
+        thin,
+        episode_link: None,
+    }
 }
 
 pub fn g3(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
+    make(g3_parts(c, &DurStats::of(c)), ctx)
+}
+
+fn g3_parts(c: &DurCell, st: &DurStats) -> Parts {
     let mut thin = Vec::new();
     let their_share = pct(c.hour_long, c.hour_observed);
     if c.hour_observed == 0 {
         thin.push("no episode was observed in any hour of the window".to_string());
     }
-    let all = merge_sorted(&c.ours.yes, &c.ours.no, |a, b| (a.0 + b.0, a.1 + b.1));
-    let k = km(all, &[LONG_MS - 1]);
+    let k = &st.merged;
     if k.events < THIN_MEDIAN_N {
         thin.push(format!(
             "{} events < {THIN_MEDIAN_N}; the Kaplan–Meier share is not reliable",
@@ -366,23 +412,20 @@ pub fn g3(c: &DurCell, ctx: &BodyCtx<'_>) -> CardBody {
             c.flagged.yes + c.flagged.no
         ),
     ];
-    make(
-        Parts {
-            card: "G3",
-            paper: PAPER_ID,
-            title: "G3 · Long-lived share",
-            params: format!(
-                "long_ms={LONG_MS};edge_min_ms={EDGE_MINUTES_MS};thin_median_n={THIN_MEDIAN_N}"
-            ),
-            n: c.hour_observed,
-            columns,
-            series: Series::default(),
-            notes,
-            thin,
-            episode_link: None,
-        },
-        ctx,
-    )
+    Parts {
+        card: "G3",
+        paper: PAPER_ID,
+        title: "G3 · Long-lived share",
+        params: format!(
+            "long_ms={LONG_MS};edge_min_ms={EDGE_MINUTES_MS};thin_median_n={THIN_MEDIAN_N}"
+        ),
+        n: c.hour_observed,
+        columns,
+        series: Series::default(),
+        notes,
+        thin,
+        episode_link: None,
+    }
 }
 
 fn bps(centi: i64) -> String {
@@ -400,6 +443,46 @@ fn g4_params() -> String {
 }
 
 pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
+    make(g4_parts(c), ctx)
+}
+
+/// (median, p90, count below the first bin, bins)
+type RanksAndBins = (Option<i64>, Option<i64>, i64, Vec<(i64, i64)>);
+
+/// One walk over a side's net-edge counts (`n` = their total): the nearest-rank median and p90 and
+/// the 25 bp bins, the same integers as `nearest_rank(…, 50)`, `nearest_rank(…, 90)` and `binned`
+/// (Review Focus 5: one tick < 200 ms).
+fn ranks_and_bins(m: &CountMap, n: i64) -> RanksAndBins {
+    let (below, mut out) = binned(&CountMap::new(), BIN_CBPS, TOP_CBPS);
+    let rank = |pct: i64| ((pct * n + 99) / 100).max(1);
+    let (r50, r90) = (rank(50), rank(90));
+    let (mut q50, mut q90) = (None, None);
+    let mut below = below;
+    let mut seen = 0i64;
+    let last = out.len().saturating_sub(1);
+    for (v, c) in m {
+        seen += c;
+        if n > 0 && q50.is_none() && seen >= r50 {
+            q50 = Some(*v);
+        }
+        if n > 0 && q90.is_none() && seen >= r90 {
+            q90 = Some(*v);
+        }
+        if *v < 0 {
+            below += c;
+            continue;
+        }
+        let i = usize::try_from((*v).min(TOP_CBPS) / BIN_CBPS)
+            .unwrap_or(0)
+            .min(last);
+        if let Some(slot) = out.get_mut(i) {
+            slot.1 += c;
+        }
+    }
+    (q50, q90, below, out)
+}
+
+fn g4_parts(c: &G4Cell) -> Parts {
     let mut thin = Vec::new();
     let mut columns = vec![
         row(
@@ -427,7 +510,8 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
                 "{name} side: n = {n} < {THIN_MEDIAN_N}; the median and p90 are not reliable"
             ));
         }
-        let q = |p: i64| nearest_rank(net.iter().map(|(v, k)| (*v, *k)), n, p).map(bps);
+        let (q50, q90, below, net_bins) = ranks_and_bins(net, n);
+        let q = |p: i64| if p == 50 { q50 } else { q90 }.map(bps);
         columns.push(row(
             &format!("{name} median net edge"),
             "bps",
@@ -442,7 +526,6 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
             None,
             q(90),
         ));
-        let (below, net_bins) = binned(net, BIN_CBPS, TOP_CBPS);
         let (_, gross_bins) = binned(c.gross.get(side), BIN_CBPS, TOP_CBPS);
         below_all += below;
         for ((lo, k), (_, g)) in net_bins.into_iter().zip(gross_bins) {
@@ -474,37 +557,35 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
             "{below_all} episodes had a negative peak edge and sit below the first bin."
         ));
     }
-    make(
-        Parts {
-            card: "G4",
-            paper: PAPER_ID,
-            title: "G4 · Net edge by side",
-            params: g4_params(),
-            n: c.their.yes + c.their.no,
-            columns,
-            series,
-            notes,
-            thin,
-            episode_link: None,
-        },
-        ctx,
-    )
+    Parts {
+        card: "G4",
+        paper: PAPER_ID,
+        title: "G4 · Net edge by side",
+        params: g4_params(),
+        n: c.their.yes + c.their.no,
+        columns,
+        series,
+        notes,
+        thin,
+        episode_link: None,
+    }
 }
 
 impl Card for G1Cell {
-    fn bodies(agg: &Self, _max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<CardBody> {
-        vec![g1(agg, ctx)]
+    fn parts(agg: &Self, _max: &Self::Max, _ctx: &BodyCtx<'_>) -> Vec<Parts> {
+        vec![g1_parts(agg)]
     }
 }
 
 impl Card for DurCell {
-    fn bodies(agg: &Self, _max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<CardBody> {
-        vec![g2(agg, ctx), g3(agg, ctx)]
+    fn parts(agg: &Self, _max: &Self::Max, _ctx: &BodyCtx<'_>) -> Vec<Parts> {
+        let st = DurStats::of(agg);
+        vec![g2_parts(agg, &st), g3_parts(agg, &st)]
     }
 }
 
 impl Card for G4Cell {
-    fn bodies(agg: &Self, _max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<CardBody> {
-        vec![g4(agg, ctx)]
+    fn parts(agg: &Self, _max: &Self::Max, _ctx: &BodyCtx<'_>) -> Vec<Parts> {
+        vec![g4_parts(agg)]
     }
 }

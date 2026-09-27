@@ -10,6 +10,12 @@ pub const CLOB_BOOK: &str = "/book";
 pub const CLOB_BOOKS: &str = "/books";
 pub const CLOB_OK: &str = "/ok";
 
+/// Unit tests only (`http.rs`'s round-trip timing tests): the scheme of the throwaway plain-http
+/// server they start on 127.0.0.1. Never a route and never compiled into the crate; it lives here
+/// because this is the one file allowed URL literals (tests/routes.rs).
+#[cfg(test)]
+pub(crate) const LOCAL_TEST_SCHEME: &str = "http://";
+
 /// (method, full URL). Asserted exactly by tests/routes.rs.
 pub const ALLOWED: &[(&str, &str)] = &[
     ("GET", "https://gamma-api.polymarket.com/events/keyset"),

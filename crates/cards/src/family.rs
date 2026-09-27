@@ -42,6 +42,53 @@ pub struct Family<C: CellData> {
     pub runs: BTreeMap<i64, RunSpan>,
     pub catching_up: bool,
     pub windows: Windows<C>,
+    /// When the long windows' bodies were last rendered (ruling T9 (c)).
+    pub long: LongRender,
+}
+
+/// The long windows, whose bodies cost the most to render: `30d` (SPANS index 2) and `all`.
+pub const LONG_WINDOWS: [&str; 2] = ["30d", "all"];
+
+/// Ruling T9 (c): cells update every tick, but the `30d` and `all` bodies re-render at most once
+/// per clock hour, and at most one of the two per tick, so no tick pays for both (Review Focus 5:
+/// one tick < 200 ms). Each card keeps its own `computed_ms`, so the page's age stays honest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LongRender {
+    /// The hour each long window was last rendered in (None: not since this state began).
+    pub rendered: [Option<i64>; 2],
+}
+
+impl LongRender {
+    /// Which long windows to render at `now_hour`:
+    /// - both, when either has not been rendered since this state began (a start, a new key, a
+    ///   reset);
+    /// - otherwise the one rendered longest ago (`30d` on a tie), if not yet this clock hour;
+    /// - and any that is two or more hours behind (only happens with fewer than two ticks an
+    ///   hour, so staleness stays bounded).
+    pub fn due(&self, now_hour: i64) -> [bool; 2] {
+        let [Some(a), Some(b)] = self.rendered else {
+            return [true, true];
+        };
+        let mut out = [false; 2];
+        let (first, h) = if b < a { (1, b) } else { (0, a) };
+        if h < now_hour {
+            out[first] = true;
+        }
+        for (i, r) in [a, b].into_iter().enumerate() {
+            if r <= now_hour - 2 * HOUR_MS {
+                out[i] = true;
+            }
+        }
+        out
+    }
+
+    pub fn mark(&mut self, rendered: [bool; 2], now_hour: i64) {
+        for (slot, done) in self.rendered.iter_mut().zip(rendered) {
+            if done {
+                *slot = Some(now_hour);
+            }
+        }
+    }
 }
 
 impl<C: CellData> Family<C> {
@@ -51,6 +98,7 @@ impl<C: CellData> Family<C> {
             runs: BTreeMap::new(),
             catching_up: false,
             windows: Windows::new(now_hour),
+            long: LongRender::default(),
         }
     }
 

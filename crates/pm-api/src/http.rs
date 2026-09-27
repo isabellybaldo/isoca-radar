@@ -39,6 +39,7 @@ pub(crate) fn http_client() -> Result<reqwest::Client, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::{CLOB_OK, LOCAL_TEST_SCHEME};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -66,9 +67,12 @@ mod tests {
         let (sink, seen) = recorder();
         // A plain-http test client: the production client is https-only, the timing is the same code.
         let client = reqwest::Client::builder().build().unwrap();
-        let resp = send_timed(client.get(format!("http://{addr}/ok")), Some(&sink))
-            .await
-            .unwrap();
+        let resp = send_timed(
+            client.get(format!("{LOCAL_TEST_SCHEME}{addr}{CLOB_OK}")),
+            Some(&sink),
+        )
+        .await
+        .unwrap();
         assert!(resp.status().is_success());
         let v = seen.lock().unwrap().clone();
         assert_eq!(v.len(), 1, "{v:?}");
@@ -84,15 +88,21 @@ mod tests {
         let (sink, seen) = recorder();
         let client = reqwest::Client::builder().build().unwrap();
         assert!(
-            send_timed(client.get(format!("http://{addr}/ok")), Some(&sink))
-                .await
-                .is_err()
+            send_timed(
+                client.get(format!("{LOCAL_TEST_SCHEME}{addr}{CLOB_OK}")),
+                Some(&sink)
+            )
+            .await
+            .is_err()
         );
         assert!(seen.lock().unwrap().is_empty());
         assert!(
-            send_timed(client.get(format!("http://{addr}/ok")), None)
-                .await
-                .is_err()
+            send_timed(
+                client.get(format!("{LOCAL_TEST_SCHEME}{addr}{CLOB_OK}")),
+                None
+            )
+            .await
+            .is_err()
         );
     }
 }

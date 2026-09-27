@@ -44,44 +44,45 @@ pub fn dur_total(m: &DurMap) -> (i64, i64) {
     m.values().fold((0, 0), |a, v| (a.0 + v.0, a.1 + v.1))
 }
 
-/// Two sorted maps as one sorted stream, equal keys combined with `plus`. Collected into one
-/// Vec so the stream is `Clone` (Kaplan–Meier walks it twice).
+/// Two sorted maps as one sorted stream, equal keys combined with `plus`. Lazy and `Clone` (Kaplan–Meier
+/// walks it twice; a median stops halfway), so nothing is collected (Review Focus 5: one tick < 200 ms).
 pub fn merge_sorted<'a, V: Copy + 'a>(
     a: &'a BTreeMap<i64, V>,
     b: &'a BTreeMap<i64, V>,
     plus: fn(V, V) -> V,
 ) -> impl Iterator<Item = (i64, V)> + Clone + 'a {
-    let mut ia = a.iter().peekable();
-    let mut ib = b.iter().peekable();
-    let mut out: Vec<(i64, V)> = Vec::new();
-    loop {
-        let ka = ia.peek().map(|(k, _)| **k);
-        let kb = ib.peek().map(|(k, _)| **k);
+    Merge {
+        a: a.iter().peekable(),
+        b: b.iter().peekable(),
+        plus,
+    }
+}
+
+#[derive(Clone)]
+struct Merge<'a, V> {
+    a: std::iter::Peekable<std::collections::btree_map::Iter<'a, i64, V>>,
+    b: std::iter::Peekable<std::collections::btree_map::Iter<'a, i64, V>>,
+    plus: fn(V, V) -> V,
+}
+
+impl<V: Copy> Iterator for Merge<'_, V> {
+    type Item = (i64, V);
+
+    fn next(&mut self) -> Option<(i64, V)> {
+        let ka = self.a.peek().map(|(k, _)| **k);
+        let kb = self.b.peek().map(|(k, _)| **k);
         match (ka, kb) {
-            (None, None) => break,
+            (None, None) => None,
             (Some(x), Some(y)) if x == y => {
-                if let (Some((k, va)), Some((_, vb))) = (ia.next(), ib.next()) {
-                    out.push((*k, plus(*va, *vb)));
-                }
+                let (k, va) = self.a.next()?;
+                let (_, vb) = self.b.next()?;
+                Some((*k, (self.plus)(*va, *vb)))
             }
-            (Some(x), Some(y)) if x < y => {
-                if let Some((k, v)) = ia.next() {
-                    out.push((*k, *v));
-                }
-            }
-            (Some(_), None) => {
-                if let Some((k, v)) = ia.next() {
-                    out.push((*k, *v));
-                }
-            }
-            _ => {
-                if let Some((k, v)) = ib.next() {
-                    out.push((*k, *v));
-                }
-            }
+            (Some(x), Some(y)) if x < y => self.a.next().map(|(k, v)| (*k, *v)),
+            (Some(_), None) => self.a.next().map(|(k, v)| (*k, *v)),
+            _ => self.b.next().map(|(k, v)| (*k, *v)),
         }
     }
-    out.into_iter()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,13 +114,22 @@ pub fn km<I>(entries: I, grid: &[i64]) -> KmSummary
 where
     I: Iterator<Item = (i64, (i64, i64))> + Clone,
 {
+    let (events, censored) = entries
+        .clone()
+        .fold((0i64, 0i64), |a, (_, v)| (a.0 + v.0, a.1 + v.1));
+    km_totals(entries, events, censored, grid)
+}
+
+/// [`km`] when the caller already knows the entries' totals (events, censored), e.g. the sums of
+/// two sides it merges: one walk instead of two. `events`/`censored` must be the entries' sums.
+pub fn km_totals<I>(entries: I, events: i64, censored: i64, grid: &[i64]) -> KmSummary
+where
+    I: Iterator<Item = (i64, (i64, i64))>,
+{
     debug_assert!(
         grid.windows(2).all(|w| w[0] <= w[1]),
         "km: grid must be ascending, got {grid:?}"
     );
-    let (events, censored) = entries
-        .clone()
-        .fold((0i64, 0i64), |a, (_, v)| (a.0 + v.0, a.1 + v.1));
     let mut at_risk = events + censored;
     let mut s = FP_ONE;
     let mut at = Vec::with_capacity(grid.len());
@@ -155,6 +165,11 @@ where
             }
         }
         at_risk -= e + c;
+        if gi >= grid.len() && median.is_some() {
+            // every grid point is filled and the median is found: the rest of the walk cannot
+            // change the summary (events/censored came from the first pass), so stop here
+            break;
+        }
     }
     while gi < grid.len() {
         at.push(s);
@@ -178,12 +193,73 @@ pub fn emp_at(m: &CountMap, grid: &[i64]) -> Vec<Option<Decimal>> {
     if n <= 0 {
         return vec![None; grid.len()];
     }
-    grid.iter()
-        .map(|tau| {
-            let above: i64 = m.range(tau.saturating_add(1)..).map(|(_, c)| c).sum();
-            Some(Decimal::from(above) / Decimal::from(n))
-        })
-        .collect()
+    if !grid.windows(2).all(|w| w[0] <= w[1]) {
+        // not ascending: one range sum per point (never the case for GRID_MS)
+        return grid
+            .iter()
+            .map(|tau| {
+                let above: i64 = m.range(tau.saturating_add(1)..).map(|(_, c)| c).sum();
+                Some(Decimal::from(above) / Decimal::from(n))
+            })
+            .collect();
+    }
+    // ascending grid: one walk, counting the durations ≤ τ as τ grows (same integers as above)
+    let mut out = Vec::with_capacity(grid.len());
+    let mut it = m.iter().peekable();
+    let mut at_or_below = 0i64;
+    for tau in grid {
+        while let Some((v, c)) = it.peek() {
+            if **v > *tau {
+                break;
+            }
+            at_or_below += **c;
+            it.next();
+        }
+        out.push(Some(Decimal::from(n - at_or_below) / Decimal::from(n)));
+    }
+    out
+}
+
+/// [`emp_at`] and [`median_of`] of one count map (`n` = its total) in a single walk; the same
+/// integers and the same decimals as calling the two (Review Focus 5: one walk per map).
+pub fn emp_and_median(
+    m: &CountMap,
+    n: i64,
+    grid: &[i64],
+) -> (Vec<Option<Decimal>>, Option<Decimal>) {
+    if n <= 0 || !grid.windows(2).all(|w| w[0] <= w[1]) {
+        return (
+            emp_at(m, grid),
+            median_of(m.iter().map(|(v, c)| (*v, *c)), n),
+        );
+    }
+    let (klo, khi) = ((n - 1) / 2, n / 2);
+    let (mut lo, mut med) = (None, None);
+    let mut out = Vec::with_capacity(grid.len());
+    let mut seen = 0i64;
+    let mut gi = 0usize;
+    for (v, c) in m {
+        // every grid point below v is settled: `seen` counts exactly the durations <= it
+        while grid.get(gi).is_some_and(|t| *t < *v) {
+            out.push(Some(Decimal::from(n - seen) / Decimal::from(n)));
+            gi += 1;
+        }
+        seen += c;
+        if lo.is_none() && seen > klo {
+            lo = Some(*v);
+        }
+        if med.is_none() && seen > khi {
+            med = lo.map(|l| (Decimal::from(l) + Decimal::from(*v)) / Decimal::from(2));
+        }
+        if gi >= grid.len() && med.is_some() {
+            break;
+        }
+    }
+    while gi < grid.len() {
+        out.push(Some(Decimal::from(n - seen) / Decimal::from(n)));
+        gi += 1;
+    }
+    (out, med)
 }
 
 /// THEIR convention (an empirical/Gebele-style sample median): the median of `n` values given as

@@ -11,10 +11,12 @@
 //!
 //! Failure: the caller logs one line, records it in card_meta and calls `reset`, so the next tick
 //! reloads the windows from card_cells (the stored cells are the truth). Results keep their values.
-use cards::body::{BodyCtx, Card, ScenarioLat, base_status};
+use cards::body::{BodyCtx, Card, Parts, ScenarioLat, base_status, make};
 use cards::cells::{CellData, DurCell, Ep, G1Cell, G4Cell, HourInput, Side};
 use cards::edge::EdgeCell;
-use cards::family::{Family, RunPremises, RunSpan, contiguous, current_key, hours_between};
+use cards::family::{
+    Family, LONG_WINDOWS, RunPremises, RunSpan, contiguous, current_key, hours_between,
+};
 use cards::window::SPANS;
 use cards::{DAY_MS, HOUR_MS, hour_of};
 use rust_decimal::Decimal;
@@ -288,7 +290,9 @@ async fn sync<C: Card>(
         let runs = fam.runs.clone();
         start_key(env, fam, &key, runs, report).await?;
     }
-    results.extend(family_results(env, fam, &key)?);
+    let long = fam.long.due(env.now_hour);
+    results.extend(family_results(env, fam, &key, long)?);
+    fam.long.mark(long, env.now_hour);
     meta.push((
         format!("fam:{}", C::FAMILY),
         json!({ "key": key, "next_hour": env.now_hour, "done": true }).to_string(),
@@ -340,8 +344,9 @@ async fn start_key<C: Card>(
     }
     fam.catching_up = catching_up;
     if catching_up {
+        // every window, under_review, and not marked rendered: the tick's end renders them again
         env.store
-            .card_results_put(&family_results(env, fam, key)?, &[])
+            .card_results_put(&family_results(env, fam, key, [true, true])?, &[])
             .await?;
     }
     let mut h = resume;
@@ -558,20 +563,25 @@ async fn build_hours<C: CellData>(
         .collect())
 }
 
+/// The result rows of one family: 24h and 7d (and Edge capture's today) every time; 30d and all
+/// only where `long` says (ruling T9 (c): at most hourly, see `LongRender`). A window left out
+/// keeps its previous row and that row's own computed_ms. `all` reuses 30d's parts when no
+/// applied hour precedes the 30d window (the two sums are then the same cells).
 fn family_results<C: Card>(
     env: &Env<'_>,
     fam: &Family<C>,
     key: &str,
+    long: [bool; 2],
 ) -> anyhow::Result<Vec<CardResultRow>> {
     let since = fam.since_ms();
     let mut out = Vec::new();
-    let mut emit = |win: &str, start: Option<i64>, agg: &C, max: C::Max| -> anyhow::Result<()> {
+    let ctx_for = |win: &'static str, start: Option<i64>| {
         let from = match (start, since) {
             (Some(s), Some(k)) => Some(s.max(k)),
             (None, k) => k,
             (s, None) => s,
         };
-        let ctx = BodyCtx {
+        BodyCtx {
             win,
             base: base_status(fam.catching_up, since, start),
             premise_key: key,
@@ -581,11 +591,14 @@ fn family_results<C: Card>(
             since_ms: since,
             computed_ms: env.now_ms,
             scenarios: env.scenarios,
-        };
-        for body in C::bodies(agg, &max, &ctx) {
+        }
+    };
+    let mut emit = |parts: Vec<Parts>, ctx: &BodyCtx<'_>| -> anyhow::Result<()> {
+        for p in parts {
+            let body = make(p, ctx);
             out.push(CardResultRow {
                 card: body.card.clone(),
-                win: win.to_string(),
+                win: ctx.win.to_string(),
                 premise_key: key.to_string(),
                 status: body.status.as_str().to_string(),
                 body: serde_json::to_string(&body)?,
@@ -594,25 +607,41 @@ fn family_results<C: Card>(
         }
         Ok(())
     };
+    let mut parts_30d: Option<Vec<Parts>> = None;
     for (i, (name, span)) in SPANS.iter().enumerate() {
+        let is_30d = *name == LONG_WINDOWS[0];
         let start = fam.windows.span_start(*span);
-        emit(
-            name,
-            Some(start),
-            &fam.windows.spans[i],
-            fam.windows.max_from(start),
-        )?;
+        // nothing applied before the 30d window: all's sum is these very cells
+        let all_is_30d = is_30d && fam.windows.maxes.range(..start).next().is_none();
+        if is_30d && !long[0] && !(long[1] && all_is_30d) {
+            continue;
+        }
+        let ctx = ctx_for(name, Some(start));
+        let parts = C::parts(&fam.windows.spans[i], &fam.windows.max_from(start), &ctx);
+        if is_30d {
+            if long[0] {
+                emit(parts.clone(), &ctx)?;
+            }
+            if all_is_30d {
+                parts_30d = Some(parts);
+            }
+        } else {
+            emit(parts, &ctx)?;
+        }
     }
-    emit(
-        "all",
-        None,
-        &fam.windows.all,
-        fam.windows.max_from(i64::MIN),
-    )?;
+    if long[1] {
+        let ctx = ctx_for("all", None);
+        let parts = match parts_30d {
+            Some(p) => p,
+            None => C::parts(&fam.windows.all, &fam.windows.max_from(i64::MIN), &ctx),
+        };
+        emit(parts, &ctx)?;
+    }
     if C::EDGE_INPUTS {
         let day = env.now_ms - env.now_ms.rem_euclid(DAY_MS);
         let today = fam.windows.today(day);
-        emit("today", Some(day), &today, fam.windows.max_from(day))?;
+        let ctx = ctx_for("today", Some(day));
+        emit(C::parts(&today, &fam.windows.max_from(day), &ctx), &ctx)?;
     }
     Ok(out)
 }

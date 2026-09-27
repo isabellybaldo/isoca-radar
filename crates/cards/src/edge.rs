@@ -200,6 +200,11 @@ pub fn host_from_key(key: &str) -> Option<&str> {
 }
 
 pub fn edge(c: &EdgeCell, m: &EdgeMax, ctx: &BodyCtx<'_>) -> CardBody {
+    make(edge_parts(c, m, ctx), ctx)
+}
+
+/// Edge capture's window-independent parts (reads `ctx.premise_key` and `ctx.scenarios` only).
+pub fn edge_parts(c: &EdgeCell, m: &EdgeMax, ctx: &BodyCtx<'_>) -> Parts {
     let on_table = c.table.yes.0 + c.table.no.0;
     let n = c.n.yes + c.n.no;
     let mut thin = Vec::new();
@@ -313,29 +318,26 @@ pub fn edge(c: &EdgeCell, m: &EdgeMax, ctx: &BodyCtx<'_>) -> CardBody {
          An estimate."
             .to_string(),
     ];
-    make(
-        Parts {
-            card: "EDGE",
-            paper: "edge",
-            title: "Edge capture",
-            params: format!("cap_usd={CAP_USD};headline={HEADLINE};thin_n={THIN_EDGE_N}"),
-            n,
-            columns,
-            series: Series {
-                decay,
-                measured,
-                ..Series::default()
-            },
-            notes,
-            thin,
-            episode_link: m.biggest.as_ref().map(|b| b.1.clone()),
+    Parts {
+        card: "EDGE",
+        paper: "edge",
+        title: "Edge capture",
+        params: format!("cap_usd={CAP_USD};headline={HEADLINE};thin_n={THIN_EDGE_N}"),
+        n,
+        columns,
+        series: Series {
+            decay,
+            measured,
+            ..Series::default()
         },
-        ctx,
-    )
+        notes,
+        thin,
+        episode_link: m.biggest.as_ref().map(|b| b.1.clone()),
+    }
 }
 
 impl Card for EdgeCell {
-    fn bodies(agg: &Self, max: &EdgeMax, ctx: &BodyCtx<'_>) -> Vec<CardBody> {
-        vec![edge(agg, max, ctx)]
+    fn parts(agg: &Self, max: &EdgeMax, ctx: &BodyCtx<'_>) -> Vec<Parts> {
+        vec![edge_parts(agg, max, ctx)]
     }
 }

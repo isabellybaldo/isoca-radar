@@ -145,7 +145,16 @@ pub struct BodyCtx<'a> {
 
 /// A cell family that renders cards from a window's merged cell.
 pub trait Card: CellData {
-    fn bodies(agg: &Self, max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<CardBody>;
+    /// The cards' window-independent parts. Must read from `ctx` only `premise_key` and
+    /// `scenarios` (the same for every window of a key).
+    fn parts(agg: &Self, max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<Parts>;
+
+    fn bodies(agg: &Self, max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<CardBody> {
+        Self::parts(agg, max, ctx)
+            .into_iter()
+            .map(|p| make(p, ctx))
+            .collect()
+    }
 }
 
 /// Spec §4: under_review while catch-up runs; warming when the key's data starts inside the
@@ -214,7 +223,10 @@ pub fn row(
     }
 }
 
-/// The parts of a card that differ per card.
+/// The parts of a card that differ per card. They depend on the window's merged cell (and the
+/// window-independent premise key and scenarios) only, never on the window itself, so two windows
+/// with the same merged cell can share them (`all` reuses `30d` while the key is younger).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parts {
     pub card: &'static str,
     pub paper: &'static str,

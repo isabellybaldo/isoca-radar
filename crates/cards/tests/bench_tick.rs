@@ -2,11 +2,14 @@
 //! synthetic history of ~350 episodes/hour must stay under 200 ms, at 30 and at 90 days of history,
 //! because a tick never re-merges every cell. Catch-up is timed and printed separately. The tick
 //! part mirrors analyze: advance one hour (parse the stored cells leaving the spans), rebuild the
-//! two dirty hours, store them as JSON, swap them in, and render every window's bodies to JSON.
+//! two dirty hours, store them as JSON, swap them in, and render the bodies to JSON: 24h and 7d
+//! every tick, 30d and all at most hourly and one per tick (ruling T9 (c), `LongRender`). The
+//! render of every window at once is printed too, for reference.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use cards::body::{BodyCtx, Card, ScenarioLat, base_status};
 use cards::cells::*;
 use cards::edge::EdgeCell;
+use cards::family::{LONG_WINDOWS, LongRender};
 use cards::window::{SPANS, Windows};
 use cards::{DAY_MS, HOUR_MS as H};
 use rust_decimal::Decimal;
@@ -113,12 +116,14 @@ fn catch_up<C: CellData>(first: i64, now: i64) -> Run<C> {
     run
 }
 
-/// One tick at `to` (= now + 1 h) with `inputs` pre-read (the store's part). Returns the JSON bytes written.
+/// One tick at `to` with `inputs` pre-read (the store's part), rendering 24h, 7d (and today) and
+/// the long windows `long` says (ruling T9 (c)). Returns the JSON bytes written.
 fn tick<C: Card>(
     run: &mut Run<C>,
     to: i64,
     inputs: &[(i64, Vec<Ep>)],
     sc: &[ScenarioLat],
+    long: [bool; 2],
 ) -> usize {
     let lat: Vec<i64> = (0..60).map(|i| 150 + i).collect();
     let d = deltas();
@@ -163,10 +168,15 @@ fn tick<C: Card>(
         }
     };
     for (i, (name, span)) in SPANS.iter().enumerate() {
+        if *name == LONG_WINDOWS[0] && !long[0] {
+            continue;
+        }
         let s = run.w.span_start(*span);
         emit(name, Some(s), &run.w.spans[i], run.w.max_from(s));
     }
-    emit("all", None, &run.w.all, run.w.max_from(i64::MIN));
+    if long[1] {
+        emit("all", None, &run.w.all, run.w.max_from(i64::MIN));
+    }
     if C::EDGE_INPUTS {
         let day = to - to.rem_euclid(DAY_MS);
         let today = run.w.today(day);
@@ -175,7 +185,11 @@ fn tick<C: Card>(
     bytes
 }
 
-fn family_tick_ms<C: Card>(days: i64, sc: &[ScenarioLat]) -> u128 {
+/// (full render of every window, the hour's first tick, the hour's second tick), in ms. The two
+/// real ticks follow `LongRender` from a state rendered last hour: the first advances an hour,
+/// rebuilds the two dirty hours and renders 30d; the second, 15 minutes later, rebuilds the
+/// partial hour and renders all.
+fn family_tick_ms<C: Card>(days: i64, sc: &[ScenarioLat]) -> (u128, u128, u128) {
     let now = 1_000_000 * H;
     let first = now - (days * 24 - 1) * H;
     let t = Instant::now();
@@ -183,17 +197,42 @@ fn family_tick_ms<C: Card>(days: i64, sc: &[ScenarioLat]) -> u128 {
     let catch_ms = t.elapsed().as_millis();
     let to = now + H;
     let inputs: Vec<(i64, Vec<Ep>)> = vec![(now, view(now)), (to, view(to))];
+    // (a) alone: every window rendered, on a copy
+    let mut full_run = Run {
+        stored: run.stored.clone(),
+        w: run.w.clone(),
+    };
     let t = Instant::now();
-    let bytes = tick(&mut run, to, &inputs, sc);
-    let ms = t.elapsed().as_millis();
+    let _ = tick(&mut full_run, to, &inputs, sc, [true, true]);
+    let full = t.elapsed().as_millis();
+    drop(full_run);
+    // (a) + (c)
+    let mut long = LongRender {
+        rendered: [Some(now), Some(now)],
+    };
+    let due = long.due(to);
+    let t = Instant::now();
+    let bytes1 = tick(&mut run, to, &inputs, sc, due);
+    let t1 = t.elapsed().as_millis();
+    long.mark(due, to);
+    let due2 = long.due(to);
+    assert_eq!(
+        (due, due2),
+        ([true, false], [false, true]),
+        "LongRender: 30d, then all"
+    );
+    let t = Instant::now();
+    let bytes2 = tick(&mut run, to, &[(to, view(to))], sc, due2);
+    let t2 = t.elapsed().as_millis();
     println!(
-        "days={days} family={} catch-up={catch_ms} ms tick={ms} ms json={bytes} B",
+        "days={days} family={} catch-up={catch_ms} ms full-render={full} ms tick1(30d)={t1} ms tick2(all)={t2} ms json={bytes1}+{bytes2} B",
         C::FAMILY
     );
-    ms
+    (full, t1, t2)
 }
 
-fn tick_ms(days: i64) -> u128 {
+/// Every family's (full, tick1, tick2) summed: analyze ticks all four families together.
+fn tick_ms(days: i64) -> (u128, u128, u128) {
     let sc = vec![
         ScenarioLat {
             name: "colo-idle".into(),
@@ -206,25 +245,29 @@ fn tick_ms(days: i64) -> u128 {
             latency_ms: 300,
         },
     ];
-    family_tick_ms::<G1Cell>(days, &sc)
-        + family_tick_ms::<DurCell>(days, &sc)
-        + family_tick_ms::<G4Cell>(days, &sc)
-        + family_tick_ms::<EdgeCell>(days, &sc)
+    let parts = [
+        family_tick_ms::<G1Cell>(days, &sc),
+        family_tick_ms::<DurCell>(days, &sc),
+        family_tick_ms::<G4Cell>(days, &sc),
+        family_tick_ms::<EdgeCell>(days, &sc),
+    ];
+    parts
+        .iter()
+        .fold((0, 0, 0), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2))
 }
 
 #[test]
 #[ignore = "benchmark: run by hand (Phase 5a plan, Task 9)"]
 fn tick_stays_under_200ms_as_all_grows_from_30_to_90_days() {
-    let t30 = tick_ms(30);
-    println!("tick total at 30 days: {t30} ms");
-    assert!(
-        t30 < 200,
-        "one tick over 30 days took {t30} ms (budget 200 ms, spec §9)"
-    );
-    let t90 = tick_ms(90);
-    println!("tick total at 90 days: {t90} ms");
-    assert!(
-        t90 < 200,
-        "one tick over 90 days took {t90} ms: the tick must not grow with 'all'"
-    );
+    for days in [30, 90] {
+        let (full, t1, t2) = tick_ms(days);
+        println!(
+            "tick total at {days} days: tick1 {t1} ms, tick2 {t2} ms (every window at once: {full} ms)"
+        );
+        let worst = t1.max(t2);
+        assert!(
+            worst < 200,
+            "one tick over {days} days took {worst} ms (budget 200 ms, spec §9; ruling T9 (c))"
+        );
+    }
 }

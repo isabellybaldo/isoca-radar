@@ -293,6 +293,9 @@ async fn a_late_close_outside_the_recent_48h_rebuilds_the_old_hour_without_doubl
     )
     .await;
     a.tick(T0 + 15 * M).await.unwrap();
+    // ruling T9 (c): 30d and all re-render once per clock hour, one per tick
+    a.tick(T0 + H + 5 * M).await.unwrap();
+    a.tick(T0 + H + 20 * M).await.unwrap();
     for win in ["7d", "30d", "all"] {
         let g3 = body(&rw, win, "G3").await;
         assert_eq!(
@@ -823,6 +826,93 @@ async fn a_late_host_row_brings_an_older_run_into_edge_capture_once() {
     assert_eq!(
         cell(&body(&rw, "all", "G1").await, "NO-side episodes", "ours"),
         "3"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+fn computed(b: &Value) -> i64 {
+    b["computed_ms"].as_i64().unwrap()
+}
+
+#[tokio::test]
+async fn long_windows_re_render_at_most_hourly_and_keep_their_own_computed_ms() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r,
+            "no_basket",
+            T0 - 2 * H,
+            Some(T0 - 2 * H + 1_000),
+        )],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0).await.unwrap();
+    for win in ["24h", "7d", "30d", "all"] {
+        assert_eq!(
+            computed(&body(&rw, win, "G2").await),
+            T0,
+            "{win}: the first tick renders every window"
+        );
+    }
+    write(
+        &owner,
+        vec![ep("b", r, "no_basket", T0 + M, Some(T0 + M + 1_000))],
+    )
+    .await;
+    let rep = a.tick(T0 + 15 * M).await.unwrap();
+    assert_eq!(
+        rep.results,
+        2 * 5 + 1,
+        "24h + 7d for G1–G4 and EDGE, and EDGE's today"
+    );
+    assert_eq!(
+        cell(&body(&rw, "7d", "G1").await, "NO-side episodes", "ours"),
+        "2"
+    );
+    assert_eq!(computed(&body(&rw, "7d", "G1").await), T0 + 15 * M);
+    let (d30, all) = (body(&rw, "30d", "G1").await, body(&rw, "all", "G1").await);
+    assert_eq!(
+        (computed(&d30), computed(&all)),
+        (T0, T0),
+        "same hour: 30d and all keep their last render"
+    );
+    assert_eq!(
+        cell(&d30, "NO-side episodes", "ours"),
+        "1",
+        "and their numbers, honestly dated"
+    );
+    a.tick(T0 + H + 5 * M).await.unwrap();
+    assert_eq!(
+        computed(&body(&rw, "30d", "G1").await),
+        T0 + H + 5 * M,
+        "a new hour: 30d"
+    );
+    assert_eq!(
+        computed(&body(&rw, "all", "G1").await),
+        T0,
+        "one long window per tick"
+    );
+    a.tick(T0 + H + 20 * M).await.unwrap();
+    let all = body(&rw, "all", "G1").await;
+    assert_eq!(computed(&all), T0 + H + 20 * M, "the next tick: all");
+    assert_eq!(cell(&all, "NO-side episodes", "ours"), "2");
+    assert_eq!(
+        cell(&body(&rw, "30d", "G1").await, "NO-side episodes", "ours"),
+        "2"
     );
     rw.close().await;
     db.drop(owner).await;

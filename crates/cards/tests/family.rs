@@ -70,3 +70,31 @@ fn family_spans_hours_and_groups() {
         vec![vec![0, H], vec![2 * H], vec![5 * H, 6 * H]]
     );
 }
+
+#[test]
+fn long_windows_render_at_most_hourly_and_one_per_tick() {
+    let mut l = LongRender::default();
+    assert_eq!(l.due(10 * H), [true, true], "a fresh state renders both");
+    l.mark([true, true], 10 * H);
+    assert_eq!(
+        l.due(10 * H),
+        [false, false],
+        "later ticks of the same hour render neither"
+    );
+    assert_eq!(l.due(11 * H), [true, false], "a new hour: 30d first (tie)");
+    l.mark([true, false], 11 * H);
+    assert_eq!(l.due(11 * H), [false, true], "the next tick: all");
+    l.mark([false, true], 11 * H);
+    assert_eq!(l.due(11 * H), [false, false]);
+    // one tick an hour: they alternate, and neither falls two hours behind
+    assert_eq!(l.due(12 * H), [true, false]);
+    l.mark([true, false], 12 * H);
+    assert_eq!(l.due(13 * H), [false, true], "all is older now");
+    l.mark([false, true], 13 * H);
+    assert_eq!(l.due(15 * H), [true, true], "both two or more hours behind");
+    assert_eq!(
+        l.due(9 * H),
+        [false, false],
+        "a clock that went back renders nothing new"
+    );
+}
