@@ -146,7 +146,7 @@ function DetailView({ d }: { d: Detail }) {
         {e.source === 'replay' && <Tag>REPLAY</Tag>}
       </p>
       <div className="grid2">
-        <Box title="TIMING">
+        <Box title="TIMING" help="timing">
           <dl className="kv">
             <dt>opened</dt>
             <dd title={fmtLocal(e.opened_ms)}>{fmtUtcTime(e.opened_ms)}</dd>
@@ -160,7 +160,7 @@ function DetailView({ d }: { d: Detail }) {
             <dd>{e.detect_lag_ms === null ? '—' : `${e.detect_lag_ms} ms`}</dd>
           </dl>
         </Box>
-        <Box title="AT PEAK">
+        <Box title="AT PEAK" help="peak">
           <dl className="kv">
             <dt>net Π</dt>
             <dd><Money value={e.net} signed tone /></dd>
@@ -174,14 +174,14 @@ function DetailView({ d }: { d: Detail }) {
             <dd><Money value={e.net_budget100} signed tone /></dd>
           </dl>
         </Box>
-        <Box title="FLAGS, IN WORDS">
+        <Box title="FLAGS, IN WORDS" help="flags">
           {words.length === 0 ? <p className="quip">No flags. Suspiciously clean.</p> : words.map((w) => <p key={w} className="quip">{w}</p>)}
         </Box>
       </div>
-      <Box title={`LEGS AT PEAK · S = ${inS} of ${e.n_legs}`}>
+      <Box title={`LEGS AT PEAK · S = ${inS} of ${e.n_legs}`} help="legs">
         <Table columns={legColumns} rows={d.legs} rowKey={(l) => String(l.leg_idx)} rowClass={(l) => (l.in_s ? undefined : 'dim')} />
       </Box>
-      <Box title="RE-CHECK TIMELINE">
+      <Box title="RE-CHECK TIMELINE" help="rechecks">
         <Timeline obs={d.observations} />
         <Table columns={timelineColumns} rows={timelineRows(e, d.observations)} rowKey={(r) => r.key} />
         {e.closed_ms !== null && e.duration_ms !== null && e.duration_ms < 10_000 && (

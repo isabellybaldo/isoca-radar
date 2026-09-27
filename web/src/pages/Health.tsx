@@ -39,7 +39,7 @@ function CaptureStatus({ h }: { h: HealthNow }) {
 function SeriesCharts({ s }: { s: HealthSeries }) {
   if (s.points.length === 0) {
     return (
-      <Box title="PER MINUTE">
+      <Box title="PER MINUTE" help="perMinute">
         <EmptyState text={NO_HEALTH_ROWS} />
       </Box>
     );
@@ -48,13 +48,13 @@ function SeriesCharts({ s }: { s: HealthSeries }) {
     s.points.flatMap((p) => (p[k] === null ? [] : [{ x: p.minute_ms, y: p[k] as number }]));
   return (
     <div className="grid2">
-      <Box title="MSGS/S">
+      <Box title="MSGS/S" help="msgs">
         <LineChart label="messages per second" xMin={s.from_ms} xMax={s.to_ms} series={[{ label: 'msgs/s', tone: 'p0', points: s.points.map((p) => ({ x: p.minute_ms, y: p.msgs / 60 })) }]} />
       </Box>
-      <Box title="LAG (MS)">
+      <Box title="LAG (MS)" help="lag">
         <LineChart label="feed lag p50 and p99" xMin={s.from_ms} xMax={s.to_ms} series={[{ label: 'p50', tone: 'p0', points: lag('lag_p50_ms') }, { label: 'p99', tone: 'p3', points: lag('lag_p99_ms') }]} />
       </Box>
-      <Box title="DROPS AND RECONNECTS">
+      <Box title="DROPS AND RECONNECTS" help="drops">
         <LineChart
           label="drops and reconnects per minute"
           xMin={s.from_ms}
@@ -99,7 +99,7 @@ export function Health() {
   const integrity = useApi((s) => api.integrity(hours, s), [hours], [healthTick, slow]);
   return (
     <>
-      <Box title="WINDOW">
+      <Box title="WINDOW" help="window">
         <div className="seg" role="group" aria-label="window">
           {WINDOWS.map((w) => (
             <button key={w} type="button" className={w === hours ? 'on' : undefined} aria-pressed={w === hours} onClick={() => setSp(new URLSearchParams({ hours: String(w) }))}>
@@ -108,7 +108,7 @@ export function Health() {
           ))}
         </div>
       </Box>
-      <Box title="CAPTURE">
+      <Box title="CAPTURE" help="capture">
         <Loadable state={now} what="capture status">
           {(d) => (d.health === null ? <EmptyState text={NO_HEALTH_ROWS} /> : <CaptureStatus h={d.health} />)}
         </Loadable>
@@ -116,7 +116,7 @@ export function Health() {
       <Loadable state={series} what="the health series">
         {(d) => <SeriesCharts s={d} />}
       </Loadable>
-      <Box title="INTEGRITY">
+      <Box title="INTEGRITY" help="integrity">
         <Loadable state={integrity} what="integrity">
           {(d) => <IntegrityView i={d} />}
         </Loadable>

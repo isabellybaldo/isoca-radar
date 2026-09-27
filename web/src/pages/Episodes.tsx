@@ -87,7 +87,7 @@ export function Episodes() {
   const kind = q.kind ?? '';
   return (
     <>
-      <Box title="FILTERS">
+      <Box title="FILTERS" help="filters">
         <div className="filters">
           <div className="seg" role="group" aria-label="kind">
             {KINDS.map(([value, label]) => (
@@ -115,7 +115,7 @@ export function Episodes() {
         </div>
         <p className="dim">UTC days. Seven days at a time.</p>
       </Box>
-      <Box title="EPISODES">
+      <Box title="EPISODES" help="episodes">
         <Loadable state={page} what="episodes">
           {(d) =>
             d.items.length === 0 ? (

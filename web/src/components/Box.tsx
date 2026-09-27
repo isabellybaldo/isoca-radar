@@ -1,9 +1,15 @@
 import type { ReactNode } from 'react';
+import type { HelpId } from '../help';
+import { Help } from './Help';
 
-export function Box({ title, className, children }: { title?: ReactNode; className?: string; children: ReactNode }) {
+/** A page section. `help` is required: every section of every page has a (?) (spec §8.3). */
+export function Box({ title, help, className, children }: { title?: ReactNode; help: HelpId; className?: string; children: ReactNode }) {
   return (
     <section className={className ? `box ${className}` : 'box'}>
-      {title !== undefined && <h2>{title}</h2>}
+      <div className="box-head">
+        {title !== undefined && <h2>{title}</h2>}
+        <Help id={help} />
+      </div>
       {children}
     </section>
   );

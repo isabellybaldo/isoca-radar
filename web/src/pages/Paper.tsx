@@ -61,7 +61,7 @@ function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
   const ids = accounts.map((a) => a.account_id);
   const eq = useApi((s) => Promise.all(ids.map((id) => api.paperEquity(id, 24, s))), [ids.join('|')]);
   return (
-    <Box title={`EQUITY · ${formatMoney(accounts[0]?.bankroll ?? null)} EACH · LAST 24 H`}>
+    <Box title={`EQUITY · ${formatMoney(accounts[0]?.bankroll ?? null)} EACH · LAST 24 H`} help="equity">
       <Loadable state={eq} what="equity">
         {(all) => {
           const series: Series[] = all.map((e, i) => ({
@@ -125,7 +125,7 @@ function Ledger({ accounts, account, cursor, onAccount, onCursor }: {
   const page = useApi((s) => api.paperLedger(account, cursor, s), [account, cursor]);
   const current = accounts.find((a) => a.account_id === account);
   return (
-    <Box title={`LEDGER · ${current ? policyCardTitle(current.policy) : account}`}>
+    <Box title={`LEDGER · ${current ? policyCardTitle(current.policy) : account}`} help="ledger">
       <div className="seg" role="group" aria-label="ledger account">
         {accounts.map((a) => (
           <button key={a.account_id} type="button" className={a.account_id === account ? 'on' : undefined} aria-pressed={a.account_id === account} onClick={() => onAccount(a.account_id)}>
@@ -175,7 +175,7 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
   };
   return (
     <>
-      <Box title="SCENARIO">
+      <Box title="SCENARIO" help="scenario">
         <div className="seg" role="group" aria-label="latency scenario">
           {scenarios.map((s) => (
             <button key={s} type="button" className={s === scenario ? 'on' : undefined} aria-pressed={s === scenario} onClick={() => set({ scenario: s, account: null, lcursor: null })}>
@@ -187,7 +187,7 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
       <EquityChart accounts={inScenario} />
       <Cards accounts={inScenario} />
       <div className="grid2">
-        <Box title="AWAITING RESOLUTION">
+        <Box title="AWAITING RESOLUTION" help="awaiting">
           <Loadable state={positions} what="positions">
             {(d) => {
               const rows = d.items.filter((p) => ids.includes(p.account_id));
@@ -220,7 +220,7 @@ export function Paper() {
     <Loadable state={accounts} what="paper accounts">
       {(d) =>
         d.items.length === 0 ? (
-          <Box title="PAPER">
+          <Box title="PAPER" help="paper">
             <EmptyState text={PAPER_EMPTY} />
           </Box>
         ) : (

@@ -100,4 +100,16 @@ describe('Radar', () => {
     expect(await screen.findByText(NO_HEALTH)).toBeInTheDocument();
     expect(await screen.findByText('The database is thinking. Try again in a moment.')).toBeInTheDocument();
   });
+
+  it('gives every section a (?)', async () => {
+    mockApi({
+      '/api/health/now': { health: healthFixture() },
+      '/api/episodes/open': { now_ms: 0, items: [] },
+      '/api/today': todayFixture(0, 0),
+    });
+    renderRadar();
+    await screen.findByText(EMPTY_RADAR);
+    const names = screen.getAllByRole('button', { name: /^Help: / }).map((b) => b.getAttribute('aria-label'));
+    expect(names).toEqual(['Help: What are the hearts?', 'Help: What is an episode?', 'Help: What does today count?']);
+  });
 });

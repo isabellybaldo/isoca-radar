@@ -7,6 +7,7 @@ import { Age } from '../components/Age';
 import { Box } from '../components/Box';
 import { EmptyState } from '../components/EmptyState';
 import { Hearts, troubles } from '../components/Hearts';
+import { Help } from '../components/Help';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
@@ -55,6 +56,7 @@ function HealthBar({ h }: { h: HealthNow }) {
           {t.toUpperCase()}
         </Tag>
       ))}
+      <Help id="health" />
     </section>
   );
 }
@@ -104,9 +106,9 @@ export function Radar() {
   return (
     <>
       <Loadable state={health} what="health">
-        {(d) => (d.health === null ? <Box><EmptyState text={NO_HEALTH} /></Box> : <HealthBar h={d.health} />)}
+        {(d) => (d.health === null ? <Box help="health"><EmptyState text={NO_HEALTH} /></Box> : <HealthBar h={d.health} />)}
       </Loadable>
-      <Box title={`OPEN EPISODES · ${rows.length}`}>
+      <Box title={`OPEN EPISODES · ${rows.length}`} help="open">
         {staleHealth && <Tag tone="flag">{OPEN_STALE}</Tag>}
         <Loadable state={open} what="open episodes">
           {(d) =>
@@ -118,7 +120,7 @@ export function Radar() {
           }
         </Loadable>
       </Box>
-      <Box title="TODAY (UTC)">
+      <Box title="TODAY (UTC)" help="today">
         <Loadable state={today} what="today">
           {(d) => (
             <>
