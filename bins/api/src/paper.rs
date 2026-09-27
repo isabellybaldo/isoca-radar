@@ -210,9 +210,10 @@ pub async fn ledger(
         })?),
     };
     let limit = params::limit(&q)?;
+    let hide_marks = params::flag(&q, "hide_marks")?;
     let page = st
         .store
-        .paper_ledger_page(&account_id, before, limit)
+        .paper_ledger_page(&account_id, before, limit, hide_marks)
         .await?;
     Ok(Json(Page {
         items: page.rows.into_iter().map(Into::into).collect(),

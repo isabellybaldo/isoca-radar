@@ -27,10 +27,14 @@ async fn mark(owner: &Store, run_id: i64, id: &str, t_ms: i64, equity: &str) {
 }
 
 async fn ledger(owner: &Store, run_id: i64, id: &str, seq: i64) {
+    ledger_kind(owner, run_id, id, seq, "buy").await;
+}
+
+async fn ledger_kind(owner: &Store, run_id: i64, id: &str, seq: i64, kind: &str) {
     owner
         .raw_exec(&format!(
             "INSERT INTO paper_ledger (run_id, account_id, seq, t_ms, kind, episode_id, market_id, yes_token, outcome, qty, price, cash_delta, fees, realized_delta, cash_after, equity) \
-             VALUES ({run_id}, '{id}', {seq}, {}, 'buy', 'live-1-00000001', 'm1', 'y1', 'no', 51.2, 0.62, -99.84, 0.21, 0, 900.16, NULL)",
+             VALUES ({run_id}, '{id}', {seq}, {}, '{kind}', 'live-1-00000001', 'm1', 'y1', 'no', 51.2, 0.62, -99.84, 0.21, 0, 900.16, NULL)",
             seq * 1_000
         ))
         .await
@@ -178,5 +182,36 @@ async fn paper_parameters_are_validated() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {v}");
         assert_eq!(v["error"], code, "{uri}");
     }
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn ledger_hides_minute_marks_on_request() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = common::run(&owner, "live").await;
+    account(&owner, live, P0, "P0-converter", "sp-idle").await;
+    for (seq, kind) in [(1, "buy"), (2, "mark"), (3, "mark")] {
+        ledger_kind(&owner, live, P0, seq, kind).await;
+    }
+    let (app, _st) = common::app(&db).await;
+    let (_, all) = common::get(&app, &format!("/api/paper/ledger?account={P0Q}")).await;
+    assert_eq!(all["items"].as_array().unwrap().len(), 3);
+    let (status, hidden) = common::get(
+        &app,
+        &format!("/api/paper/ledger?account={P0Q}&hide_marks=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hidden}");
+    let items = hidden["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["kind"], "buy");
+    let (status, _) = common::get(
+        &app,
+        &format!("/api/paper/ledger?account={P0Q}&hide_marks=maybe"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     db.drop(owner).await;
 }

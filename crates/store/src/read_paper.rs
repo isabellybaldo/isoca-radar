@@ -176,11 +176,13 @@ impl Store {
     }
 
     /// One account's ledger across live runs, newest first, keyset-paged on (run_id, seq).
+    /// `hide_marks` drops the minute `mark` rows before paging, so every page is full of the rest.
     pub async fn paper_ledger_page(
         &self,
         account_id: &str,
         before: Option<(i64, i64)>,
         limit: i64,
+        hide_marks: bool,
     ) -> Result<LedgerPage, StoreError> {
         if !self.paper_ready().await? {
             return Ok(LedgerPage {
@@ -201,12 +203,14 @@ impl Store {
              WHERE l.run_id IN (SELECT run_id FROM runs WHERE mode = 'live') \
                AND l.account_id = $1 \
                AND ($2::int8 IS NULL OR (l.run_id, l.seq) < ($2::int8, $3::int8)) \
+               AND (NOT $5 OR l.kind <> 'mark') \
              ORDER BY l.run_id DESC, l.seq DESC LIMIT $4",
         )
         .bind(account_id)
         .bind(b_run)
         .bind(b_seq)
         .bind(limit + 1)
+        .bind(hide_marks)
         .fetch_all(self.pool())
         .await?;
         let keep = usize::try_from(limit).unwrap_or(usize::MAX);

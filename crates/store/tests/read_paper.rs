@@ -40,10 +40,14 @@ async fn mark(owner: &Store, run_id: i64, id: &str, t_ms: i64, equity: &str) {
 }
 
 async fn ledger(owner: &Store, run_id: i64, id: &str, seq: i64) {
+    ledger_kind(owner, run_id, id, seq, "buy").await;
+}
+
+async fn ledger_kind(owner: &Store, run_id: i64, id: &str, seq: i64, kind: &str) {
     owner
         .raw_exec(&format!(
             "INSERT INTO paper_ledger (run_id, account_id, seq, t_ms, kind, episode_id, market_id, yes_token, outcome, qty, price, cash_delta, fees, realized_delta, cash_after, equity) \
-             VALUES ({run_id}, '{id}', {seq}, {}, 'buy', 'live-1-00000001', 'm1', 'y1', 'no', 51.2, 0.62, -99.84, 0.21, 0, 900.16, NULL)",
+             VALUES ({run_id}, '{id}', {seq}, {}, '{kind}', 'live-1-00000001', 'm1', 'y1', 'no', 51.2, 0.62, -99.84, 0.21, 0, 900.16, NULL)",
             seq * 1_000
         ))
         .await
@@ -84,7 +88,7 @@ async fn paper_reads_are_empty_when_the_tables_are_missing() {
     );
     assert!(analyze.paper_positions().await.unwrap().is_empty());
     let page = analyze
-        .paper_ledger_page("P0-converter/sp-idle", None, 50)
+        .paper_ledger_page("P0-converter/sp-idle", None, 50, false)
         .await
         .unwrap();
     assert!(page.rows.is_empty() && page.next.is_none());
@@ -317,7 +321,7 @@ async fn ledger_pages_newest_first_by_run_then_seq() {
     ledger(&owner, replay, "P0-converter/sp-idle", 9).await;
     let analyze = ro(&db).await;
     let p1 = analyze
-        .paper_ledger_page("P0-converter/sp-idle", None, 2)
+        .paper_ledger_page("P0-converter/sp-idle", None, 2, false)
         .await
         .unwrap();
     assert_eq!(
@@ -331,7 +335,7 @@ async fn ledger_pages_newest_first_by_run_then_seq() {
     assert_eq!(p1.rows[0].equity, None);
     assert_eq!(p1.next, Some((old, 2)));
     let p2 = analyze
-        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2)
+        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2, false)
         .await
         .unwrap();
     assert_eq!(
@@ -342,6 +346,53 @@ async fn ledger_pages_newest_first_by_run_then_seq() {
         vec![(old, 1)]
     );
     assert_eq!(p2.next, None);
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn ledger_can_skip_minute_marks_and_still_page() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    account(
+        &owner,
+        live,
+        "P0-converter/sp-idle",
+        "P0-converter",
+        "sp-idle",
+    )
+    .await;
+    for (seq, kind) in [
+        (1, "buy"),
+        (2, "mark"),
+        (3, "convert"),
+        (4, "mark"),
+        (5, "mark"),
+        (6, "settle"),
+    ] {
+        ledger_kind(&owner, live, "P0-converter/sp-idle", seq, kind).await;
+    }
+    let analyze = ro(&db).await;
+    let seqs = |p: &LedgerPage| p.rows.iter().map(|r| r.seq).collect::<Vec<_>>();
+    let p1 = analyze
+        .paper_ledger_page("P0-converter/sp-idle", None, 2, true)
+        .await
+        .unwrap();
+    assert_eq!(seqs(&p1), vec![6, 3]);
+    assert_eq!(p1.next, Some((live, 3)));
+    let p2 = analyze
+        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2, true)
+        .await
+        .unwrap();
+    assert_eq!(seqs(&p2), vec![1]);
+    assert_eq!(p2.next, None);
+    let all = analyze
+        .paper_ledger_page("P0-converter/sp-idle", None, 50, false)
+        .await
+        .unwrap();
+    assert_eq!(all.rows.len(), 6);
     analyze.close().await;
     db.drop(owner).await;
 }
