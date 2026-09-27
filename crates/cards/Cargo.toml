@@ -8,7 +8,7 @@ publish.workspace = true
 # Pure: no IO, no clock, no floats (Phase 5a spec §7, §9). analyze does the IO.
 [dependencies]
 arb-core = { path = "../arb-core" }
-rust_decimal = { workspace = true, features = ["serde-with-str"] }
+rust_decimal = { workspace = true, features = ["serde-with-str", "maths"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
