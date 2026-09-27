@@ -173,7 +173,7 @@ function AccountsTable({ accounts }: { accounts: PaperAccount[] }) {
       <table>
         <thead>
           <tr>
-            {['ACCOUNT', 'REALIZED', 'UNREALIZED', 'LOCKED', 'MAX DD', 'OPEN'].map((h) => (
+            {['ACCOUNT', 'EQUITY', 'REALIZED', 'UNREALIZED', 'LOCKED', 'MAX DD', 'OPEN'].map((h) => (
               <th key={h} scope="col">
                 {h}
               </th>
@@ -188,11 +188,14 @@ function AccountsTable({ accounts }: { accounts: PaperAccount[] }) {
                 {!isZero(a.fee_bips) && ` · FEE ${a.fee_bips} BP`}
               </td>
               {a.marked_ms === null ? (
-                <td colSpan={5} className="dim">
+                <td colSpan={6} className="dim">
                   No marks yet. Nothing ventured, nothing lost.
                 </td>
               ) : (
                 <>
+                  <td className="num">
+                    <Money value={a.equity ?? a.bankroll} cents />
+                  </td>
                   <td className="num">
                     <Money value={a.realized} signed tone cents />
                   </td>

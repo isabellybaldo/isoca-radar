@@ -77,7 +77,8 @@ describe('Paper', () => {
     expect(screen.getByText(PAPER_QUIP)).toBeInTheDocument();
     expect(PAPER_QUIP).toBe("The naive strategy is doing great. Until 'Other' wins.");
     expect(screen.getByText(PAPER_LOSS_QUIP)).toBeInTheDocument();
-    expect(screen.getByText('$1,002.56')).toBeInTheDocument();
+    // I4: now also in the Accounts table's EQUITY column, beside the equity chart's end legend.
+    expect(screen.getAllByText('$1,002.56')).toHaveLength(2);
     expect(screen.getByText('−$286.60')).toHaveClass('neg');
     expect(screen.getByText('Fed decision in October?')).toBeInTheDocument();
     expect(await screen.findByText('−$99.84')).toBeInTheDocument();
