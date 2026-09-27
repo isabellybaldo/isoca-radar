@@ -606,7 +606,10 @@ pub fn row_key(side: Side, scenario: &str, dim: &str, bucket: &str) -> String {
     format!("{}|{scenario}|{dim}|{bucket}", side_str(side))
 }
 
-pub fn parse_key(k: &str) -> Option<(Side, String, String, String)> {
+/// Borrows straight out of `k` (no allocation): the caller already holds `k` alive for as long as
+/// it needs the parts (fix round 1, spec §9: this ran ~1000 times a render, each allocating 3
+/// owned `String`s it only ever read from).
+pub fn parse_key(k: &str) -> Option<(Side, &str, &str, &str)> {
     let mut it = k.split('|');
     let side = match it.next()? {
         "yes" => Side::Yes,
@@ -617,16 +620,28 @@ pub fn parse_key(k: &str) -> Option<(Side, String, String, String)> {
     if it.next().is_some() {
         return None;
     }
-    Some((side, scen.to_string(), dim.to_string(), bucket.to_string()))
+    Some((side, scen, dim, bucket))
 }
 
 impl SweetCell {
     fn apply(&mut self, o: &SweetCell, sign: i64) {
         for (k, a) in &o.rows {
-            let e = self.rows.entry(k.clone()).or_default();
-            e.apply(a, sign);
-            if *e == Acc::default() {
-                self.rows.remove(k);
+            // `k.clone()` only when this row is new to `self` (fix round 1, spec §9): once the row
+            // set stabilizes (after the first merge), every later merge finds it already there.
+            match self.rows.get_mut(k) {
+                Some(e) => {
+                    e.apply(a, sign);
+                    if *e == Acc::default() {
+                        self.rows.remove(k);
+                    }
+                }
+                None => {
+                    let mut e = Acc::default();
+                    e.apply(a, sign);
+                    if e != Acc::default() {
+                        self.rows.insert(k.clone(), e);
+                    }
+                }
             }
         }
     }
@@ -851,6 +866,9 @@ pub struct Verdict {
     pub annualized_lo: Option<Decimal>,
     pub annualized_upper: Option<Decimal>,
     pub few_trades: bool,
+    /// `row_stats(a)`, carried out so a caller never computes it twice (fix round 1, spec §9: this
+    /// runs a cluster-robust `sqrt` per row; `sweet_parts` used to call `row_stats` a second time).
+    pub st: RowStats,
 }
 
 pub fn is_thin(a: &Acc) -> bool {
@@ -908,6 +926,7 @@ pub fn verdict(side: Side, a: &Acc, z: Decimal, hurdle: Option<Decimal>) -> Verd
         annualized_lo,
         annualized_upper,
         few_trades,
+        st,
     }
 }
 
@@ -994,7 +1013,7 @@ fn bucket_order(dim: &str, bucket: &str) -> usize {
 }
 
 pub fn sweet_parts(c: &SweetCell, ctx: &BodyCtx<'_>) -> Parts {
-    let parsed: Vec<(Side, String, String, String, &Acc)> = c
+    let parsed: Vec<(Side, &str, &str, &str, &Acc)> = c
         .rows
         .iter()
         .filter_map(|(k, a)| parse_key(k).map(|(s, sc, d, b)| (s, sc, d, b, a)))
@@ -1015,17 +1034,18 @@ pub fn sweet_parts(c: &SweetCell, ctx: &BodyCtx<'_>) -> Parts {
     };
     let mut rows: Vec<SweetRow> = parsed
         .iter()
-        .map(|(side, scen, dim, bucket, a)| {
-            let v = verdict(*side, a, z, ctx.hurdle);
-            let st = row_stats(a);
+        .map(|&(side, scen, dim, bucket, a)| {
+            // one `row_stats` per row (spec §9, fix round 1): `verdict` used to run it and
+            // `sweet_parts` ran it again for `mean`/`eff_n`; `v.st` is now the only computation.
+            let v = verdict(side, a, z, ctx.hurdle);
             let (base, fee) = fee_of(scen);
             SweetRow {
-                side: side_str(*side).to_string(),
+                side: side_str(side).to_string(),
                 latency_ms: latency(&base),
                 scenario: base,
                 fee_bips: fee,
-                dimension: dim.clone(),
-                bucket: bucket.clone(),
+                dimension: dim.to_string(),
+                bucket: bucket.to_string(),
                 label: v.label,
                 few_trades: v.few_trades,
                 n_exec: a.n_exec(),
@@ -1040,10 +1060,10 @@ pub fn sweet_parts(c: &SweetCell, ctx: &BodyCtx<'_>) -> Parts {
                 on_table_eligible: dec(a.on_table_elig.0),
                 captured: dec(a.sx.0),
                 captured_leftover0: dec(a.sx0.0),
-                mean: st.mean.map(d6),
+                mean: v.st.mean.map(d6),
                 lo: v.lo.map(d6),
                 hi: v.hi.map(d6),
-                eff_n: st.eff_n.map(|e| dec(e.round_dp(2))),
+                eff_n: v.st.eff_n.map(|e| dec(e.round_dp(2))),
                 cost: dec(a.cost.0),
                 annualized: v.annualized.map(|x| dec(x.round_dp(4))),
                 annualized_lo: v.annualized_lo.map(|x| dec(x.round_dp(4))),
@@ -1053,23 +1073,17 @@ pub fn sweet_parts(c: &SweetCell, ctx: &BodyCtx<'_>) -> Parts {
             }
         })
         .collect();
-    rows.sort_by(|x, y| {
+    // cached: `order`/`bucket_order` (each a linear scan) run once per row instead of twice per
+    // comparison over an O(n log n) sort (fix round 1, spec §9).
+    rows.sort_by_cached_key(|x| {
         (
-            x.side.as_str(),
+            x.side.clone(),
             order(&DIMS, &x.dimension),
             bucket_order(&x.dimension, &x.bucket),
             x.latency_ms,
             x.fee_bips,
-            x.scenario.as_str(),
+            x.scenario.clone(),
         )
-            .cmp(&(
-                y.side.as_str(),
-                order(&DIMS, &y.dimension),
-                bucket_order(&y.dimension, &y.bucket),
-                y.latency_ms,
-                y.fee_bips,
-                y.scenario.as_str(),
-            ))
     });
     let fees: Vec<SweetFee> = rows
         .iter()

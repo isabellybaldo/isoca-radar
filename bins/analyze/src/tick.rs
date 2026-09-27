@@ -117,6 +117,15 @@ impl Analyzer {
             Some(text) => serde_json::from_str::<serde_json::Value>(&text)?["updated_ms"].as_i64(),
             None => None,
         };
+        // Fix round 1 (spec §9): seed from the last tick's own record, so a restart right after a
+        // tick that saw a SWEET attempt in flight still rebuilds that attempt's hour once it
+        // lands, instead of only looking back LATE_MS from *this* process's first tick.
+        let last_tick_ms = match store.card_meta_get("tick").await? {
+            Some(text) => {
+                serde_json::from_str::<serde_json::Value>(&text)?["last_tick_ms"].as_i64()
+            }
+            None => None,
+        };
         Ok(Self {
             store,
             pause,
@@ -129,7 +138,7 @@ impl Analyzer {
             sweet: Family::new(0),
             cursor,
             last_hour: None,
-            last_tick_ms: None,
+            last_tick_ms,
             hurdle: None,
         })
     }
@@ -776,7 +785,16 @@ async fn sweet_inputs(
         let exec = i.exec_ms.zip(i.q_eff);
         let (skip, pending) =
             classify_intent(i.skip_reason, i.planned_exec_ms, exec.is_some(), env.now_ms);
-        let s_legs = eps_s_legs.get(i.episode_id.as_str()).copied().unwrap_or(0);
+        // Every intent's episode comes from the same SWEET_EPS-bounded range `eps` does, so this
+        // is always found; skip (never guess a leg count) if it somehow isn't (fix round 1).
+        let Some(s_legs) = eps_s_legs.get(i.episode_id.as_str()).copied() else {
+            debug_assert!(
+                false,
+                "sweet_inputs: intent on episode {} has no matching SweetEp in range",
+                i.episode_id
+            );
+            continue;
+        };
         let k = (i.run_id, i.account_id, i.episode_id);
         out.push(Attempt {
             side,

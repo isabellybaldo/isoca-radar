@@ -1422,3 +1422,82 @@ async fn thirty_events_with_the_same_edge_make_the_no_row_a_candidate() {
     rw.close().await;
     db.drop(owner).await;
 }
+
+#[tokio::test]
+async fn a_restart_seeds_last_tick_ms_so_the_late_rule_still_reaches_the_episodes_hour() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    let opened = T0 + H - 10_000;
+    let mut e = ep("e1", r, "no_basket", opened, Some(opened + 5_000));
+    e.days_to_end = Some(dec!(3));
+    write(&owner, vec![e]).await;
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![p0_account(r)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    owner
+        .write_batch(&no_attempt(r, "e1", T0 + H + 30_000, dec!(0.5), 1))
+        .await
+        .unwrap();
+    let rw1 = rw(&db).await;
+    let mut a1 = Analyzer::new(rw1.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a1.tick(T0 + H + 45_000).await.unwrap(); // 15 s after exec: in flight, not yet counted
+    let row = sweet_row(
+        &body(&rw1, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(row["n_attempts"].as_i64(), Some(0), "still in flight");
+    rw1.close().await;
+    // Push the episode-changed cursor far into the future so a2's own 120 s relookback
+    // (LOOKBACK_MS, unrelated to SWEET) can never re-surface "e1" on its own: whatever re-dirties
+    // T0 from here has to be the SWEET late rule, not that cursor.
+    owner
+        .card_meta_put(
+            "cursor",
+            &serde_json::json!({ "updated_ms": 9_000_000_000_000_i64 }).to_string(),
+        )
+        .await
+        .unwrap();
+    // "restart": a fresh Analyzer on a fresh connection, no in-memory state left — only what
+    // card_meta and card_cells hold. The next tick is far enough past T0 (the episode's hour)
+    // that anchoring the late window on *this* process's own now_ms (the bug) would miss it, but
+    // one seeded from the last real tick's `last_tick_ms` (T0 + H + 45_000, read back from
+    // card_meta) still reaches it.
+    let rw2 = rw(&db).await;
+    let mut a2 = Analyzer::new(rw2.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a2.tick(T0 + 2 * H + 60_000).await.unwrap();
+    let row = sweet_row(
+        &body(&rw2, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(
+        (
+            row["n_attempts"].as_i64(),
+            row["n_exec"].as_i64(),
+            row["captured"].as_str()
+        ),
+        (Some(1), Some(1), Some("0.5")),
+        "the late rule reached T0 across the restart"
+    );
+    rw2.close().await;
+    db.drop(owner).await;
+}
