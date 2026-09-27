@@ -12,10 +12,11 @@ export function isWin(v: string | null): v is Win {
   return WINS.some(([w]) => w === v);
 }
 
-/** The 24H/7D/30D/ALL window switch (spec §8.2). */
-export function WindowSwitch({ win, onChange }: { win: Win; onChange: (w: Win) => void }) {
+/** The 24H/7D/30D/ALL window switch (spec §8.2). `label` sets the group's aria-label, so a page with
+ *  more than one switch (Paper's Edge capture and Sweet spots boxes) exposes distinguishable groups. */
+export function WindowSwitch({ win, onChange, label = 'window' }: { win: Win; onChange: (w: Win) => void; label?: string }) {
   return (
-    <div className="seg" role="group" aria-label="window">
+    <div className="seg" role="group" aria-label={label}>
       {WINS.map(([w, label]) => (
         <button key={w} type="button" className={w === win ? 'on' : undefined} aria-pressed={w === win} onClick={() => onChange(w)}>
           {label}
