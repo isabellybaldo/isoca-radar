@@ -129,7 +129,7 @@ export const HELP = {
   },
   g1: {
     title: 'What is side asymmetry?',
-    text: 'Whether mispricing shows up more on the YES side (all YES tokens together cost under $1) or the NO side (all NO tokens cost under the number of outcomes minus one). The paper found YES far more often. The merge rows show how much flickering books inflate the count.',
+    text: 'Whether mispricing shows up more on the YES side (all YES tokens together cost under $1) or the NO side (all NO tokens cost under the number of outcomes minus one). The paper found YES far more often. The merge rows show how much flickering books inflate the count. Why is our NO side so much bigger than the paper’s? Most of our NO episodes last about 27 ms (median). They come from crypto price-bucket markets (e.g. "XRP price on Sep 30?") where one market maker requotes every bucket, one at a time. For a few milliseconds the old and new bids overlap and the NO basket looks free. It’s real on the book, and gone before anyone at our latency can take it. Count only episodes lasting ≥ 100 ms and YES leads about 2.8 : 1, the same direction as the paper, whose hourly snapshots would rarely catch a 27 ms flicker.',
   },
   g2: {
     title: 'What is Kaplan–Meier?',

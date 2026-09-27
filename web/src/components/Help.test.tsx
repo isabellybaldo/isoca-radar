@@ -44,6 +44,15 @@ describe('Help (?)', () => {
     expect(HELP.status.title).toBe('What does warming mean?');
   });
 
+  it('explains the NO-side flicker in the G1 help without touching the card body', async () => {
+    render(<Help id="g1" />);
+    const btn = screen.getByRole('button', { name: `Help: ${HELP.g1.title}` });
+    await userEvent.click(btn);
+    expect(screen.getByRole('note')).toHaveTextContent(/median.*27 ms/);
+    expect(screen.getByRole('note')).toHaveTextContent(/2\.8 : 1/);
+    expect(HELP.g1.text).toContain('27 ms');
+  });
+
   it('closes on a click or tap outside it; a click inside the popover keeps it open', async () => {
     render(
       <div>
