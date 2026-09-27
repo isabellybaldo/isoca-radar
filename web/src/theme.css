@@ -214,13 +214,15 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .menu { position: relative; }
 .menu > summary { cursor: pointer; border: 2px solid var(--line); padding: 0 6px; background: var(--chip); list-style: none; }
 .menu > summary::-webkit-details-marker { display: none; }
+.menu > summary::before { content: '▸ '; }
+.menu[open] > summary::before { content: '▾ '; }
 .menu-body { position: absolute; z-index: 3; top: 110%; left: 0; background: var(--bar); border: 2px solid var(--line); padding: 6px 8px; display: grid; gap: 2px; white-space: nowrap; }
 .eptable tr.day th { font-family: var(--px); font-size: 8px; padding-top: 10px; color: var(--dim); border-bottom: 1px solid var(--line2); }
 .eptable .c-event { max-width: 0; width: 45%; }
 .eptable .c-event a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) {
   .eptable thead { display: none; }
-  .eptable tr.ep { display: grid; grid-template-columns: auto auto 1fr; grid-template-areas: 'time kind net' 'event event event' 's dur flags'; gap: 2px 8px; padding: 6px 0; border-bottom: 1px dashed var(--line2); }
+  .eptable tr.ep { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; grid-template-areas: 'time kind net net' 'event s dur flags'; gap: 2px 8px; padding: 6px 0; border-bottom: 1px dashed var(--line2); }
   .eptable tr.ep td { border: 0; padding: 0; }
   .eptable .c-time { grid-area: time; } .eptable .c-kind { grid-area: kind; } .eptable .c-net { grid-area: net; justify-self: end; }
   .eptable .c-event { grid-area: event; max-width: none; width: auto; min-width: 0; }
