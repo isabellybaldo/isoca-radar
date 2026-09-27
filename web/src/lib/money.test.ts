@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { formatDecimal, formatMoney, isZero, signOf } from './money';
+import { compareDecimal, formatDecimal, formatMoney, isZero, signOf } from './money';
 
 describe('formatMoney', () => {
   it('never formats money through a float', () => {
@@ -31,5 +31,16 @@ describe('formatMoney', () => {
     expect(formatDecimal(undefined)).toBe('—');
     expect([signOf('1'), signOf('-1'), signOf('0.000'), signOf(null)]).toEqual([1, -1, 0, 0]);
     expect(isZero('0.00')).toBe(true);
+  });
+});
+
+describe('compareDecimal', () => {
+  it('orders decimal strings exactly, without floats', () => {
+    expect(compareDecimal('0.4', '1.00')).toBe(-1);
+    expect(compareDecimal('1', '1.00')).toBe(0);
+    expect(compareDecimal('1.000001', '1')).toBe(1);
+    expect(compareDecimal('-2', '1')).toBe(-1);
+    expect(compareDecimal('-0.5', '-0.25')).toBe(-1);
+    expect(compareDecimal('12345678901234567.89', '12345678901234567.88')).toBe(1);
   });
 });

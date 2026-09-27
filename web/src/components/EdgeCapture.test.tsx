@@ -58,4 +58,16 @@ describe('EdgeCapture', () => {
     await new Promise((r) => setTimeout(r, 20)); // let the meta response land
     expect(screen.getByText('edge on the table').closest('tr')).not.toHaveClass('dim');
   });
+
+  it('shows capture rates as — with the reason while there is too little edge on the table', async () => {
+    const thin = edgeFixture({ win: '24h' });
+    thin.columns = thin.columns.map((r) => (r.label === 'edge on the table' ? { ...r, ours: '0.5' } : r));
+    mockApi({ '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [thin] }) });
+    renderBox();
+    const row = (await screen.findByText('capture rate, sp-idle')).closest('tr') as HTMLTableRowElement;
+    expect(row).toHaveTextContent('—');
+    expect(row).not.toHaveTextContent('3.2%');
+    expect(screen.getByText('sp-idle · 300 ms → —')).toBeInTheDocument();
+    expect(screen.getByText('thin: too little edge on the table yet')).toBeInTheDocument();
+  });
 });

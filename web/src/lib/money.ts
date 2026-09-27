@@ -43,3 +43,20 @@ export function formatDecimal(value: string | null | undefined): string {
   const [, minus, int, frac] = m;
   return `${minus && !isZero(value) ? '−' : ''}${groupThousands(int)}${frac ? `.${frac}` : ''}`;
 }
+
+/** Exact order of two decimal strings (-1, 0, 1), by string and BigInt math only. Not-a-decimal is 0. */
+export function compareDecimal(a: string, b: string): -1 | 0 | 1 {
+  const ma = DEC.exec(a.trim());
+  const mb = DEC.exec(b.trim());
+  if (!ma || !mb) return 0;
+  const fa = ma[3] ?? '';
+  const fb = mb[3] ?? '';
+  const n = Math.max(fa.length, fb.length);
+  const scaled = (m: RegExpExecArray, f: string) => {
+    const v = BigInt(`${m[2]}${f.padEnd(n, '0')}`);
+    return m[1] ? -v : v;
+  };
+  const x = scaled(ma, fa);
+  const y = scaled(mb, fb);
+  return x < y ? -1 : x > y ? 1 : 0;
+}

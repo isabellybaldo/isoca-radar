@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api/client';
 import { useApi } from '../api/useApi';
-import { updatedText } from '../lib/cards';
+import { updatedText, withThinEdge } from '../lib/cards';
 import { useNow, useTicker } from '../lib/hooks';
 import { Box } from './Box';
 import { CardView } from './CardView';
@@ -33,7 +33,7 @@ export function EdgeCapture() {
       <Loadable state={st} what="edge capture">
         {(d) => {
           const c = d.cards.find((x) => x.card === 'EDGE');
-          return c ? <CardView card={c} stale={stale} /> : <EmptyState text={EDGE_EMPTY} />;
+          return c ? <CardView card={withThinEdge(c)} stale={stale} /> : <EmptyState text={EDGE_EMPTY} />;
         }}
       </Loadable>
     </Box>

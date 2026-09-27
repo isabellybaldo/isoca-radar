@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cardFixture, CARD_NOW, edgeFixture } from '../test/fixtures';
-import { STALE_MS, computedText, fmtValue, shortHash, statusLabel, statusTone, teaserLine, updatedText, warmingText } from './cards';
+import {
+  STALE_MS, THIN_EDGE_REASON, THIN_EDGE_USD, computedText, fmtValue, shortHash, statusLabel, statusTone, teaserLine, updatedText,
+  warmingText, withThinEdge,
+} from './cards';
 import { isoDay } from './time';
 
 describe('card helpers', () => {
@@ -65,5 +68,32 @@ describe('computedText', () => {
     expect(computedText(CARD_NOW - 2 * 3_600_000, CARD_NOW)).toBe('computed 120 min ago');
     expect(computedText(CARD_NOW - 59_999, CARD_NOW)).toBe('computed 0 min ago');
     expect(computedText(CARD_NOW + 5_000, CARD_NOW)).toBe('computed 0 min ago');
+  });
+});
+
+describe('thin edge on the table', () => {
+  const onTable = (v: string | null) => {
+    const c = edgeFixture();
+    c.columns = c.columns.map((r) => (r.label === 'edge on the table' ? { ...r, ours: v } : r));
+    return c;
+  };
+
+  it('blanks every capture rate and says why when the edge on the table is under the threshold', () => {
+    expect(THIN_EDGE_USD).toBe('1.00');
+    const c = withThinEdge(onTable('0.99'));
+    expect(c.columns.find((r) => r.label === 'capture rate, sp-idle')?.ours).toBeNull();
+    expect(c.columns.find((r) => r.label === 'captured at sp-idle (145 ms)')?.ours).toBe('0.4');
+    expect(c.series.decay?.every((p) => p.rate_pct === null)).toBe(true);
+    expect(c.thin_reasons).toContain(THIN_EDGE_REASON);
+    expect(THIN_EDGE_REASON).toBe('too little edge on the table yet');
+  });
+
+  it('leaves the card alone at or above the threshold, or when nothing was measured', () => {
+    const at = onTable('1');
+    expect(withThinEdge(at)).toBe(at);
+    const none = onTable(null);
+    expect(withThinEdge(none)).toBe(none);
+    const g1 = cardFixture();
+    expect(withThinEdge(g1)).toBe(g1);
   });
 });
