@@ -69,7 +69,7 @@ services:
       - traefik.http.services.ct-web.loadbalancer.server.port=8080
 
   oauth2-proxy:
-    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0@sha256:786bed0f000c0f8a7b31619244ebab02406a8856a4faf3f5fb1df61fbd6c30ed
     profiles: ["web"]
     restart: unless-stopped
     read_only: true
