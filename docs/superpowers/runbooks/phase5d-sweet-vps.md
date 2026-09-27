@@ -79,6 +79,18 @@ plus tagging the current image `cute-trading/rust:<old-sha>` so `docker load` do
 `<none>`, plus `cp .env .env.bak-5d`). Also take the safety dump as in 5a §9, once the scanner is
 stopped in §5 below.
 
+**Clock and kernel, before the deploy.** Chrony was installed on 2026-09-27 after a host freeze
+left the clock 2 s behind. The same `apt` run left a kernel upgrade pending. Reboot first so
+capture is interrupted once, then confirm the clock and the containers:
+```bash
+sudo reboot
+# after it is back:
+chronyc tracking | grep -E 'System time|Last offset'     # System time: a few ms or less
+docker compose ps                                        # postgres/scanner/analyze/api/web up
+```
+Do not start §5 while `System time` is over about 250 ms. The scanner measures its host latency
+band in its first 10 minutes, and a skewed clock would put those minutes out of the band.
+
 ## 5. Stop the scanner and analyze, migrate 0007, start again (on the VPS)
 
 `scanner`, `analyze` and `migrate` live in `compose.yml` under the `core` profile, so every command
@@ -115,6 +127,13 @@ Expect the scanner and analyze lines 5a runbook §12 describes (no new-image sta
 `panicked`/`error` lines from `api` or `web`.
 
 ## 6. Post-deploy checks (on the VPS, then in the browser)
+
+**Clock offset is measured** (new in this deploy: the scanner samples CLOB `/time` every 7.3 s):
+```bash
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to_char(to_timestamp(minute_ms/1000) AT TIME ZONE 'UTC','HH24:MI'), clock_offset_ms, lag_p50_ms FROM health ORDER BY minute_ms DESC LIMIT 5"
+```
+Expect `clock_offset_ms` filled (not empty) and within ±250 ms on every row, and `lag_p50_ms`
+positive (about 75). The Health page shows the same offset, and the Radar keeps all its hearts.
 
 **(GO) Tags arrive**, within about 10 minutes of the first universe refresh:
 ```bash
@@ -201,6 +220,7 @@ image tags recorded in pre-flight; `docker compose --profile core stop analyze s
 - `GIT_SHA` (§2);
 - the §1 benchmark totals: `bench_sweet`'s tick ms and held KB, `bench_tick`'s totals at 30 and 90
   days;
+- chrony `System time` after the reboot (§4) and the first five `clock_offset_ms` values (§6);
 - the tag counts (§6, GO check);
 - the SWEET statuses per window (§6);
 - `keys-unchanged` (§6);
