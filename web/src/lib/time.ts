@@ -15,6 +15,12 @@ export function fmtLocal(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
+/** 1_790_001_900_000 → "05:25" (UTC hours:minutes, zero-padded). */
+export function fmtUtcHm(ms: number): string {
+  const s = new Date(ms).toISOString();
+  return s.slice(11, 16);
+}
+
 /** 4190 → "4.19 s"; 125000 → "2 min 5 s"; 7500000 → "2 h 5 min". Integer math only. */
 export function fmtDuration(ms: number): string {
   const t = Math.max(0, Math.floor(ms));

@@ -12,9 +12,11 @@ import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
 import { shortId } from '../lib/labels';
 import { formatDecimal, formatMoney, isZero } from '../lib/money';
-import { fmtUtcDateTime } from '../lib/time';
+import { fmtUtcDateTime, fmtUtcHm } from '../lib/time';
 
 export const PAPER_QUIP = "The naive strategy is doing great. Until 'Other' wins.";
+/** The flicker finding, in one line: P0 buys the basket, the flicker is gone before the fill, and it sells the pieces back at a loss. */
+export const PAPER_LOSS_QUIP = 'Paper losses, real lessons. At 145 ms the arbitrage is gone before we arrive; we pay the spread to leave.';
 export const PAPER_EMPTY = 'No paper trades yet. Nothing ventured, nothing lost.';
 export const NOTHING_AWAITING = 'Nothing awaiting resolution. Patience is free.';
 const TONES: Record<string, string> = { 'P0-converter': 'p0', 'P1-settlement': 'p1', 'P2-combo': 'p2', 'P3-naive': 'p3' };
@@ -76,6 +78,23 @@ const positionColumns: Column<Position>[] = [
 
 const CONTROL = 'P3-naive';
 
+/**
+ * The x-axis for the equity chart. The api always answers a fixed 24 h window (`windowFrom` ..
+ * `windowTo`), but a run may only have a few hours of marks in it; starting the axis at the window's
+ * nominal edge then squashes every line into the right-hand side. Starting it at the first mark
+ * actually seen fills the width instead, and the label says so rather than still claiming 24 h.
+ */
+export function equityAxis(
+  pointTimes: number[],
+  windowFrom: number,
+  windowTo: number,
+): { xMin: number; xMax: number; xLabels?: { left: string; right: string } } {
+  if (pointTimes.length === 0) return { xMin: windowFrom, xMax: windowTo };
+  const dataFrom = Math.min(...pointTimes);
+  if (dataFrom <= windowFrom) return { xMin: windowFrom, xMax: windowTo };
+  return { xMin: dataFrom, xMax: windowTo, xLabels: { left: `since ${fmtUtcHm(dataFrom)} UTC`, right: 'now' } };
+}
+
 function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
   const ids = accounts.map((a) => a.account_id);
   // Each result carries its own account: a render that still holds the previous scenario's answer
@@ -104,16 +123,23 @@ function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
             points: e.points.map((p) => ({ x: p.t_ms, y: Number(p.equity) })),
           }));
           const ext = extremes(all.flatMap(({ e }) => e.points.map((p) => p.equity)));
+          const axis = equityAxis(
+            all.flatMap(({ e }) => e.points.map((p) => p.t_ms)),
+            Math.min(...loaded.map(({ e }) => e.from_ms)),
+            Math.max(...loaded.map(({ e }) => e.to_ms)),
+          );
           return (
             <>
               <LineChart
                 label="equity per account"
-                xMin={Math.min(...loaded.map(({ e }) => e.from_ms))}
-                xMax={Math.max(...loaded.map(({ e }) => e.to_ms))}
+                xMin={axis.xMin}
+                xMax={axis.xMax}
+                xLabels={axis.xLabels}
                 series={series}
                 yLabels={ext ? { bottom: formatMoney(ext.min), top: formatMoney(ext.max) } : undefined}
               />
-              <p className="quip">{PAPER_QUIP}</p>
+              {hasControl && <p className="quip">{PAPER_QUIP}</p>}
+              <p className="quip">{PAPER_LOSS_QUIP}</p>
             </>
           );
         }}
@@ -132,14 +158,14 @@ function Cards({ accounts }: { accounts: PaperAccount[] }) {
             {!isZero(a.fee_bips) && ` · FEE ${a.fee_bips} BP`}
           </p>
           <p className="eq">
-            <Money value={a.equity ?? a.bankroll} />
+            <Money value={a.equity ?? a.bankroll} cents />
           </p>
           {a.marked_ms === null ? (
             <p className="dim">No marks yet. Nothing ventured, nothing lost.</p>
           ) : (
             <p>
-              realized <Money value={a.realized} signed tone /> · unrealized <Money value={a.unrealized} signed tone /> · locked{' '}
-              <Money value={a.locked} /> · max dd <Money value={a.max_drawdown} /> · {a.n_positions === null ? '—' : a.n_positions} open
+              realized <Money value={a.realized} signed tone cents /> · unrealized <Money value={a.unrealized} signed tone cents /> · locked{' '}
+              <Money value={a.locked} cents /> · max dd <Money value={a.max_drawdown} cents /> · {a.n_positions === null ? '—' : a.n_positions} open
             </p>
           )}
         </div>

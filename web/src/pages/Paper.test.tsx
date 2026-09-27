@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { accountFixture, edgeFixture, ledgerFixture, positionFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
-import { PAPER_EMPTY, PAPER_QUIP, Paper, extremes, policyLabel } from './Paper';
+import { PAPER_EMPTY, PAPER_LOSS_QUIP, PAPER_QUIP, Paper, equityAxis, extremes, policyLabel } from './Paper';
 
 const equityRoute = (url: URL) => ({
   account_id: url.searchParams.get('account'),
@@ -76,6 +76,7 @@ describe('Paper', () => {
     expect(screen.getByText('P0 converter')).toBeInTheDocument();
     expect(screen.getByText(PAPER_QUIP)).toBeInTheDocument();
     expect(PAPER_QUIP).toBe("The naive strategy is doing great. Until 'Other' wins.");
+    expect(screen.getByText(PAPER_LOSS_QUIP)).toBeInTheDocument();
     expect(screen.getByText('$1,002.56')).toBeInTheDocument();
     expect(screen.getByText('−$286.60')).toHaveClass('neg');
     expect(screen.getByText('Fed decision in October?')).toBeInTheDocument();
@@ -128,6 +129,8 @@ describe('Paper', () => {
     expect(await screen.findByText('Nothing to draw yet. The chart is patient.')).toBeInTheDocument();
     expect(screen.queryByText('P3 naive')).not.toBeInTheDocument();
     expect(await screen.findByText('Empty ledger. Nothing ventured, nothing lost.')).toBeInTheDocument();
+    expect(screen.queryByText(PAPER_QUIP)).not.toBeInTheDocument();
+    expect(screen.getByText(PAPER_LOSS_QUIP)).toBeInTheDocument();
   });
 
   it('names the outcome of each awaiting position by a short market id, not only the event', async () => {
@@ -172,6 +175,22 @@ describe('Paper', () => {
     expect(await screen.findByText('mark')).toBeInTheDocument();
     expect(ledgerUrls().at(-1)).not.toContain('hide_marks');
     expect(ledgerUrls().at(-1)).not.toContain('cursor');
+  });
+
+  it('starts the equity x-axis at the first real mark, so a partial window fills the chart width', () => {
+    const windowFrom = Date.UTC(2026, 8, 25, 0, 0, 0);
+    const windowTo = Date.UTC(2026, 8, 26, 0, 0, 0); // a 24 h window
+    const dataFrom = Date.UTC(2026, 8, 25, 21, 0, 0); // only the last 3 h have marks
+    expect(equityAxis([dataFrom, dataFrom + 3_600_000], windowFrom, windowTo)).toEqual({
+      xMin: dataFrom,
+      xMax: windowTo,
+      xLabels: { left: 'since 21:00 UTC', right: 'now' },
+    });
+  });
+
+  it('keeps the full window with no label when the data already spans it, or there is none yet', () => {
+    expect(equityAxis([0, 50, 100], 0, 100)).toEqual({ xMin: 0, xMax: 100 });
+    expect(equityAxis([], 0, 100)).toEqual({ xMin: 0, xMax: 100 });
   });
 
   it('can hide the P3 control line so its drawdown does not flatten the others', async () => {
