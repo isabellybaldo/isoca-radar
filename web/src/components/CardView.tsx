@@ -7,7 +7,7 @@ import { formatMoney, formatMoneyCents } from '../lib/money';
 import { fmtLocal, fmtUtcDateTime } from '../lib/time';
 import { CardChart } from './CardCharts';
 import { Fold } from './Fold';
-import { Help } from './Help';
+import { SubHead } from './SubHead';
 import { Tag } from './Tag';
 
 // EDGE sits inside the Edge capture box, whose own (?) explains the edge: its card (?) explains the status.
@@ -122,11 +122,9 @@ export function CardView({ card, stale = false, now }: { card: CardBody; stale?:
   const nowMs = now ?? ticking;
   return (
     <article className="cardv" aria-label={card.title}>
-      <div className="box-head">
-        <h3>{card.title}</h3>
-        <Tag tone={statusTone(card.status)}>{statusLabel(card.status)}</Tag>
-        <Help id={CARD_HELP[card.card] ?? 'status'} />
-      </div>
+      <SubHead help={CARD_HELP[card.card] ?? 'status'} right={<Tag tone={statusTone(card.status)}>{statusLabel(card.status)}</Tag>}>
+        {card.title}
+      </SubHead>
       {card.status === 'warming' && <p className="dim">{warmingText(card)}</p>}
       {card.status === 'under_review' && <p className="dim">{UNDER_REVIEW}</p>}
       <CardChart card={card} />
