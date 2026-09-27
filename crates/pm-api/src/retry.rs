@@ -9,21 +9,28 @@ use std::future::Future;
 use std::time::Duration;
 
 /// Attempt `op` up to `attempts` times. After a failed *retryable* attempt (see [`retryable`]),
-/// awaits `sleep` with `backoff[attempt - 1]` (1-based attempt, so the delay after the first
-/// failure is `backoff[0]`) before trying again; running out of `backoff` entries just skips the
-/// sleep. Gives up at once — no sleep — on a non-retryable error, or once `attempts` have been
-/// made, returning the last error either way.
-pub(crate) async fn with_retry<T, F, Fut, S, SFut>(
+/// calls `on_retry(attempt, &err, delay)` — `attempt` is 1-based (the attempt that just failed),
+/// `delay` is `backoff[attempt - 1]` — then awaits `sleep(delay)` before trying again; running out
+/// of `backoff` entries just skips both. `on_retry` is never called on a first-try success, on a
+/// non-retryable error (no retry happens at all), or on the final give-up (nothing is about to be
+/// retried). pm-api itself has no logging convention, so `on_retry` is the hook a caller (e.g. the
+/// scanner) uses to log a retry in its own style; it never sees the request itself, so it can't
+/// leak anything (like a pagination cursor) that isn't already in `ApiError`'s own `Display`.
+/// Gives up at once — no sleep, no hook call — on a non-retryable error, or once `attempts` have
+/// been made, returning the last error either way.
+pub(crate) async fn with_retry<T, F, Fut, S, SFut, H>(
     attempts: usize,
     backoff: &[Duration],
     mut op: F,
     mut sleep: S,
+    mut on_retry: H,
 ) -> Result<T, ApiError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, ApiError>>,
     S: FnMut(Duration) -> SFut,
     SFut: Future<Output = ()>,
+    H: FnMut(usize, &ApiError, Duration),
 {
     let mut attempt = 0usize;
     loop {
@@ -35,6 +42,7 @@ where
                     return Err(e);
                 }
                 if let Some(&d) = backoff.get(attempt - 1) {
+                    on_retry(attempt, &e, d);
                     sleep(d).await;
                 }
             }
@@ -122,6 +130,7 @@ mod tests {
                 }
             },
             sleep,
+            |_, _, _| {},
         )
         .await
         .unwrap();
@@ -142,6 +151,7 @@ mod tests {
                 Err(connect_refused_err().await)
             },
             sleep,
+            |_, _, _| {},
         )
         .await;
         assert!(matches!(r, Err(ApiError::Http(_))));
@@ -169,6 +179,7 @@ mod tests {
                 Err(ApiError::field("x", "not retryable"))
             },
             sleep,
+            |_, _, _| {},
         )
         .await;
         assert!(matches!(r, Err(ApiError::Field { .. })));
@@ -255,5 +266,55 @@ mod tests {
             .unwrap_err()
             .into();
         assert!(!retryable(&e));
+    }
+
+    #[tokio::test]
+    async fn on_retry_sees_each_failed_attempt_and_its_backoff() {
+        let calls = AtomicUsize::new(0);
+        let (sleep, _seen) = recording_sleep();
+        let hook_seen = Arc::new(Mutex::new(Vec::new()));
+        let hs = hook_seen.clone();
+        let r: Result<(), ApiError> = with_retry(
+            4,
+            &BACKOFF,
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(connect_refused_err().await)
+            },
+            sleep,
+            |attempt, e, delay| hs.lock().unwrap().push((attempt, retryable(e), delay)),
+        )
+        .await;
+        assert!(r.is_err());
+        let seen = hook_seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                (1, true, Duration::from_secs(2)),
+                (2, true, Duration::from_secs(5)),
+                (3, true, Duration::from_secs(10)),
+            ],
+            "the hook fires once per retried attempt, with that attempt's backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_retry_is_never_called_on_a_first_try_success() {
+        let (sleep, _seen) = recording_sleep();
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let hc = hook_calls.clone();
+        let out = with_retry(
+            4,
+            &BACKOFF,
+            || async { Ok::<_, ApiError>(7) },
+            sleep,
+            move |_, _, _| {
+                hc.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, 7);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
     }
 }

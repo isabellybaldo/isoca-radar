@@ -10,16 +10,25 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
-/// At most 4 attempts per page (the first try plus 3 retries).
-const PAGE_ATTEMPTS: usize = 4;
+/// At most 4 attempts per page (the first try plus 3 retries). Public so a caller that wants to
+/// log a retry (via [`GammaClient::with_retry_sink`]) can render "k/N" without duplicating it.
+pub const PAGE_ATTEMPTS: usize = 4;
 /// Backoff between attempts: 2 s, 5 s, then 10 s.
 const PAGE_BACKOFF: [Duration; 3] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
     Duration::from_secs(10),
 ];
+
+/// Reports one failed-but-retried page attempt: `(attempt that failed, 1-based; the error; how
+/// long before the next attempt)`. Mirrors `RttSink` in `http.rs` — pm-api has no logging
+/// convention of its own, so this is how a caller (the scanner) can log a retry in its own style.
+/// Never carries the request itself, so it can't leak anything (like a pagination cursor) beyond
+/// what's already in `ApiError`'s own `Display`.
+pub type RetrySink = Arc<dyn Fn(usize, &ApiError, Duration) + Send + Sync>;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,6 +343,7 @@ where
 pub struct GammaClient {
     http: reqwest::Client,
     base: String,
+    retry_sink: Option<RetrySink>,
 }
 
 impl GammaClient {
@@ -341,7 +351,15 @@ impl GammaClient {
         Ok(Self {
             http: crate::http::http_client(crate::http::GAMMA_TIMEOUT)?,
             base: GAMMA_BASE.to_string(),
+            retry_sink: None,
         })
+    }
+
+    /// Report every page retry to `sink` (e.g. so the scanner can log it in its own style; pm-api
+    /// itself has no logging convention). Mirrors `ClobClient::with_rtt`.
+    pub fn with_retry_sink(mut self, sink: RetrySink) -> Self {
+        self.retry_sink = Some(sink);
+        self
     }
 
     /// One page of active, open events (≤ 100). The cursor parameter is exactly `after_cursor`.
@@ -357,11 +375,17 @@ impl GammaClient {
         if let Some(c) = cursor {
             query.push(("after_cursor", c));
         }
+        let sink = self.retry_sink.clone();
         with_retry(
             PAGE_ATTEMPTS,
             &PAGE_BACKOFF,
             || self.fetch_page(&query),
             tokio::time::sleep,
+            move |attempt, err, delay| {
+                if let Some(s) = &sink {
+                    s(attempt, err, delay);
+                }
+            },
         )
         .await
     }
@@ -454,10 +478,11 @@ mod page_retry_tests {
         GammaClient {
             http: reqwest::Client::builder().build().unwrap(),
             base,
+            retry_sink: None,
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn page_retries_a_retryable_failure_then_succeeds() {
         let hits = Arc::new(AtomicUsize::new(0));
         let base = serve(&[503, 200], hits.clone()).await;
