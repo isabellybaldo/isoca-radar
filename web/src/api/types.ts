@@ -232,12 +232,61 @@ export interface DecayPoint {
   rate_pct: Dec | null;
   headline: boolean;
 }
+export type SweetLabel = 'candidate' | 'negative' | 'inconclusive' | 'thin' | 'not_tested' | 'dead_on_paper';
+export interface SweetRow {
+  side: 'yes' | 'no';
+  scenario: string;
+  fee_bips: number;
+  latency_ms: number | null;
+  dimension: 'all' | 'category' | 'days' | 's' | 'hour';
+  bucket: string;
+  label: SweetLabel;
+  few_trades: boolean;
+  n_exec: number;
+  n_filled: number;
+  n_missed: number;
+  clusters: number;
+  n_attempts: number;
+  skipped: Record<string, number>;
+  episodes: number;
+  flagged: number;
+  on_table: Dec;
+  on_table_eligible: Dec;
+  captured: Dec;
+  captured_leftover0: Dec;
+  mean_leftover0: Dec | null;
+  mean: Dec | null;
+  lo: Dec | null;
+  hi: Dec | null;
+  eff_n: Dec | null;
+  cost: Dec;
+  annualized: Dec | null;
+  annualized_lo: Dec | null;
+  annualized_upper: Dec | null;
+  leftover_unpriced: number;
+  pooled: number;
+}
+export interface SweetFee {
+  fee_bips: number;
+  captured: Dec;
+  mean: Dec | null;
+  label: SweetLabel;
+}
+export interface SweetSeries {
+  rows: SweetRow[];
+  m: number;
+  z: Dec;
+  category_available: boolean;
+  hurdle: Dec | null;
+  fees: SweetFee[];
+}
 export interface CardSeries {
   bars?: { label: string; value: number }[];
   curves?: { label: string; points: { t_ms: number; s: Dec }[]; median_ms: Dec | null }[];
   bins?: { side: string; lo_bps: number; hi_bps: number | null; net: number; gross: number }[];
   decay?: DecayPoint[];
   measured?: { latency_ms: number; host: string };
+  sweet?: SweetSeries;
 }
 export interface CardBody {
   card: string;

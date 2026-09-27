@@ -3,6 +3,7 @@
 //! integers.
 use crate::cells::CellData;
 use crate::hour_of;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -97,6 +98,8 @@ pub struct Series {
     pub decay: Vec<DecayPoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured: Option<Measured>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweet: Option<crate::sweet::SweetSeries>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,12 +144,14 @@ pub struct BodyCtx<'a> {
     pub since_ms: Option<i64>,
     pub computed_ms: i64,
     pub scenarios: &'a [ScenarioLat],
+    /// P1's min_annualized from policies.toml (SWEET's YES hurdle); None: unknown.
+    pub hurdle: Option<Decimal>,
 }
 
 /// A cell family that renders cards from a window's merged cell.
 pub trait Card: CellData {
-    /// The cards' window-independent parts. Must read from `ctx` only `premise_key` and
-    /// `scenarios` (the same for every window of a key).
+    /// The cards' window-independent parts. Must read from `ctx` only `premise_key`, `scenarios`
+    /// and `hurdle` (the same for every window of a key).
     fn parts(agg: &Self, max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<Parts>;
 
     fn bodies(agg: &Self, max: &Self::Max, ctx: &BodyCtx<'_>) -> Vec<CardBody> {

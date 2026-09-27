@@ -16,7 +16,8 @@ mod universe;
 pub use batch::{Listener, Table};
 pub use card_io::{
     CARD_TABLES, CardCellRow, CardEpisode, CardResultRow, ChangedSpan, LatencyMinute,
-    MAX_CARD_EPISODES, MAX_CHANGED_PAGE, MarkPoint, PremiseRun,
+    MAX_CARD_EPISODES, MAX_CHANGED_PAGE, MAX_SWEET_ROWS, MarkPoint, PremiseRun, SweetAccount,
+    SweetEpisodeRow, SweetIntentRow, SweetLedgerRow, SweetMidRow,
 };
 pub use error::StoreError;
 pub use read::{

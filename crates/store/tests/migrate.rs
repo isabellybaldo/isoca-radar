@@ -139,3 +139,47 @@ async fn episodes_and_health_have_the_new_columns() {
         .expect("health RTT columns");
     db.drop(store).await;
 }
+
+#[tokio::test]
+async fn migration_0007_adds_tags_and_lets_analyze_rw_read_the_sweet_inputs() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let rw = db.role("analyze_rw").await;
+    // the six new reads succeed (same probe style as the 0006 role test, one per table)
+    for t in [
+        "events",
+        "episode_legs",
+        "paper_intents",
+        "paper_execs",
+        "paper_ledger",
+        "paper_markouts",
+    ] {
+        probe_select(&rw, t)
+            .await
+            .unwrap_or_else(|e| panic!("analyze_rw reads {t}: {e}"));
+    }
+    // the tags column exists: selecting it is not an error
+    probe_select_column(&rw, "events", "tags")
+        .await
+        .expect("events.tags exists");
+    // still no write outside the card tables
+    assert!(rw.role_writes_outside_cards().await.unwrap().is_empty());
+    db.drop(owner).await;
+}
+
+async fn probe_select(store: &store::Store, table: &str) -> Result<(), store::StoreError> {
+    store
+        .raw_exec(&format!("SELECT 1 FROM {table} LIMIT 1"))
+        .await
+}
+
+async fn probe_select_column(
+    store: &store::Store,
+    table: &str,
+    column: &str,
+) -> Result<(), store::StoreError> {
+    store
+        .raw_exec(&format!("SELECT {column} FROM {table} LIMIT 1"))
+        .await
+}

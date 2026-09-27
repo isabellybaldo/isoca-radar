@@ -96,6 +96,139 @@ async fn write(store: &Store, rows: Vec<EpisodeRow>) {
         .unwrap();
 }
 
+fn leg_row(episode: &str, leg_idx: i32, in_s: bool) -> EpisodeLegRow {
+    EpisodeLegRow {
+        episode_id: episode.into(),
+        leg_idx,
+        market_id: format!("leg{leg_idx}"),
+        token: format!("tok{leg_idx}"),
+        action: "buy_no".into(),
+        best_price: Some(dec!(0.5)),
+        vwap: Some(dec!(0.5)),
+        levels: 1,
+        size_at_best: Some(dec!(10)),
+        filled: dec!(10),
+        notional: dec!(5),
+        fees: dec!(0),
+        in_s,
+        fee_rate: dec!(0.07),
+        fee_exponent: 1,
+    }
+}
+
+fn acct(
+    run_id: i64,
+    account_id: &str,
+    policy: &str,
+    scenario: &str,
+    fee_bips: rust_decimal::Decimal,
+) -> PaperAccountRow {
+    PaperAccountRow {
+        run_id,
+        account_id: account_id.into(),
+        policy: policy.into(),
+        scenario: scenario.into(),
+        fee_bips,
+        bankroll: dec!(1000),
+        per_trade: dec!(100),
+        policies_sha256: "ab".repeat(32),
+    }
+}
+
+fn intent(
+    run_id: i64,
+    account_id: &str,
+    episode_id: &str,
+    skip_reason: Option<&str>,
+    exec_ms: Option<i64>,
+) -> PaperIntentRow {
+    PaperIntentRow {
+        run_id,
+        account_id: account_id.into(),
+        episode_id: episode_id.into(),
+        decided_ms: 0,
+        exec_ms,
+        skip_reason: skip_reason.map(str::to_string),
+        q_target: None,
+        detected_q: None,
+        detected_pnl: None,
+        reserve: None,
+    }
+}
+
+fn exec(
+    run_id: i64,
+    account_id: &str,
+    episode_id: &str,
+    exec_ms: i64,
+    q_eff: rust_decimal::Decimal,
+) -> PaperExecRow {
+    PaperExecRow {
+        run_id,
+        account_id: account_id.into(),
+        episode_id: episode_id.into(),
+        exec_ms,
+        q_eff,
+        leg_risk_qty: dec!(0),
+        pnl_at_tx: None,
+        hit: true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ledger(
+    run_id: i64,
+    account_id: &str,
+    seq: i64,
+    kind: &str,
+    episode_id: Option<&str>,
+    leg: Option<(&str, &str)>,
+    qty: rust_decimal::Decimal,
+    cash_delta: rust_decimal::Decimal,
+) -> PaperLedgerRow {
+    PaperLedgerRow {
+        run_id,
+        account_id: account_id.into(),
+        seq,
+        t_ms: 0,
+        kind: kind.into(),
+        episode_id: episode_id.map(str::to_string),
+        market_id: leg.map(|(m, _)| m.to_string()),
+        yes_token: None,
+        outcome: leg.map(|(_, o)| o.to_string()),
+        qty,
+        price: None,
+        cash_delta,
+        fees: dec!(0),
+        realized_delta: dec!(0),
+        cash_after: dec!(0),
+        equity: None,
+    }
+}
+
+fn markout(
+    run_id: i64,
+    account_id: &str,
+    episode_id: &str,
+    market_id: &str,
+    outcome: &str,
+    offset_ms: i64,
+    mid: rust_decimal::Decimal,
+) -> PaperMarkoutRow {
+    PaperMarkoutRow {
+        run_id,
+        account_id: account_id.into(),
+        episode_id: episode_id.into(),
+        market_id: market_id.into(),
+        yes_token: "tok".into(),
+        outcome: outcome.into(),
+        fill_vwap: dec!(0.5),
+        offset_ms,
+        mid: Some(mid),
+        markout: None,
+    }
+}
+
 async fn rw(db: &common::TestDb) -> Store {
     Store::connect_analyze(db.opts.clone(), 2, 10_000, Some("analyze_rw"))
         .await
@@ -529,6 +662,162 @@ async fn card_cells_results_and_meta_round_trip_and_the_api_reads_them() {
     api.close().await;
     analyze.close().await;
     db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn sweet_reads_return_one_hours_attempts_and_nothing_else() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let run = run_at(&owner, "live", 0).await;
+    let t = 10 * H;
+    let mut inside = ep("in", run, "no_basket", t + 60_000, Some(t + 70_000));
+    inside.event_id = "ev-in".into();
+    inside.days_to_end = Some(dec!(3.5));
+    let outside = ep("out", run, "no_basket", t + H + 5, Some(t + H + 10));
+    let p0 = "P0-converter/sp-idle";
+    owner
+        .write_batch(&Batch {
+            episodes: vec![
+                EpisodeWrite {
+                    row: inside,
+                    legs: vec![
+                        leg_row("in", 0, true),
+                        leg_row("in", 1, true),
+                        leg_row("in", 2, false),
+                    ],
+                },
+                EpisodeWrite {
+                    row: outside,
+                    legs: vec![],
+                },
+            ],
+            paper_accounts: vec![
+                acct(run, p0, "P0-converter", "sp-idle", dec!(0)),
+                acct(
+                    run,
+                    "P0-converter/sp-idle/fee10",
+                    "P0-converter",
+                    "sp-idle",
+                    dec!(10),
+                ),
+                acct(
+                    run,
+                    "P0-converter/sp-idle/fee50",
+                    "P0-converter",
+                    "sp-idle",
+                    dec!(50),
+                ),
+                acct(
+                    run,
+                    "P1-settlement/sp-idle",
+                    "P1-settlement",
+                    "sp-idle",
+                    dec!(0),
+                ),
+                acct(run, "P2-combo/sp-idle", "P2-combo", "sp-idle", dec!(0)),
+                acct(run, "P3-naive/sp-idle", "P3-naive", "sp-idle", dec!(0)),
+            ],
+            paper_intents: vec![
+                intent(run, p0, "in", None, Some(t + 60_300)),
+                intent(run, "P1-settlement/sp-idle", "in", Some("too_long"), None),
+                intent(run, p0, "out", None, Some(t + H + 300)),
+            ],
+            paper_execs: vec![exec(run, p0, "in", t + 60_300, dec!(10))],
+            paper_ledger: vec![
+                ledger(
+                    run,
+                    p0,
+                    1,
+                    "buy",
+                    Some("in"),
+                    Some(("m0", "no")),
+                    dec!(10),
+                    dec!(-4.0),
+                ),
+                ledger(
+                    run,
+                    p0,
+                    2,
+                    "buy",
+                    Some("in"),
+                    Some(("m1", "no")),
+                    dec!(10),
+                    dec!(-5.1),
+                ),
+                ledger(run, p0, 3, "convert", Some("in"), None, dec!(10), dec!(10)),
+                ledger(
+                    run,
+                    p0,
+                    4,
+                    "settle",
+                    None,
+                    Some(("m2", "yes")),
+                    dec!(10),
+                    dec!(0),
+                ),
+                ledger(run, p0, 5, "mark", None, None, dec!(0), dec!(0)),
+            ],
+            paper_markouts: vec![
+                markout(run, p0, "in", "m0", "no", 1_000, dec!(0.41)),
+                markout(run, p0, "in", "m0", "no", 30_000, dec!(0.39)),
+            ],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    owner
+        .upsert_universe(
+            &[EventRow {
+                event_id: "ev-in".into(),
+                slug: None,
+                title: None,
+                neg_risk_market_id: None,
+                augmented: false,
+                n_legs: 3,
+                tags: Some(vec!["politics".into()]),
+            }],
+            &[],
+            0,
+        )
+        .await
+        .unwrap();
+    let rw = rw(&db).await;
+    let accts = rw.sweet_accounts().await.unwrap();
+    let ids: Vec<&str> = accts.iter().map(|a| a.account_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            p0,
+            "P0-converter/sp-idle/fee10",
+            "P0-converter/sp-idle/fee50",
+            "P1-settlement/sp-idle"
+        ],
+        "fee 50 is included (P0 at 0/10/50); P2-combo and P3-naive are never SWEET accounts"
+    );
+    let all: Vec<String> = accts.iter().map(|a| a.account_id.clone()).collect();
+    let eps = rw.sweet_episodes(&[run], t, t + H).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(
+        (eps[0].s_legs, eps[0].days_to_end, eps[0].tags.clone()),
+        (2, Some(dec!(3.5)), Some(vec!["politics".to_string()]))
+    );
+    let ints = rw.sweet_intents(&[run], &all, t, t + H).await.unwrap();
+    assert_eq!(ints.len(), 2);
+    let a = ints.iter().find(|i| i.account_id == p0).unwrap();
+    assert_eq!((a.exec_ms, a.q_eff), (Some(t + 60_300), Some(dec!(10))));
+    let led = rw.sweet_ledger(&[run], &all, t, t + H).await.unwrap();
+    assert_eq!(
+        led.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(),
+        vec!["buy", "buy", "convert"]
+    );
+    let mids = rw.sweet_mids(&[run], &all, t, t + H, 30_000).await.unwrap();
+    assert_eq!(
+        mids.iter().map(|m| m.mid).collect::<Vec<_>>(),
+        vec![Some(dec!(0.39))]
+    );
+    db.drop(rw).await;
+    owner.close().await;
 }
 
 #[tokio::test]

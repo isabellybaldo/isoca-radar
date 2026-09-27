@@ -10,6 +10,7 @@ pub mod family;
 pub mod gebele;
 pub mod papers;
 pub mod stats;
+pub mod sweet;
 pub mod window;
 
 pub const HOUR_MS: i64 = 3_600_000;

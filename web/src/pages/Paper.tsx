@@ -9,6 +9,7 @@ import { EmptyState } from '../components/EmptyState';
 import { LineChart, type Series } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
+import { SweetSpots } from '../components/SweetSpots';
 import { Table, type Column } from '../components/Table';
 import { shortId } from '../lib/labels';
 import { formatDecimal, formatMoney, isZero } from '../lib/money';
@@ -287,6 +288,7 @@ export function Paper() {
   return (
     <>
       <EdgeCapture />
+      <SweetSpots />
       <Loadable state={accounts} what="paper accounts">
         {(d) =>
           d.items.length === 0 ? (

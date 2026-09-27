@@ -21,6 +21,15 @@ async fn real_main() -> anyhow::Result<()> {
     analyze::guard::check_env()?;
     let cfg = Config::from_env()?;
     let scenarios = analyze::scenarios::load(&cfg.policies_path)?;
+    let p1 = analyze::scenarios::p1(&cfg.policies_path)?;
+    if p1.max_days_to_end != rust_decimal::Decimal::from(cards::sweet::P1_MAX_DAYS) {
+        eprintln!(
+            "analyze: policies.toml p1.max_days_to_end is {}, SWEET's days bucket closes at {}: YES days rows will not line up with P1",
+            p1.max_days_to_end,
+            cards::sweet::P1_MAX_DAYS
+        );
+    }
+    let hurdle = Some(p1.min_annualized);
     let opts = Store::options(&cfg.database_url)?;
     eprintln!(
         "analyze: every {} s (writes card tables only, paper only)",
@@ -37,7 +46,7 @@ async fn real_main() -> anyhow::Result<()> {
             _ = every.tick() => {}
         }
         if running.is_none() {
-            match start(&cfg, opts.clone(), &scenarios).await? {
+            match start(&cfg, opts.clone(), &scenarios, hurdle).await? {
                 Ok(started) => running = Some(started),
                 Err(e) => {
                     eprintln!("analyze: start failed, retrying next tick: {e:#}");
@@ -73,6 +82,7 @@ async fn start(
     cfg: &Config,
     opts: PgConnectOptions,
     scenarios: &[ScenarioLat],
+    hurdle: Option<rust_decimal::Decimal>,
 ) -> anyhow::Result<anyhow::Result<(Store, Analyzer)>> {
     let store = match Store::connect_analyze(opts, 2, cfg.statement_timeout_ms, None).await {
         Ok(s) => s,
@@ -90,11 +100,13 @@ async fn start(
         return Err(refusal);
     }
     let pause = Duration::from_millis(cfg.catchup_pause_ms);
-    let loaded =
-        match Analyzer::new(store.clone(), pause, analyze::version(), scenarios.to_vec()).await {
-            Ok(a) => a.write_static_meta().await.map(|()| a),
-            Err(e) => Err(e),
-        };
+    let loaded = match Analyzer::new(store.clone(), pause, analyze::version(), scenarios.to_vec())
+        .await
+        .map(|a| a.with_hurdle(hurdle))
+    {
+        Ok(a) => a.write_static_meta().await.map(|()| a),
+        Err(e) => Err(e),
+    };
     match loaded {
         Ok(a) => Ok(Ok((store, a))),
         Err(e) => {

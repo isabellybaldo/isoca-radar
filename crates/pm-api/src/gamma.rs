@@ -56,6 +56,10 @@ pub struct GammaEvent {
     #[serde(rename = "negRiskMarketID")]
     pub neg_risk_market_id: Option<String>,
     pub markets: Option<Vec<GammaMarket>>,
+    /// Gamma's event tags (spec 5d §3). Anything malformed reads as None: tags are metadata, never
+    /// a reason to drop an event.
+    #[serde(default, deserialize_with = "lenient_tags")]
+    pub tags: Option<Vec<GammaTag>>,
 }
 
 impl GammaEvent {
@@ -68,6 +72,53 @@ impl GammaEvent {
     pub fn markets(&self) -> &[GammaMarket] {
         self.markets.as_deref().unwrap_or(&[])
     }
+
+    /// Lower-cased, trimmed, non-empty, deduplicated slugs in Gamma's order, at most MAX_TAGS.
+    pub fn tag_slugs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for t in self.tags.as_deref().unwrap_or(&[]) {
+            let Some(s) = t.slug.as_deref().map(|s| s.trim().to_lowercase()) else {
+                continue;
+            };
+            if s.is_empty() || out.contains(&s) {
+                continue;
+            }
+            out.push(s);
+            if out.len() == MAX_TAGS {
+                break;
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct GammaTag {
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub slug: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub label: Option<String>,
+}
+
+/// Max tags kept per event (spec 5d §3).
+pub const MAX_TAGS: usize = 16;
+
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_str().map(str::to_string))
+}
+
+fn lenient_tags<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<GammaTag>>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let Some(items) = v.as_array() else {
+        return Ok(None);
+    };
+    Ok(Some(
+        items
+            .iter()
+            .filter_map(|i| serde_json::from_value::<GammaTag>(i.clone()).ok())
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize)]

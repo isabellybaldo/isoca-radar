@@ -2,6 +2,7 @@
 use cards::HOUR_MS as H;
 use cards::cells::*;
 use cards::edge::EdgeCell;
+use cards::sweet::SweetInput;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -38,6 +39,7 @@ fn input(hour: i64, eps: &[Ep]) -> HourInput<'_> {
         episodes: eps,
         latency_ms: &[],
         equity_deltas: &[],
+        sweet: SweetInput::default(),
     }
 }
 
@@ -237,6 +239,7 @@ fn edge_cell_is_merge_exact_on_every_summed_field() {
         episodes: &eps,
         latency_ms: &[150, 200],
         equity_deltas: &[("sp-idle".to_string(), dec!(1.5))],
+        sweet: SweetInput::default(),
     };
     let e = EdgeCell::build(&input);
     let mut sum = EdgeCell::default();

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, isZero, signOf } from './money';
+import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, formatPercent, isZero, signOf } from './money';
 
 describe('formatMoney', () => {
   it('never formats money through a float', () => {
@@ -47,6 +47,23 @@ describe('formatMoneyCents', () => {
     expect(formatMoneyCents('0.41', { signed: true })).toBe('+$0.41');
     expect(formatMoneyCents('-0.001', { signed: true })).toBe('$0.00');
     expect(formatMoneyCents('999.995')).toBe('$1,000.00');
+  });
+});
+
+describe('formatPercent', () => {
+  it('shifts a fraction to a percent without a float, and shows null as not measured', () => {
+    const spies = [
+      vi.spyOn(Number.prototype, 'toFixed'),
+      vi.spyOn(globalThis, 'parseFloat'),
+      vi.spyOn(Math, 'round'),
+    ];
+    expect(formatPercent('0.12')).toBe('12%');
+    expect(formatPercent('1')).toBe('100%');
+    expect(formatPercent('0.005')).toBe('0.5%');
+    expect(formatPercent('-0.1')).toBe('−10%');
+    expect(formatPercent('0')).toBe('0%');
+    expect(formatPercent(null)).toBe('—');
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
   });
 });
 

@@ -17,6 +17,10 @@ use cards::edge::EdgeCell;
 use cards::family::{
     Family, LONG_WINDOWS, RunPremises, RunSpan, contiguous, current_key, hours_between,
 };
+use cards::sweet::{
+    self, Attempt, Line, LineKind, MARKOUT_MS, SweetCell, SweetEp, SweetInput, classify_intent,
+    row_scenario,
+};
 use cards::window::SPANS;
 use cards::{DAY_MS, HOUR_MS, hour_of};
 use rust_decimal::Decimal;
@@ -48,10 +52,33 @@ pub struct Analyzer {
     dur: Family<DurCell>,
     g4: Family<G4Cell>,
     edge: Family<EdgeCell>,
+    sweet: Family<SweetCell>,
     cursor: Option<i64>,
     last_hour: Option<i64>,
     /// When the last successful tick ran (for late paper marks and health rows).
     last_tick_ms: Option<i64>,
+    /// P1's min_annualized (SWEET's YES hurdle); main sets it from policies.toml.
+    hurdle: Option<Decimal>,
+}
+
+/// SWEET's accounts, rebuilt each tick: account id → (side, row scenario), and every row scenario.
+#[derive(Debug, Clone, Default)]
+struct SweetAccounts {
+    by_account: BTreeMap<String, (Side, String)>,
+    scenarios: Vec<(Side, String)>,
+}
+
+async fn sweet_accounts(store: &Store) -> anyhow::Result<SweetAccounts> {
+    let mut out = SweetAccounts::default();
+    for a in store.sweet_accounts().await? {
+        if let Some(v) = row_scenario(&a.policy, &a.scenario, a.fee_bips) {
+            if !out.scenarios.contains(&v) {
+                out.scenarios.push(v.clone());
+            }
+            out.by_account.insert(a.account_id, v);
+        }
+    }
+    Ok(out)
 }
 
 /// The newest live run's P0 accounts: its run and each account's starting bankroll.
@@ -74,6 +101,9 @@ struct Env<'a> {
     bankrolls: &'a Bankrolls,
     runs: &'a [RunPremises],
     changed: &'a [ChangedSpan],
+    /// P1's min_annualized (SWEET's YES hurdle).
+    hurdle: Option<Decimal>,
+    sweet: &'a SweetAccounts,
 }
 
 impl Analyzer {
@@ -87,6 +117,15 @@ impl Analyzer {
             Some(text) => serde_json::from_str::<serde_json::Value>(&text)?["updated_ms"].as_i64(),
             None => None,
         };
+        // Fix round 1 (spec §9): seed from the last tick's own record, so a restart right after a
+        // tick that saw a SWEET attempt in flight still rebuilds that attempt's hour once it
+        // lands, instead of only looking back LATE_MS from *this* process's first tick.
+        let last_tick_ms = match store.card_meta_get("tick").await? {
+            Some(text) => {
+                serde_json::from_str::<serde_json::Value>(&text)?["last_tick_ms"].as_i64()
+            }
+            None => None,
+        };
         Ok(Self {
             store,
             pause,
@@ -96,10 +135,18 @@ impl Analyzer {
             dur: Family::new(0),
             g4: Family::new(0),
             edge: Family::new(0),
+            sweet: Family::new(0),
             cursor,
             last_hour: None,
-            last_tick_ms: None,
+            last_tick_ms,
+            hurdle: None,
         })
+    }
+
+    /// P1's min_annualized (SWEET's YES hurdle); main sets it from policies.toml.
+    pub fn with_hurdle(mut self, hurdle: Option<Decimal>) -> Self {
+        self.hurdle = hurdle;
+        self
     }
 
     /// Forget the in-memory windows: the next tick reloads them from card_cells.
@@ -108,6 +155,7 @@ impl Analyzer {
         self.dur = Family::new(0);
         self.g4 = Family::new(0);
         self.edge = Family::new(0);
+        self.sweet = Family::new(0);
         self.last_hour = None;
     }
 
@@ -189,6 +237,7 @@ impl Analyzer {
                 .map(|a| (a.account_id, a.bankroll))
                 .collect(),
         };
+        let sweet_accts = sweet_accounts(&self.store).await?;
         let env = Env {
             store: &self.store,
             now_ms,
@@ -202,6 +251,8 @@ impl Analyzer {
             bankrolls: &bankrolls,
             runs: &runs,
             changed: &changed,
+            hurdle: self.hurdle,
+            sweet: &sweet_accts,
         };
         let mut results = Vec::new();
         let mut meta = Vec::new();
@@ -210,6 +261,7 @@ impl Analyzer {
         sync(&env, &mut self.dur, &mut results, &mut meta, &mut report).await?;
         sync(&env, &mut self.g4, &mut results, &mut meta, &mut report).await?;
         sync(&env, &mut self.edge, &mut results, &mut meta, &mut report).await?;
+        sync(&env, &mut self.sweet, &mut results, &mut meta, &mut report).await?;
         report.ms = started.elapsed().as_millis();
         meta.push((
             "tick".to_string(),
@@ -239,6 +291,9 @@ async fn sync<C: Card>(
         fam.key = None; // no run recorded these premises yet: no result row (the page says so)
         return Ok(());
     };
+    // SWEET's card-side parameters version the key too (spec §6); empty for every 5a family, so
+    // their keys are unchanged.
+    let key = format!("{key}{}", C::key_suffix());
     let matched: BTreeMap<i64, RunSpan> = matched.into_iter().map(|r| (r.run_id, r)).collect();
     let mut dirty: BTreeSet<i64> = BTreeSet::new();
     if fam.key.as_deref() != Some(key.as_str()) {
@@ -281,6 +336,13 @@ async fn sync<C: Card>(
     dirty.insert(env.now_hour);
     if let Some(last) = env.last_hour.filter(|l| *l < env.now_hour) {
         dirty.extend(hours_between(last, env.now_hour));
+    }
+    // SWEET: an attempt still in flight at the last tick may belong to an hour no rule above
+    // re-dirties (its episode closed before the tick): rebuild every hour touched by
+    // [last tick − LATE_MS, now] (Phase 5d spec §6).
+    if C::LATE_MS > 0 {
+        let from = env.last_tick_ms.unwrap_or(env.now_ms).min(env.now_ms) - C::LATE_MS;
+        dirty.extend(hours_between(from, env.now_ms));
     }
     // paper marks and health rows have no updated_ms cursor, and a row stamped late in the hour
     // that just closed may commit after its rebuild: rebuild that hour again while within the
@@ -625,6 +687,11 @@ async fn build_hours<C: CellData>(
     } else {
         (Latency::new(), Deltas::new())
     };
+    let (seps, satts) = if C::SWEET_INPUTS {
+        sweet_inputs(env, &run_ids, from, to).await?
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let (no_lat, no_deltas): (Vec<i64>, Vec<(String, Decimal)>) = (Vec::new(), Vec::new());
     Ok(hours
         .iter()
@@ -634,10 +701,110 @@ async fn build_hours<C: CellData>(
                 episodes: &eps,
                 latency_ms: lat.get(h).map_or(&no_lat[..], |v| &v[..]),
                 equity_deltas: deltas.get(h).map_or(&no_deltas[..], |v| &v[..]),
+                sweet: SweetInput {
+                    now_ms: env.now_ms,
+                    eps: &seps,
+                    attempts: &satts,
+                    scenarios: &env.sweet.scenarios,
+                },
             };
             (*h, C::build(&inp))
         })
         .collect())
+}
+
+type AttemptKey = (i64, String, String);
+
+/// SWEET's inputs for [from, to): the episodes opened there and every attempt of SWEET's accounts
+/// on them, with its own ledger rows and 30 s markout mids (Phase 5d spec §4).
+async fn sweet_inputs(
+    env: &Env<'_>,
+    run_ids: &[i64],
+    from: i64,
+    to: i64,
+) -> anyhow::Result<(Vec<SweetEp>, Vec<Attempt>)> {
+    let eps: Vec<SweetEp> = env
+        .store
+        .sweet_episodes(run_ids, from, to)
+        .await?
+        .into_iter()
+        .filter_map(|e| {
+            Some(SweetEp {
+                side: Side::from_kind(&e.kind)?,
+                id: e.episode_id,
+                event_id: e.event_id,
+                opened_ms: e.opened_ms,
+                pnl_net: e.pnl_net,
+                budget100: e.budget100,
+                flagged: e.suspect || e.stale,
+                days: e.days_to_end,
+                annualized: e.annualized,
+                peak_cost: e.peak_cost,
+                s_legs: e.s_legs,
+                tags: e.tags,
+            })
+        })
+        .collect();
+    let ids: Vec<String> = env.sweet.by_account.keys().cloned().collect();
+    let mut lines: BTreeMap<AttemptKey, Vec<Line>> = BTreeMap::new();
+    for l in env.store.sweet_ledger(run_ids, &ids, from, to).await? {
+        let kind = match l.kind.as_str() {
+            "buy" => LineKind::Buy,
+            "sell" => LineKind::Sell,
+            "convert" => LineKind::Convert,
+            _ => continue,
+        };
+        lines
+            .entry((l.run_id, l.account_id, l.episode_id))
+            .or_default()
+            .push(Line {
+                kind,
+                leg: l.market_id.zip(l.outcome),
+                qty: l.qty,
+                cash_delta: l.cash_delta,
+            });
+    }
+    let mut mids: BTreeMap<AttemptKey, BTreeMap<sweet::Leg, Decimal>> = BTreeMap::new();
+    for m in env
+        .store
+        .sweet_mids(run_ids, &ids, from, to, MARKOUT_MS)
+        .await?
+    {
+        if let Some(v) = m.mid {
+            mids.entry((m.run_id, m.account_id, m.episode_id))
+                .or_default()
+                .insert((m.market_id, m.outcome), v);
+        }
+    }
+    let eps_s_legs: BTreeMap<&str, i64> = eps.iter().map(|e| (e.id.as_str(), e.s_legs)).collect();
+    let mut out = Vec::new();
+    for i in env.store.sweet_intents(run_ids, &ids, from, to).await? {
+        let Some((side, scenario)) = env.sweet.by_account.get(&i.account_id).cloned() else {
+            continue;
+        };
+        let exec = i.exec_ms.zip(i.q_eff);
+        let (skip, pending) =
+            classify_intent(i.skip_reason, i.planned_exec_ms, exec.is_some(), env.now_ms);
+        // Usually found (intents and episodes come from the same SWEET_EPS-bounded range), but
+        // episodes and intents are separate statements, so a concurrent commit can legitimately
+        // race between them; skip (never guess a leg count) and let the hour rebuild next tick.
+        let Some(s_legs) = eps_s_legs.get(i.episode_id.as_str()).copied() else {
+            continue;
+        };
+        let k = (i.run_id, i.account_id, i.episode_id);
+        out.push(Attempt {
+            side,
+            scenario,
+            s_legs,
+            skip,
+            exec,
+            pending,
+            lines: lines.remove(&k).unwrap_or_default(),
+            mid30: mids.remove(&k).unwrap_or_default(),
+            episode_id: k.2,
+        });
+    }
+    Ok((eps, out))
 }
 
 /// The result rows of one family: 24h and 7d (and Edge capture's today) every time; 30d and all
@@ -668,6 +835,7 @@ fn family_results<C: Card>(
             since_ms: since,
             computed_ms: env.now_ms,
             scenarios: env.scenarios,
+            hurdle: env.hurdle,
         }
     };
     let mut emit = |parts: Vec<Parts>, ctx: &BodyCtx<'_>| -> anyhow::Result<()> {

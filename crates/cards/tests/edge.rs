@@ -3,6 +3,7 @@ use cards::HOUR_MS as H;
 use cards::body::{BodyCtx, Card, ScenarioLat, Status};
 use cards::cells::*;
 use cards::edge::*;
+use cards::sweet::SweetInput;
 use cards::window::Windows;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -40,6 +41,7 @@ fn build(h: i64, eps: &[Ep], lat: &[i64], deltas: &[(String, Decimal)]) -> EdgeC
         episodes: eps,
         latency_ms: lat,
         equity_deltas: deltas,
+        sweet: SweetInput::default(),
     })
 }
 
@@ -70,6 +72,7 @@ fn ctx<'a>(sc: &'a [ScenarioLat]) -> BodyCtx<'a> {
         since_ms: Some(0),
         computed_ms: H,
         scenarios: sc,
+        hurdle: None,
     }
 }
 

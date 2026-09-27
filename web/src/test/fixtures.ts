@@ -1,6 +1,6 @@
 import type {
   CardBody, CardsMeta, EpisodeDetail, EpisodeSummary, HealthNow, HealthPoint, LedgerEntry, PaperAccount,
-  Position, Today,
+  Position, SweetRow, SweetSeries, Today,
 } from '../api/types';
 
 export function healthFixture(o: Partial<HealthNow> = {}): HealthNow {
@@ -137,6 +137,26 @@ export function edgeFixture(o: Partial<CardBody> = {}): CardBody {
     notes: ['upper bound: assumes first-in-line execution; CLOB queue ignored'],
     episode_link: 'live-9-00000042',
     ...o,
+  });
+}
+
+/** A thin NO/sp-idle/all/all row with every field filled. */
+export function sweetRow(o: Partial<SweetRow> = {}): SweetRow {
+  return {
+    side: 'no', scenario: 'sp-idle', fee_bips: 0, latency_ms: null, dimension: 'all', bucket: 'all',
+    label: 'thin', few_trades: false, n_exec: 0, n_filled: 0, n_missed: 0, clusters: 0, n_attempts: 0,
+    skipped: {}, episodes: 0, flagged: 0, on_table: '0', on_table_eligible: '0', captured: '0',
+    captured_leftover0: '0', mean_leftover0: null, mean: null, lo: null, hi: null, eff_n: null, cost: '0', annualized: null,
+    annualized_lo: null, annualized_upper: null, leftover_unpriced: 0, pooled: 0,
+    ...o,
+  };
+}
+
+export function sweetFixture(rows: SweetRow[], o: Partial<SweetSeries> = {}): CardBody {
+  const m = rows.filter((r) => r.label !== 'thin' && r.label !== 'not_tested' && r.label !== 'dead_on_paper').length;
+  return cardFixture({
+    card: 'SWEET', paper: 'sweet', title: 'Sweet spots', win: '30d',
+    series: { sweet: { rows, m, z: '1.96', category_available: true, hurdle: '0.1', fees: [], ...o } },
   });
 }
 

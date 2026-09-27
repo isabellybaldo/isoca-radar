@@ -10,6 +10,7 @@ use cards::body::{BodyCtx, Card, ScenarioLat, base_status};
 use cards::cells::*;
 use cards::edge::EdgeCell;
 use cards::family::{LONG_WINDOWS, LongRender};
+use cards::sweet::{Attempt, Line, LineKind, SweetCell, SweetEp, SweetInput};
 use cards::window::{SPANS, Windows};
 use cards::{DAY_MS, HOUR_MS as H};
 use rust_decimal::Decimal;
@@ -108,6 +109,7 @@ fn catch_up<C: CellData>(first: i64, now: i64) -> Run<C> {
             episodes: &v,
             latency_ms: &lat,
             equity_deltas: &d,
+            sweet: SweetInput::default(),
         });
         run.stored.insert(h, c.to_json().unwrap());
         run.w.apply(h, None, &c);
@@ -143,6 +145,7 @@ fn tick<C: Card>(
             episodes: v,
             latency_ms: &lat,
             equity_deltas: &d,
+            sweet: SweetInput::default(),
         });
         let json = c.to_json().unwrap();
         bytes += json.len();
@@ -162,6 +165,7 @@ fn tick<C: Card>(
             since_ms: Some(0),
             computed_ms: to,
             scenarios: sc,
+            hurdle: None,
         };
         for b in C::bodies(agg, &max, &ctx) {
             bytes += serde_json::to_string(&b).unwrap().len();
@@ -231,8 +235,235 @@ fn family_tick_ms<C: Card>(days: i64, sc: &[ScenarioLat]) -> (u128, u128, u128) 
     (full, t1, t2)
 }
 
-/// Every family's (full, tick1, tick2) summed: analyze ticks all four families together.
-fn tick_ms(days: i64) -> (u128, u128, u128) {
+const SWEET_PER_HOUR: i64 = 20;
+
+/// SWEET's row scenarios (fixture mirrors `bench_sweet.rs`'s `scen()`).
+fn sweet_scen() -> Vec<(Side, String)> {
+    let mut v: Vec<(Side, String)> = ["colo-idle", "sp-idle", "sp-burst", "sp-idle-nodelay"]
+        .iter()
+        .map(|s| (Side::No, s.to_string()))
+        .collect();
+    v.push((Side::No, "sp-idle@10".into()));
+    v.push((Side::No, "sp-idle@50".into()));
+    v.extend(
+        ["colo-idle", "sp-idle", "sp-burst"]
+            .iter()
+            .map(|s| (Side::Yes, s.to_string())),
+    );
+    v
+}
+
+/// A SWEET cell for hour `h` (fixture mirrors `bench_sweet.rs`'s `cell_for`): SWEET reads its own
+/// episodes/attempts, not the Gebele `Ep`s `catch_up`/`tick` build for the other four families.
+fn sweet_cell_for(h: i64, sc: &[(Side, String)]) -> SweetCell {
+    let mut eps = Vec::new();
+    let mut atts = Vec::new();
+    for i in 0..SWEET_PER_HOUR {
+        let side = if i % 4 == 0 { Side::Yes } else { Side::No };
+        let id = format!("se{}-{i}", h / H);
+        let s_legs = 2 + i % 9;
+        eps.push(SweetEp {
+            id: id.clone(),
+            event_id: format!("sev{}", i % 7),
+            side,
+            opened_ms: h + i * 60_000,
+            pnl_net: Decimal::new(41, 2),
+            budget100: Some(Decimal::new(33, 2)),
+            flagged: false,
+            days: Some(Decimal::from(i % 40)),
+            annualized: Some(Decimal::new(5, 1)),
+            peak_cost: Decimal::from(99),
+            s_legs,
+            tags: Some(vec![
+                ["nba", "politics", "crypto", "featured"][(i % 4) as usize].to_string(),
+            ]),
+        });
+        for (sd, s) in sc.iter().filter(|(sd, _)| *sd == side) {
+            let x = Decimal::new((i * 37 % 200) - 100, 2);
+            atts.push(Attempt {
+                episode_id: id.clone(),
+                side: *sd,
+                scenario: s.clone(),
+                s_legs,
+                skip: None,
+                exec: Some((h + i * 60_000 + 300, Decimal::from(10))),
+                pending: false,
+                lines: vec![
+                    Line {
+                        kind: LineKind::Buy,
+                        leg: Some(("m0".into(), "no".into())),
+                        qty: Decimal::from(10),
+                        cash_delta: Decimal::new(-400, 2),
+                    },
+                    Line {
+                        kind: LineKind::Buy,
+                        leg: Some(("m1".into(), "no".into())),
+                        qty: Decimal::from(10),
+                        cash_delta: Decimal::new(-510, 2),
+                    },
+                    Line {
+                        kind: LineKind::Convert,
+                        leg: None,
+                        qty: Decimal::from(10),
+                        cash_delta: Decimal::new(910, 2) + x,
+                    },
+                ],
+                mid30: BTreeMap::new(),
+            });
+        }
+    }
+    SweetCell::build(&HourInput {
+        hour_ms: h,
+        episodes: &[],
+        latency_ms: &[],
+        equity_deltas: &[],
+        sweet: SweetInput {
+            now_ms: h + 2 * H,
+            eps: &eps,
+            attempts: &atts,
+            scenarios: sc,
+        },
+    })
+}
+
+struct SweetRun {
+    stored: BTreeMap<i64, String>,
+    w: Windows<SweetCell>,
+}
+
+fn sweet_catch_up(first: i64, now: i64, sc: &[(Side, String)]) -> SweetRun {
+    let mut run = SweetRun {
+        stored: BTreeMap::new(),
+        w: Windows::new(now),
+    };
+    let mut h = first;
+    while h <= now {
+        let c = sweet_cell_for(h, sc);
+        run.stored.insert(h, c.to_json().unwrap());
+        run.w.apply(h, None, &c);
+        h += H;
+    }
+    run
+}
+
+/// SWEET's own `tick` (mirrors the generic `tick` above, minus the Gebele `Ep` inputs it never
+/// reads): advance to `to`, rebuild `hours`, render 24h/7d/30d (and `all` where `long` says).
+fn sweet_tick(
+    run: &mut SweetRun,
+    to: i64,
+    hours: &[i64],
+    sc_rows: &[(Side, String)],
+    sc_lat: &[ScenarioLat],
+    long: [bool; 2],
+) -> usize {
+    let mut stored_needed = BTreeMap::new();
+    for (from, until) in run.w.needed_ranges(to) {
+        for (h, text) in run.stored.range(from..until) {
+            if !run.w.recent.contains_key(h) {
+                stored_needed.insert(*h, SweetCell::from_json(text).unwrap());
+            }
+        }
+    }
+    run.w.advance(to, &stored_needed);
+    let mut bytes = 0;
+    for h in hours {
+        let c = sweet_cell_for(*h, sc_rows);
+        let json = c.to_json().unwrap();
+        bytes += json.len();
+        run.stored.insert(*h, json);
+        let old = run.w.recent.get(h).cloned();
+        run.w.apply(*h, old.as_ref(), &c);
+    }
+    let key = "k";
+    let mut emit = |win: &str, start: Option<i64>, agg: &SweetCell, max: ()| {
+        let ctx = BodyCtx {
+            win,
+            base: base_status(false, Some(0), start),
+            premise_key: key,
+            analyze_version: "bench",
+            from_ms: start,
+            to_ms: Some(to),
+            since_ms: Some(0),
+            computed_ms: to,
+            scenarios: sc_lat,
+            hurdle: Some(Decimal::new(10, 2)),
+        };
+        for b in SweetCell::bodies(agg, &max, &ctx) {
+            bytes += serde_json::to_string(&b).unwrap().len();
+        }
+    };
+    for (i, (name, span)) in SPANS.iter().enumerate() {
+        if *name == LONG_WINDOWS[0] && !long[0] {
+            continue;
+        }
+        let s = run.w.span_start(*span);
+        run.w.max_from(s);
+        emit(name, Some(s), &run.w.spans[i], ());
+    }
+    if long[1] {
+        run.w.max_from(i64::MIN);
+        emit("all", None, &run.w.all, ());
+    }
+    bytes
+}
+
+/// SWEET's (full, tick1, tick2), the same shape as `family_tick_ms` (fix round 1, spec §9: the 5a
+/// benchmark must include SWEET, since analyze ticks every family together).
+fn sweet_family_tick_ms(days: i64, sc_lat: &[ScenarioLat]) -> (u128, u128, u128) {
+    let sc_rows = sweet_scen();
+    let now = 1_000_000 * H;
+    let first = now - (days * 24 - 1) * H;
+    let t = Instant::now();
+    let mut run = sweet_catch_up(first, now, &sc_rows);
+    let catch_ms = t.elapsed().as_millis();
+    let to = now + H;
+    let mut full_run = SweetRun {
+        stored: run.stored.clone(),
+        w: run.w.clone(),
+    };
+    let t = Instant::now();
+    let _ = sweet_tick(
+        &mut full_run,
+        to,
+        &[now, to],
+        &sc_rows,
+        sc_lat,
+        [true, true],
+    );
+    let full = t.elapsed().as_millis();
+    drop(full_run);
+    let mut long = LongRender {
+        rendered: [Some(now), Some(now)],
+    };
+    let due = long.due(to);
+    let t = Instant::now();
+    let bytes1 = sweet_tick(&mut run, to, &[now, to], &sc_rows, sc_lat, due);
+    let t1 = t.elapsed().as_millis();
+    long.mark(due, to);
+    let due2 = long.due(to);
+    assert_eq!(
+        (due, due2),
+        ([true, false], [false, true]),
+        "LongRender: 30d, then all"
+    );
+    let t = Instant::now();
+    let bytes2 = sweet_tick(&mut run, to, &[to], &sc_rows, sc_lat, due2);
+    let t2 = t.elapsed().as_millis();
+    println!(
+        "days={days} family=sweet catch-up={catch_ms} ms full-render={full} ms tick1(30d)={t1} ms tick2(all)={t2} ms json={bytes1}+{bytes2} B"
+    );
+    (full, t1, t2)
+}
+
+fn sum3(parts: &[(u128, u128, u128)]) -> (u128, u128, u128) {
+    parts
+        .iter()
+        .fold((0, 0, 0), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2))
+}
+
+/// The 5a families' sum (G1/Dur/G4/Edge) and every family's sum with SWEET added (fix round 1,
+/// spec §9: analyze ticks every family together, SWEET included), both as (full, tick1, tick2).
+fn tick_ms(days: i64) -> ((u128, u128, u128), (u128, u128, u128)) {
     let sc = vec![
         ScenarioLat {
             name: "colo-idle".into(),
@@ -245,44 +476,62 @@ fn tick_ms(days: i64) -> (u128, u128, u128) {
             latency_ms: 300,
         },
     ];
-    let parts = [
+    let five_a = [
         family_tick_ms::<G1Cell>(days, &sc),
         family_tick_ms::<DurCell>(days, &sc),
         family_tick_ms::<G4Cell>(days, &sc),
         family_tick_ms::<EdgeCell>(days, &sc),
     ];
-    parts
-        .iter()
-        .fold((0, 0, 0), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2))
+    let sweet = sweet_family_tick_ms(days, &sc);
+    let combined: Vec<(u128, u128, u128)> = five_a.iter().copied().chain([sweet]).collect();
+    (sum3(&five_a), sum3(&combined))
 }
 
 #[test]
 #[ignore = "benchmark: run by hand (Phase 5a plan, Task 9)"]
-/// 30 days: every tick < 200 ms. 90 days: ticks that don't render `all` < 200 ms; the one that
-/// does is printed and held under a 400 ms sanity ceiling (accepted overrun, ruling T9 fix round 2).
-fn tick_stays_under_200ms_as_all_grows_from_30_to_90_days() {
+/// 30 days: every tick < 300 ms. 90 days: ticks that don't render `all` < 300 ms (same code path
+/// as 30 days, Phase 5d ruling 2026-09-27); the one that does is printed and held under a 400 ms
+/// sanity ceiling (accepted overrun, ruling T9 fix round 2, unchanged).
+fn tick_stays_under_300ms_as_all_grows_from_30_to_90_days() {
     for days in [30, 90] {
-        let (full, t1, t2) = tick_ms(days);
+        let (five_a, (full, t1, t2)) = tick_ms(days);
         println!(
-            "tick total at {days} days: tick1 {t1} ms, tick2 {t2} ms (every window at once: {full} ms)"
+            "tick total at {days} days: tick1 {t1} ms, tick2 {t2} ms (every window at once: {full} ms); 5a alone: tick1 {} ms, tick2 {} ms",
+            five_a.1, five_a.2
         );
         if days == 30 {
             let worst = t1.max(t2);
+            // Phase 5d ruling 2026-09-27: debug-build regression guard; the real check is VPS docker stats (runbook).
             assert!(
-                worst < 200,
-                "one tick over {days} days took {worst} ms (budget 200 ms, spec §9; ruling T9 (c))"
+                worst < 300,
+                "one tick over {days} days took {worst} ms (budget 300 ms, spec §9; ruling T9 (c), Phase 5d fix round 2)"
+            );
+            // Phase 5d ruling 2026-09-27: keep a 5a-only CPU guard beside the combined ceiling, so a
+            // SWEET regression alone can't hide inside the wider combined budget.
+            let five_a_worst = five_a.1.max(five_a.2);
+            assert!(
+                five_a_worst < 200,
+                "the 5a families alone took {five_a_worst} ms at {days} days (budget 200 ms)"
             );
         } else {
             // ruling (fix round 2): past 30 days the tick that renders `all` may overrun (exact
             // Kaplan–Meier over a growing number of distinct durations); a loose ceiling still
-            // catches a regression. Every other tick keeps the 200 ms budget.
+            // catches a regression. Every other tick keeps the same budget as 30 days (it's the
+            // same code path, just over more history).
+            // Phase 5d ruling 2026-09-27: debug-build regression guard; the real check is VPS docker stats (runbook).
             assert!(
-                t1 < 200,
-                "tick 1 over {days} days took {t1} ms (budget 200 ms)"
+                t1 < 300,
+                "tick 1 over {days} days took {t1} ms (budget 300 ms)"
             );
             assert!(
                 t2 < 400,
                 "the all-rendering tick over {days} days took {t2} ms (ceiling 400 ms)"
+            );
+            // Phase 5d ruling 2026-09-27: keep a 5a-only CPU guard beside the combined ceiling.
+            assert!(
+                five_a.1 < 200,
+                "the 5a families alone took {} ms at {days} days (budget 200 ms)",
+                five_a.1
             );
         }
     }

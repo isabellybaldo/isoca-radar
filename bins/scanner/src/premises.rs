@@ -78,7 +78,14 @@ impl HostBand {
             return None;
         }
         self.minutes += 1;
-        if let (Some(lag), Some(rtt)) = (row.lag_p50_ms, row.rest_rtt_p50_ms) {
+        // A skewed clock (|offset| beyond CLOCK_SKEW_MS) makes this minute's feed lag unreliable
+        // (a host freeze can make the clock run behind and lag read low or negative), so the
+        // minute contributes no latency sample even though it still counts toward
+        // HOST_BAND_MINUTES (scanner-clock-offset brief).
+        let skewed = row
+            .clock_offset_ms
+            .is_some_and(|o| i64::from(o).abs() > crate::clock::CLOCK_SKEW_MS);
+        if !skewed && let (Some(lag), Some(rtt)) = (row.lag_p50_ms, row.rest_rtt_p50_ms) {
             self.samples.push(i64::from(lag) + i64::from(rtt) / 2);
         }
         if self.minutes < HOST_BAND_MINUTES {
@@ -86,9 +93,14 @@ impl HostBand {
         }
         self.done = true;
         self.samples.sort_unstable();
-        let median = match self.samples.len() {
-            0 => None,
-            n => self.samples.get((n - 1) / 2).copied(),
+        // Fewer than half the minutes contributed a sample (skew, or plain missing data): the
+        // band is unmeasured rather than a median built on a minority of the window. Below this
+        // point `self.samples` is never empty (0 * 2 < HOST_BAND_MINUTES already returned above).
+        let median = if self.samples.len() * 2 < HOST_BAND_MINUTES as usize {
+            None
+        } else {
+            let n = self.samples.len();
+            self.samples.get((n - 1) / 2).copied()
         };
         let row = RunPremiseRow {
             run_id: self.run_id,

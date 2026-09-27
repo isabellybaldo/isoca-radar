@@ -183,8 +183,8 @@ async fn a_tick_writes_every_card_and_window_with_statuses_and_meta() {
     let rep = a.tick(T0 + 30 * M).await.unwrap();
     assert_eq!(
         rep.results,
-        4 * 4 + 5,
-        "G1–G4 × 4 windows + EDGE × 5 windows"
+        4 * 4 + 5 + 4,
+        "G1–G4 × 4 windows + EDGE × 5 windows + SWEET × 4 windows"
     );
     let g1 = body(&rw, "7d", "G1").await;
     assert_eq!(cell(&g1, "NO-side episodes", "ours"), "12");
@@ -488,12 +488,12 @@ async fn catch_up_builds_history_in_24_hour_batches_and_pauses_between_them() {
     let rep = a.tick(T0).await.unwrap();
     assert_eq!(
         rep.catch_up_hours,
-        4 * 61,
-        "61 hours (T0 − 60 h … T0) for each of the 4 families"
+        5 * 61,
+        "61 hours (T0 − 60 h … T0) for each of the 5 families"
     );
     // 61 hours = batches of 24 + 24 + 13: 2 pauses per family
     assert!(
-        t.elapsed() >= Duration::from_millis(4 * 2 * 30),
+        t.elapsed() >= Duration::from_millis(5 * 2 * 30),
         "{:?}",
         t.elapsed()
     );
@@ -558,8 +558,8 @@ async fn a_failed_tick_records_the_error_and_keeps_the_last_results() {
     assert!(e["text"].as_str().unwrap().contains("card_results"), "{e}");
     assert_eq!(
         rw.card_results_for("7d").await.unwrap().len(),
-        5,
-        "the last results stay (G1–G4 and EDGE)"
+        6,
+        "the last results stay (G1–G4, EDGE and SWEET)"
     );
     a.tick(T0 + 30 * M).await.unwrap();
     assert_eq!(
@@ -876,8 +876,8 @@ async fn long_windows_re_render_at_most_hourly_and_keep_their_own_computed_ms() 
     let rep = a.tick(T0 + 15 * M).await.unwrap();
     assert_eq!(
         rep.results,
-        2 * 5 + 1,
-        "24h + 7d for G1–G4 and EDGE, and EDGE's today"
+        2 * 6 + 1,
+        "24h + 7d for G1–G4, EDGE and SWEET, and EDGE's today"
     );
     assert_eq!(
         cell(&body(&rw, "7d", "G1").await, "NO-side episodes", "ours"),
@@ -1164,6 +1164,408 @@ async fn a_sim_code_bump_under_the_same_policies_restores_and_telescopes() {
         "3",
         "+1 from run 1's last mark (restored, not +201 from the bankroll), then +2"
     );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+const P0: &str = "P0-converter/sp-idle";
+
+fn p0_account(run: i64) -> PaperAccountRow {
+    PaperAccountRow {
+        run_id: run,
+        account_id: P0.into(),
+        policy: "P0-converter".into(),
+        scenario: "sp-idle".into(),
+        fee_bips: dec!(0),
+        bankroll: dec!(1000),
+        per_trade: dec!(100),
+        policies_sha256: "x".into(),
+    }
+}
+
+/// One executed NO attempt on `episode` at `exec_ms` capturing `x` (two buys, one conversion).
+fn no_attempt(run: i64, episode: &str, exec_ms: i64, x: rust_decimal::Decimal, seq: i64) -> Batch {
+    let led = |seq: i64, kind: &str, leg: Option<&str>, qty, cash| PaperLedgerRow {
+        run_id: run,
+        account_id: P0.into(),
+        seq,
+        t_ms: exec_ms,
+        kind: kind.into(),
+        episode_id: Some(episode.into()),
+        market_id: leg.map(|m| m.to_string()),
+        yes_token: leg.map(|m| format!("{m}-y")),
+        outcome: leg.map(|_| "no".to_string()),
+        qty,
+        price: None,
+        cash_delta: cash,
+        fees: dec!(0),
+        realized_delta: dec!(0),
+        cash_after: dec!(1000),
+        equity: None,
+    };
+    Batch {
+        paper_intents: vec![PaperIntentRow {
+            run_id: run,
+            account_id: P0.into(),
+            episode_id: episode.into(),
+            decided_ms: exec_ms - 300,
+            exec_ms: Some(exec_ms),
+            skip_reason: None,
+            q_target: Some(dec!(10)),
+            detected_q: None,
+            detected_pnl: None,
+            reserve: None,
+        }],
+        paper_execs: vec![PaperExecRow {
+            run_id: run,
+            account_id: P0.into(),
+            episode_id: episode.into(),
+            exec_ms,
+            q_eff: dec!(10),
+            leg_risk_qty: dec!(0),
+            pnl_at_tx: None,
+            hit: true,
+        }],
+        paper_ledger: vec![
+            led(seq, "buy", Some("m0"), dec!(10), dec!(-4.00)),
+            led(seq + 1, "buy", Some("m1"), dec!(10), dec!(-5.10)),
+            led(seq + 2, "convert", None, dec!(10), dec!(9.10) + x),
+        ],
+        ..Batch::default()
+    }
+}
+
+fn sweet_row(b: &Value, side: &str, scenario: &str, dim: &str, bucket: &str) -> Value {
+    b["series"]["sweet"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["side"] == side
+                && r["scenario"] == scenario
+                && r["dimension"] == dim
+                && r["bucket"] == bucket
+                && r["fee_bips"] == 0
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn an_attempt_in_flight_at_one_tick_is_counted_once_at_the_next() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    // opened 10 s before the hour, closed 5 s later: its update is seen before the attempt lands
+    let opened = T0 + H - 10_000;
+    let mut e = ep("e1", r, "no_basket", opened, Some(opened + 5_000));
+    e.days_to_end = Some(dec!(3));
+    write(&owner, vec![e]).await;
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![p0_account(r)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    owner
+        .write_batch(&no_attempt(r, "e1", T0 + H + 30_000, dec!(0.5), 1))
+        .await
+        .unwrap();
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0 + H + 45_000).await.unwrap(); // 15 s after exec: in flight
+    let row = sweet_row(
+        &body(&rw, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(
+        (row["episodes"].as_i64(), row["n_attempts"].as_i64()),
+        (Some(1), Some(0))
+    );
+    a.tick(T0 + H + 15 * M).await.unwrap(); // the late rule rebuilds T0 (hour of the episode)
+    let row = sweet_row(
+        &body(&rw, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(
+        (
+            row["n_attempts"].as_i64(),
+            row["n_exec"].as_i64(),
+            row["captured"].as_str()
+        ),
+        (Some(1), Some(1), Some("0.5"))
+    );
+    a.tick(T0 + H + 30 * M).await.unwrap();
+    let row = sweet_row(
+        &body(&rw, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(row["n_exec"].as_i64(), Some(1), "counted once");
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn the_sweet_suffix_leaves_other_family_keys_unchanged() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep("e1", r, "no_basket", T0 + M, Some(T0 + 2 * M))],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0 + H).await.unwrap();
+    let edge = body(&rw, "7d", "EDGE").await["premise_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for card in ["G1", "G2", "G3", "G4", "EDGE"] {
+        let k = body(&rw, "7d", card).await["premise_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!k.contains(";sweet="), "{card}: {k}");
+    }
+    let sweet = body(&rw, "7d", "SWEET").await["premise_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(sweet, format!("{edge}{}", cards::sweet::key_suffix()));
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn thirty_events_with_the_same_edge_make_the_no_row_a_candidate() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![p0_account(r)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let mut eps = Vec::new();
+    for i in 0..30 {
+        let id = format!("e{i}");
+        eps.push(ep(
+            &id,
+            r,
+            "no_basket",
+            T0 + i * M,
+            Some(T0 + i * M + 1_000),
+        )); // event ev-e{i}: 30 clusters
+        owner
+            .write_batch(&no_attempt(
+                r,
+                &id,
+                T0 + i * M + 500,
+                dec!(0.10),
+                10 * i + 1,
+            ))
+            .await
+            .unwrap();
+    }
+    write(&owner, eps).await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap()
+        .with_hurdle(Some(dec!(0.10)));
+    a.tick(T0 + 2 * H).await.unwrap();
+    let b = body(&rw, "24h", "SWEET").await;
+    let row = sweet_row(&b, "no", "sp-idle", "all", "all");
+    assert_eq!(
+        (
+            row["label"].as_str(),
+            row["n_exec"].as_i64(),
+            row["clusters"].as_i64()
+        ),
+        (Some("candidate"), Some(30), Some(30))
+    );
+    assert!(b["series"]["sweet"]["m"].as_i64().unwrap() >= 1);
+    assert_eq!(b["series"]["sweet"]["hurdle"].as_str(), Some("0.1"));
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_restart_seeds_last_tick_ms_so_the_late_rule_still_reaches_the_episodes_hour() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    let opened = T0 + H - 10_000;
+    let mut e = ep("e1", r, "no_basket", opened, Some(opened + 5_000));
+    e.days_to_end = Some(dec!(3));
+    write(&owner, vec![e]).await;
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![p0_account(r)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    owner
+        .write_batch(&no_attempt(r, "e1", T0 + H + 30_000, dec!(0.5), 1))
+        .await
+        .unwrap();
+    let rw1 = rw(&db).await;
+    let mut a1 = Analyzer::new(rw1.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a1.tick(T0 + H + 45_000).await.unwrap(); // 15 s after exec: in flight, not yet counted
+    let row = sweet_row(
+        &body(&rw1, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(row["n_attempts"].as_i64(), Some(0), "still in flight");
+    rw1.close().await;
+    // Push the episode-changed cursor far into the future so a2's own 120 s relookback
+    // (LOOKBACK_MS, unrelated to SWEET) can never re-surface "e1" on its own: whatever re-dirties
+    // T0 from here has to be the SWEET late rule, not that cursor.
+    owner
+        .card_meta_put(
+            "cursor",
+            &serde_json::json!({ "updated_ms": 9_000_000_000_000_i64 }).to_string(),
+        )
+        .await
+        .unwrap();
+    // "restart": a fresh Analyzer on a fresh connection, no in-memory state left — only what
+    // card_meta and card_cells hold. The next tick is far enough past T0 (the episode's hour)
+    // that anchoring the late window on *this* process's own now_ms (the bug) would miss it, but
+    // one seeded from the last real tick's `last_tick_ms` (T0 + H + 45_000, read back from
+    // card_meta) still reaches it.
+    let rw2 = rw(&db).await;
+    let mut a2 = Analyzer::new(rw2.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a2.tick(T0 + 2 * H + 60_000).await.unwrap();
+    let row = sweet_row(
+        &body(&rw2, "24h", "SWEET").await,
+        "no",
+        "sp-idle",
+        "all",
+        "all",
+    );
+    assert_eq!(
+        (
+            row["n_attempts"].as_i64(),
+            row["n_exec"].as_i64(),
+            row["captured"].as_str()
+        ),
+        (Some(1), Some(1), Some("0.5")),
+        "the late rule reached T0 across the restart"
+    );
+    rw2.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_sweet_only_read_failure_fails_the_whole_tick_and_the_next_one_heals() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep("e1", r, "no_basket", T0 + M, Some(T0 + 2 * M))],
+    )
+    .await;
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![p0_account(r)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    owner
+        .write_batch(&no_attempt(r, "e1", T0 + H + 30_000, dec!(0.5), 1))
+        .await
+        .unwrap();
+    // A missing grant on a SWEET-only table (analyze_rw reads paper_intents only for SWEET;
+    // G1/EDGE never touch it) must fail the whole tick, the same as any other family's read
+    // failing: no partial write, cursor/last_hour untouched, so the next tick heals from
+    // card_cells/meta instead of persisting an empty SWEET over good data.
+    owner
+        .raw_exec("REVOKE SELECT ON paper_intents FROM analyze_rw")
+        .await
+        .unwrap();
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    let err = a.tick(T0 + H + 45_000).await.unwrap_err();
+    a.record_error(T0 + H + 45_000, &format!("{err:#}")).await;
+    a.reset();
+    let e: Value =
+        serde_json::from_str(&rw.card_meta_get("last_error").await.unwrap().unwrap()).unwrap();
+    assert_eq!(e["ms"].as_i64(), Some(T0 + H + 45_000));
+    owner
+        .raw_exec("GRANT SELECT ON paper_intents TO analyze_rw")
+        .await
+        .unwrap();
+    a.tick(T0 + H + 45_000)
+        .await
+        .expect("the next tick succeeds once the grant is restored");
+    assert_eq!(
+        rw.card_meta_get("last_error").await.unwrap().as_deref(),
+        Some("null")
+    );
+    let g1 = body(&rw, "24h", "G1").await;
+    assert_eq!(cell(&g1, "NO-side episodes", "ours"), "1");
+    let edge = body(&rw, "24h", "EDGE").await;
+    assert_eq!(cell(&edge, "edge on the table", "ours"), "0.33");
+    // This scenario never has an executed intent (only a no_attempt), so SWEET is thin once it
+    // actually runs (its data starts inside the window) — the point is the tick as a whole healed
+    // on retry, not any particular SWEET status.
+    let sweet = body(&rw, "24h", "SWEET").await;
+    assert_eq!(sweet["status"], "warming");
     rw.close().await;
     db.drop(owner).await;
 }

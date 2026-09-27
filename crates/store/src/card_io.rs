@@ -104,6 +104,75 @@ fn capped<T>(mut rows: Vec<T>, cap: i64, what: &'static str) -> Result<Vec<T>, S
     Ok(rows)
 }
 
+/// Row cap for the SWEET reads. A 24-hour catch-up batch at ~20 arbitrage episodes an hour and 11
+/// accounts is ~5k attempts and ~25k ledger rows: far below.
+pub const MAX_SWEET_ROWS: i64 = 400_000;
+
+/// The episodes one SWEET read covers (live yes/no baskets of the runs, opened in [$2, $3)), as a
+/// CTE the attempt reads share.
+const SWEET_EPS: &str = "WITH se AS (SELECT e.episode_id, e.run_id FROM episodes e \
+     WHERE e.source = 'live' AND e.run_id = ANY($1) AND e.kind IN ('yes_basket', 'no_basket') \
+       AND e.opened_server_ms >= $2 AND e.opened_server_ms < $3) ";
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SweetAccount {
+    pub account_id: String,
+    pub policy: String,
+    pub scenario: String,
+    pub fee_bips: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SweetEpisodeRow {
+    pub episode_id: String,
+    pub run_id: i64,
+    pub event_id: String,
+    pub kind: String,
+    pub opened_ms: i64,
+    pub pnl_net: Decimal,
+    pub budget100: Option<Decimal>,
+    pub suspect: bool,
+    pub stale: bool,
+    pub days_to_end: Option<Decimal>,
+    pub annualized: Option<Decimal>,
+    pub peak_cost: Decimal,
+    pub s_legs: i64,
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SweetIntentRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub skip_reason: Option<String>,
+    pub planned_exec_ms: Option<i64>,
+    pub exec_ms: Option<i64>,
+    pub q_eff: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SweetLedgerRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub kind: String,
+    pub market_id: Option<String>,
+    pub outcome: Option<String>,
+    pub qty: Decimal,
+    pub cash_delta: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SweetMidRow {
+    pub run_id: i64,
+    pub account_id: String,
+    pub episode_id: String,
+    pub market_id: String,
+    pub outcome: String,
+    pub mid: Option<Decimal>,
+}
+
 impl Store {
     /// analyze's pool: every session carries its own statement timeout (on top of the role's
     /// 10 s). `role` is for tests (SET ROLE from an owner URL).
@@ -494,5 +563,144 @@ impl Store {
                 .fetch_all(self.pool())
                 .await?,
         )
+    }
+
+    /// The accounts SWEET reads (spec 5d §4): P0 at fee 0, 10 and 50 (NO side) and P1 at fee 0
+    /// (YES side), one row per account id (its newest run's row).
+    pub async fn sweet_accounts(&self) -> Result<Vec<SweetAccount>, StoreError> {
+        let rows = sqlx::query_as(
+            "SELECT DISTINCT ON (account_id) account_id, policy, scenario, fee_bips FROM paper_accounts \
+             WHERE (policy = 'P0-converter' AND fee_bips IN (0, 10, 50)) \
+                OR (policy = 'P1-settlement' AND fee_bips = 0) \
+             ORDER BY account_id, run_id DESC LIMIT $1",
+        )
+        .bind(MAX_SWEET_ROWS + 1)
+        .fetch_all(self.pool())
+        .await?;
+        capped(rows, MAX_SWEET_ROWS, "sweet_accounts")
+    }
+
+    /// Live yes/no-basket episodes of `run_ids` OPENED in [from_ms, to_ms).
+    pub async fn sweet_episodes(
+        &self,
+        run_ids: &[i64],
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<SweetEpisodeRow>, StoreError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "{SWEET_EPS}SELECT e.episode_id, e.run_id, e.event_id, e.kind, e.opened_server_ms AS opened_ms, \
+                    e.peak_pnl_net_usd AS pnl_net, e.pnl_net_budget100_usd AS budget100, \
+                    e.engine_suspect AS suspect, e.stale_transport AS stale, e.days_to_end, \
+                    e.annualized_return AS annualized, e.peak_cost_usd AS peak_cost, \
+                    (SELECT count(*) FROM episode_legs l WHERE l.episode_id = e.episode_id AND l.in_s) AS s_legs, \
+                    ev.tags \
+             FROM se JOIN episodes e ON e.episode_id = se.episode_id \
+             LEFT JOIN events ev ON ev.event_id = e.event_id \
+             ORDER BY e.opened_server_ms, e.episode_id LIMIT $4"
+        );
+        let rows = sqlx::query_as(&sql)
+            .bind(run_ids.to_vec())
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(MAX_SWEET_ROWS + 1)
+            .fetch_all(self.pool())
+            .await?;
+        capped(rows, MAX_SWEET_ROWS, "sweet_episodes")
+    }
+
+    /// Intents (LEFT JOIN execs) of `accounts` on the episodes `sweet_episodes` returns for the
+    /// same range.
+    pub async fn sweet_intents(
+        &self,
+        run_ids: &[i64],
+        accounts: &[String],
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<SweetIntentRow>, StoreError> {
+        if run_ids.is_empty() || accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "{SWEET_EPS}SELECT i.run_id, i.account_id, i.episode_id, i.skip_reason, \
+                    i.exec_ms AS planned_exec_ms, x.exec_ms, x.q_eff \
+             FROM se JOIN paper_intents i \
+               ON i.run_id = se.run_id AND i.account_id = ANY($4) AND i.episode_id = se.episode_id \
+             LEFT JOIN paper_execs x \
+               ON x.run_id = i.run_id AND x.account_id = i.account_id AND x.episode_id = i.episode_id \
+             ORDER BY i.run_id, i.account_id, i.episode_id LIMIT $5"
+        );
+        let rows = sqlx::query_as(&sql)
+            .bind(run_ids.to_vec())
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(accounts.to_vec())
+            .bind(MAX_SWEET_ROWS + 1)
+            .fetch_all(self.pool())
+            .await?;
+        capped(rows, MAX_SWEET_ROWS, "sweet_intents")
+    }
+
+    /// buy / sell / convert ledger rows of `accounts` carrying one of those episodes' ids, in seq
+    /// order.
+    pub async fn sweet_ledger(
+        &self,
+        run_ids: &[i64],
+        accounts: &[String],
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<SweetLedgerRow>, StoreError> {
+        if run_ids.is_empty() || accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "{SWEET_EPS}SELECT l.run_id, l.account_id, l.episode_id, l.kind, l.market_id, l.outcome, \
+                    l.qty, l.cash_delta \
+             FROM se JOIN paper_ledger l ON l.episode_id = se.episode_id AND l.run_id = se.run_id \
+             WHERE l.account_id = ANY($4) AND l.kind IN ('buy', 'sell', 'convert') \
+             ORDER BY l.run_id, l.account_id, l.seq LIMIT $5"
+        );
+        let rows = sqlx::query_as(&sql)
+            .bind(run_ids.to_vec())
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(accounts.to_vec())
+            .bind(MAX_SWEET_ROWS + 1)
+            .fetch_all(self.pool())
+            .await?;
+        capped(rows, MAX_SWEET_ROWS, "sweet_ledger")
+    }
+
+    /// The markout mids at `offset_ms` (analyze passes 30_000) for those attempts.
+    pub async fn sweet_mids(
+        &self,
+        run_ids: &[i64],
+        accounts: &[String],
+        from_ms: i64,
+        to_ms: i64,
+        offset_ms: i64,
+    ) -> Result<Vec<SweetMidRow>, StoreError> {
+        if run_ids.is_empty() || accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "{SWEET_EPS}SELECT m.run_id, m.account_id, m.episode_id, m.market_id, m.outcome, m.mid \
+             FROM se JOIN paper_markouts m \
+               ON m.run_id = se.run_id AND m.account_id = ANY($4) AND m.episode_id = se.episode_id \
+             WHERE m.offset_ms = $6 \
+             ORDER BY m.run_id, m.account_id, m.episode_id, m.market_id, m.outcome LIMIT $5"
+        );
+        let rows = sqlx::query_as(&sql)
+            .bind(run_ids.to_vec())
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(accounts.to_vec())
+            .bind(MAX_SWEET_ROWS + 1)
+            .bind(offset_ms)
+            .fetch_all(self.pool())
+            .await?;
+        capped(rows, MAX_SWEET_ROWS, "sweet_mids")
     }
 }

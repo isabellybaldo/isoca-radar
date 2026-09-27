@@ -26,6 +26,8 @@ pub struct EventRow {
     pub neg_risk_market_id: Option<String>,
     pub augmented: bool,
     pub n_legs: i32,
+    /// Lower-cased Gamma tag slugs (≤ 16); None: not recorded.
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -32,6 +32,7 @@ pub fn meta(event: &str, n: usize) -> GroupMeta {
         title: None,
         neg_risk_market_id: None,
         augmented: false,
+        tags: None,
         legs: (0..n)
             .map(|i| LegMeta {
                 market_id: format!("{event}-m{i}"),

@@ -233,3 +233,40 @@ fn full_page_with_no_cursor_is_an_error_not_a_silent_truncation() {
         })
     ));
 }
+
+#[test]
+fn tags_parse_leniently_and_slugs_are_lowercased_deduplicated_and_capped() {
+    let text = r#"{"events": [
+      {"id": "1", "tags": [{"slug": "Politics", "label": "Politics"}, {"slug": "politics"}, {"label": "no slug"}, {"slug": ""}]},
+      {"id": "2"},
+      {"id": "3", "tags": "not an array"},
+      {"id": "4", "tags": [{"slug": 7}]},
+      {"id": "5", "tags": [{"slug":"a"},{"slug":"b"},{"slug":"c"},{"slug":"d"},{"slug":"e"},{"slug":"f"},{"slug":"g"},{"slug":"h"},
+                           {"slug":"i"},{"slug":"j"},{"slug":"k"},{"slug":"l"},{"slug":"m"},{"slug":"n"},{"slug":"o"},{"slug":"p"},{"slug":"q"}]}
+    ], "next_cursor": null}"#;
+    let p = parse_page(text).unwrap();
+    assert_eq!(
+        p.events.len(),
+        5,
+        "a malformed tags field never drops the event"
+    );
+    assert_eq!(p.events[0].tag_slugs(), vec!["politics".to_string()]);
+    assert!(p.events[1].tag_slugs().is_empty());
+    assert!(p.events[2].tag_slugs().is_empty());
+    assert!(p.events[3].tag_slugs().is_empty());
+    assert_eq!(p.events[4].tag_slugs().len(), 16);
+    assert_eq!(p.events[4].tag_slugs()[15], "p");
+}
+
+#[test]
+fn the_live_keyset_sample_parses_with_tags() {
+    let text = include_str!("data/keyset_tags_sample.json");
+    let p = parse_page(text).unwrap();
+    assert!(
+        p.events
+            .iter()
+            .filter(|e| !e.tag_slugs().is_empty())
+            .count()
+            >= 80
+    );
+}

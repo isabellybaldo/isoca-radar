@@ -28,4 +28,11 @@ describe('Hearts', () => {
     expect(screen.getByRole('img', { name: /^health 5 of 10: drops/ })).toHaveTextContent('♥♥♥♥♥♡♡♡♡♡');
     expect(troubles({ ...ok, lag_p99_ms: null, age_ms: 180_000 })).toEqual([]);
   });
+
+  it('costs a heart for a clock offset over 250 ms in either direction, but not under or null', () => {
+    expect(troubles({ ...ok, clock_offset_ms: 251 })).toEqual(['clock off by 251 ms']);
+    expect(troubles({ ...ok, clock_offset_ms: -2_000 })).toEqual(['clock off by -2000 ms']);
+    expect(troubles({ ...ok, clock_offset_ms: 250 })).toEqual([]);
+    expect(troubles({ ...ok, clock_offset_ms: null })).toEqual([]);
+  });
 });

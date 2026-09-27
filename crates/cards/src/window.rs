@@ -28,18 +28,39 @@ use crate::HOUR_MS;
 use crate::cells::CellData;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::io;
 
 /// Rolling spans in hours, ending on (and including) the current, partial hour.
 pub const SPANS: [(&str, i64); 3] = [("24h", 24), ("7d", 168), ("30d", 720)];
 /// Cells kept in memory: today's window and the 24h window's expiring hour.
 pub const RECENT_HOURS: i64 = 48;
 
+/// Forwards every byte written to it straight into a `Hasher`, so `serde_json::to_writer` can feed
+/// a cell's JSON to the fingerprint hash without ever materializing the JSON as a `String` (fix
+/// round 1, spec §9: SWEET's ~25 KB cells were re-serialized to a fresh `String` on every one of
+/// the ~8 fingerprint checks a tick makes).
+struct HashWriter<'a, H: Hasher>(&'a mut H);
+
+impl<H: Hasher> io::Write for HashWriter<'_, H> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A cheap, process-local fingerprint of a cell's canonical JSON (not stable across versions or
-/// processes — only used to detect a mismatch within one running `Windows`).
+/// processes — only used to detect a mismatch within one running `Windows`). Streams the exact
+/// same bytes `c.to_json().hash(...)` would have hashed straight into the hasher (`str`'s `Hash`
+/// impl writes the bytes then a `0xff` terminator; matched here so the fingerprint values this
+/// produces are identical to before, and to each other across a restart — `window.rs` tests this).
 fn fingerprint<C: CellData>(c: &C) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    match c.to_json() {
-        Ok(json) => json.hash(&mut hasher),
+    match serde_json::to_writer(HashWriter(&mut hasher), c) {
+        Ok(()) => hasher.write_u8(0xff),
         Err(_) => "cards::window: a cell that failed to serialize".hash(&mut hasher),
     }
     hasher.finish()
@@ -252,5 +273,53 @@ impl<C: CellData> Windows<C> {
             c.add(v);
         }
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cells::{G1Cell, Num, PerSide, Side};
+    use crate::sweet::{Acc, SweetCell, row_key};
+    use rust_decimal_macros::dec;
+
+    /// The fingerprint computation before fix round 1: hash the full JSON `String`. `fingerprint`
+    /// must keep producing exactly this value (stored/compared fingerprints must survive the
+    /// change), even though it no longer builds that `String` to get there.
+    fn old_fingerprint<C: CellData>(c: &C) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        match c.to_json() {
+            Ok(json) => json.hash(&mut hasher),
+            Err(_) => "cards::window: a cell that failed to serialize".hash(&mut hasher),
+        }
+        hasher.finish()
+    }
+
+    #[test]
+    fn the_streamed_fingerprint_equals_the_old_to_json_hash_for_a_5a_and_a_sweet_cell() {
+        assert_eq!(
+            fingerprint(&G1Cell::default()),
+            old_fingerprint(&G1Cell::default())
+        );
+        let g1 = G1Cell {
+            their: PerSide { yes: 3, no: 5 },
+            ..G1Cell::default()
+        };
+        assert_eq!(fingerprint(&g1), old_fingerprint(&g1));
+
+        assert_eq!(
+            fingerprint(&SweetCell::default()),
+            old_fingerprint(&SweetCell::default())
+        );
+        let mut sweet = SweetCell::default();
+        sweet.rows.insert(
+            row_key(Side::No, "sp-idle", "all", "all"),
+            Acc {
+                eps: 2,
+                on_table: Num(dec!(1.5)),
+                ..Acc::default()
+            },
+        );
+        assert_eq!(fingerprint(&sweet), old_fingerprint(&sweet));
     }
 }

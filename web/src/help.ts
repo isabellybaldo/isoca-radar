@@ -9,7 +9,7 @@ export interface HelpText {
 export const HELP = {
   health: {
     title: 'What are the hearts?',
-    text: 'Ten hearts is a healthy scanner: every shard connected, no dropped messages in the last 5 minutes, feed lag under a second, capture running. Each trouble costs hearts and is named in words next to them.',
+    text: 'Ten hearts is a healthy scanner: every shard connected, no dropped messages in the last 5 minutes, feed lag under a second, capture running. Each trouble costs hearts and is named in words next to them. A clock more than 250 ms away from Polymarket’s also costs a heart: after a host freeze the feed lag reads wrong until the clock is back.',
   },
   open: {
     title: 'What is an episode?',
@@ -142,6 +142,30 @@ export const HELP = {
   g4: {
     title: 'What is net edge by side?',
     text: 'The best per-share edge of each episode after taker fees, in basis points (1 bp = $0.0001 per $1), binned by 25 bp. Gross, before fees, is drawn behind it. The paper shows this only as a figure, so only its counts are quoted.',
+  },
+  sweet: {
+    title: 'What is a sweet spot?',
+    text: 'A slice of the paper attempts (a category, a time to resolution, a basket size, an hour of day) where the edge we actually captured, after fees and waiting for our money, stays above zero even at the edge of its interval. Almost nothing qualifies. That is the point of looking.',
+  },
+  sweetThin: {
+    title: 'Why are most rows thin?',
+    text: 'A row needs at least 30 executed attempts spread over at least 30 event-hours before it gets any verdict. Weeks of data spread over about 200 rows leave most of them short.',
+  },
+  sweetBonferroni: {
+    title: 'What is Bonferroni, in one line?',
+    text: 'Test enough rows and one looks good by luck; each interval is widened by the number of rows tested, so a false candidate shows up less than 1 time in 20 overall.',
+  },
+  sweetClusters: {
+    title: 'Why count events, not trades?',
+    text: 'One event can open many episodes in an hour, and those trades share the same books and the same competitors. Counting them as independent would make the intervals look tighter than they are.',
+  },
+  sweetYes: {
+    title: 'Why is YES beyond 30 days not tested?',
+    text: 'The YES paper account only buys complete baskets that resolve within 30 days and clear a 10% annualized edge. Anything else it skips, so there is nothing captured to measure; the row shows the edge on the table and whether even that clears the hurdle. The annualized figure is a simple annual rate, days floored at 7 like P1.',
+  },
+  sweetNo: {
+    title: 'What does the NO mean measure?',
+    text: 'Dollars per $100 per trade, not a total: the NO account trades up to about $100 an attempt, so the mean is what one attempt like that made or lost. It is not annualized: the NO side gets its money back in seconds, so there is no lock-up to annualize away.',
   },
 } satisfies Record<string, HelpText>;
 

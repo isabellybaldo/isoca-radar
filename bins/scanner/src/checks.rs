@@ -343,8 +343,12 @@ pub async fn run_samplers(
 ) {
     let mut minute = tokio::time::interval(Duration::from_secs(60));
     let mut ok_tick = tokio::time::interval(Duration::from_secs(5));
+    // 7300 ms: co-prime enough with the 5 s /ok tick that the two rarely land in the same
+    // limiter turn (scanner-clock-offset brief).
+    let mut time_tick = tokio::time::interval(Duration::from_millis(7_300));
     minute.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ok_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    time_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (mut drift_cursor, mut l1_cursor) = (0usize, 0usize);
     loop {
         tokio::select! {
@@ -354,6 +358,12 @@ pub async fn run_samplers(
                 let ok = clob.ok().await.unwrap_or(false);
                 metrics.push_rest(now_ms() - t);
                 metrics.set_ok(ok);
+            }
+            _ = time_tick.tick() => {
+                limiter.wait(RestClass::Shared).await;
+                if let Ok(sample) = clob.time().await {
+                    metrics.push_clock(sample);
+                }
             }
             _ = minute.tick() => {
                 let u = universe.borrow().clone();
@@ -423,6 +433,7 @@ mod tests {
             title: None,
             neg_risk_market_id: None,
             augmented: false,
+            tags: None,
             legs: (0..2)
                 .map(|i| LegMeta {
                     market_id: format!("m{i}"),
