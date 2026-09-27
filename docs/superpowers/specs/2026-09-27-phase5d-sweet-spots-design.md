@@ -46,7 +46,7 @@ api GET /api/cards?win=… (unchanged endpoint; one more card) ──► web Pap
 
 **Go/no-go, the plan's first task.** One read-only request to the route the scanner actually uses, `GAMMA_EVENTS_KEYSET` (`/events/keyset`), checks whether events carry `tags` with slugs. The sample is saved as a test fixture.
 - **Go:** everything below ships.
-- **No-go:** the Category dimension is dropped from the card, and §3's pm-api, migration and store changes are not made. Everything else ships unchanged. The spec's buckets (§5) then have four dimensions, and the (?) help says why category is missing.
+- **No-go:** the Category dimension is dropped from the card, and §3's pm-api, scanner and store write changes are not made. Migration 0007 still adds the (then unused) nullable column, so the migration never depends on the answer. Everything else ships unchanged. The spec's buckets (§5) then have four dimensions, and the (?) help says why category is missing.
 
 **If go:**
 - **`pm-api`:** `GammaEvent` gains `tags: Option<Vec<GammaTag>>` with `GammaTag { slug: Option<String>, label: Option<String> }`. Parsing is lenient: a missing or malformed `tags` is `None`, never a parse error for the event.
@@ -110,7 +110,7 @@ The `[7, 30]` bucket is closed on the right to match P1's `days > max_days_to_en
 
 - **Premise areas:** `episode_def`, `detector_yes`, `detector_no`, `fees`, `depth`, `sim`, `host`, the same as Edge capture. **No new area.** The scanner writes a `run_premises` row for every `PREMISES` entry (`bins/scanner/src/premises.rs:38-50`), and a family counts only runs with every one of its areas (`crates/cards/src/family.rs:24-37`). A `sweet` area would therefore match no past run, and bucket edits would need a scanner restart.
 - **Card parameters instead.** `sweet.rs` renders its parameters (the bucket lists and edges, the minimums, the z table, the 60 s in-flight rule, the leftover valuation offset) into one canonical text, `SWEET_PARAMS`, next to a `SWEET_VERSION` const.
-  - The family's key is the run-derived premise key plus the suffix **`|sweet=<SWEET_VERSION>+<sha8(SWEET_PARAMS)>`**. Any parameter edit gives a new key, which triggers the existing 5a catch-up rebuild from stored history, and different parameters never mix.
+  - The family's key is the run-derived premise key plus the suffix **`;sweet=<SWEET_VERSION>+<sha8(SWEET_PARAMS)>`** (a `;`-separated segment like an area's, so 5a's key parsing, e.g. `host_from_key`, is unaffected). Any parameter edit gives a new key, which triggers the existing 5a catch-up rebuild from stored history, and different parameters never mix.
   - `SWEET_PARAMS` also goes into the reproducibility hash through the 5a `params` field (`crates/cards/src/body.rs:195-199`).
   - The hurdle is read from `policies.toml`, whose sha256 is already in the `sim` area.
 - **Cell family `sweet`**, one per UTC hour per key, keyed by the episode's open hour. For each (side, scenario, dimension, bucket), the cell holds, sparsely (empty entries are omitted), only **additive** fields:
@@ -119,7 +119,7 @@ The `[7, 30]` bucket is closed on the right to match P1's `days > max_days_to_en
   - **cluster sums** (§7.2): number of clusters C, Σcₖ, Σcₖ², Σcₖnₖ and Σnₖ², where a cluster is one (event_id, open hour) within the entry. Because a cluster lives in exactly one hour, all five merge by addition.
   - **No max or min.** 5a's `Windows.maxes` keeps a per-hour maximum for every hour forever (`crates/cards/src/window.rs:62-64`, `:226`), which is fine for Edge capture's two numbers but not for a few hundred entries an hour.
   - A property test checks merge(cells) equals the direct computation, as in 5a.
-- **Dirty hours.** The tick runs every 900 s. The existing `updated_ms` cursor already re-dirties an episode's hours from its open to now whenever it changes, including at close (`bins/analyze/src/tick.rs:271-277`). Every tick also rebuilds the current hour and every hour since the last tick. An attempt that stays `in_flight` at one tick is inside one of those hours at the next.
+- **Dirty hours.** The tick runs every 900 s. The existing `updated_ms` cursor already re-dirties an episode's hours from its open to now whenever it changes, including at close (`bins/analyze/src/tick.rs:271-277`). Every tick also rebuilds the current hour and every hour since the last tick. On top of that, `sweet` rebuilds every hour touched by **[last tick − 10 min, now]**: an attempt still `in_flight` at one tick (its episode may have opened in an hour no rule above re-dirties) is always inside that range at the next.
 - **Windows:** `24h`, `7d`, `30d`, `all`, as 5a. `today` does not include `SWEET`. The box defaults to **30d**, because shorter windows are mostly `thin`.
 - **Memory.** A sweet cell is far larger than a 5a cell: up to ~160 entries an hour (each side-scenario pair touches at most 9 + 7 + 5 + 1 + 1 buckets in one hour), each about 30 numbers. The 5a `Windows` already bounds this: it keeps only `RECENT_HOURS = 48` cells in memory (`crates/cards/src/window.rs:37`), the 24h/7d/30d spans and `all` are running sums, and the cells leaving a span are loaded from `card_cells` when needed (`needed_ranges`, `advance`). `Max` for SWEET is the unit type, so the per-hour `maxes` map costs next to nothing. Peak memory is therefore about 48 cells plus 4 sums, a few MB. The §9 benchmark checks peak RSS anyway.
 - **Status:** the 5a statuses (`live`, `warming`, `under_review`) apply to the card. `thin` applies per row (§7.1), not to the whole card.
@@ -175,7 +175,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
   - A headline sentence per side at the headline scenario (`sp-idle`), with the **10 bips figure beside it**: *"NO: 0 candidates in 34 tested rows (at 10 bips: 0)."* or *"NO: 2 candidates: sports, 2 legs."*
   - A dimension switch (All · Category · Days · S · Hour) and a side switch (NO · YES). The table has rows = buckets and columns = scenarios, and each cell shows the label tag, the mean with its interval, n and C. YES cells add the annualized figure. The leftovers-at-0 figure shows on hover when it differs.
   - The colo-idle column is titled *"a co-located trader"*, so the latency gap reads directly.
-  - The window switch shares Edge capture's state.
+  - Its own window switch, **30D by default** (Edge capture's switch keeps its 24H default; the two are independent).
   - (?) help: "What is a sweet spot?", "Why are most rows thin?", "What is Bonferroni, in one line?", "Why count events, not trades?", "Why is YES > 30 days not tested?".
   - No horizontal page scroll at 360 px: the table scrolls inside its box.
 
@@ -183,7 +183,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
 
 - **Reads per dirty hour:** the hour's episodes (existing), then for its episodes and the known (run, account) pairs: `paper_intents`, `paper_execs`, `paper_ledger` and 30 s `paper_markouts` by primary-key prefix; `episode_legs` by primary key; `events.tags` by primary key.
 - **CPU:** the 5a benchmark (a tick over a synthetic 30-day history, < 200 ms CPU in a debug build) is re-run with `SWEET` included and must still pass. `SWEET` alone should add < 50 ms.
-- **Memory:** the same benchmark records peak RSS of the analyze process, including a 30d/all re-render. It must stay **< 96 MB** (75% of the 128 MB cap).
+- **Memory:** the benchmark measures the serialized size of what `analyze` holds for SWEET (48 synthetic cells plus the four sums) and requires **< 16 MB**; the deploy checks `docker stats` for `analyze` stays **< 96 MB** (75% of the 128 MB cap) after catch-up.
 - **Disk:** at most ~160 entries an hour, each a few hundred bytes of JSON: under ~60 KB an hour at the cap, so well under 1 GB a year even at the cap, and far less in practice. That is inside the 50 GB VPS budget.
 
 ## 10. Testing
@@ -211,7 +211,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
   - `analyze_rw` can read the six new tables and still can't write them;
   - the universe upsert writes `tags`, and **a second upsert with different tags leaves them frozen**.
 - **pm-api:** an event with tags, without tags, and with malformed tags all parse; the go/no-go fixture parses.
-- **Benchmark:** §9, CPU and RSS.
+- **Benchmark:** §9, CPU and the memory proxy.
 - **Web:** each label renders; the paper caveat is always visible; the headline sentences for zero and some candidates, with the 10 bips figure; the no-go state without the Category switch; 360 px.
 
 ## 11. Open items for the plan
@@ -229,7 +229,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
 - **D6. The hurdle is P1's `min_annualized` (10%),** shared with the policy, applied to the interval's lower bound.
 - **D7. Category comes from Gamma tags on `events`, frozen at first sight,** joined by `event_id`; `episodes.category` stays unused. `untagged` means the event left the listing before the first refresh after deploy, or Gamma lists it without tags. On a no-go, the Category dimension is dropped.
 - **D8. Hour of day in 4-hour UTC blocks** and days to resolution in 7 buckets, split at P1's 30 days, chosen for sample size, not elegance.
-- **D9. The box lives on the Paper page below Edge capture,** with no new nav tab, and defaults to 30d.
+- **D9. The box lives on the Paper page below Edge capture,** with no new nav tab and its own window switch, defaulting to 30d.
 - **D10. Default headline scenario `sp-idle`,** the same as Edge capture, with the 10 bips figure beside it.
 - **D11. Parameters are versioned card-side** (key suffix plus hash), not as a premise area.
 
@@ -241,4 +241,4 @@ An independent review raised 3 blockers, 8 should-fix items and nits. All were c
 - **B3:** missed attempts count in the mean (§4).
 - **S1–S8 and the nits:** cluster SE (§7.2), no max or min and effective n (§6, §7.2), the lower-bound hurdle (§7.4), days split at 30 and all three P1 skips (§5, §7.4), frozen tags (§3), the go/no-go (§3), no new indexes (§2), net-positive attempts only (§4), plus the nits (the z table ends at 500, the `maths` feature, D7's wording, the 900 s tick and re-dirty, the 10 bips figure, the equity note, the disk estimate, the extra tests).
 - **One point was only partly taken:** the minimum-cluster threshold stays at 30, not 50 (D5).
-- **One addition of our own:** a peak-RSS limit for `analyze` in the benchmark (§9), because sweet cells are larger than 5a's. The existing 48-hour `recent` bound already keeps memory small (§6).
+- **One addition of our own:** a memory check for `analyze` (§9), because sweet cells are larger than 5a's. The existing 48-hour `recent` bound already keeps memory small (§6).
