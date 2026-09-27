@@ -295,8 +295,10 @@ impl Store {
         capped(rows, cap, "p0_accounts")
     }
 
-    /// For each account: its last mark before `from_ms` (any run), then its marks in
-    /// [from_ms, to_ms). Sorted by (account_id, t_ms, run_id).
+    /// For each account: its last mark before `from_ms` (any live run), then its marks in
+    /// [from_ms, to_ms). Live runs only: `scanner replay` writes marks under the same account ids
+    /// and t_ms, which would otherwise become a live mark's `prev`. Sorted by (account_id, t_ms,
+    /// run_id).
     pub async fn marks_with_prev(
         &self,
         accounts: &[String],
@@ -309,6 +311,7 @@ impl Store {
         let mut rows = sqlx::query_as::<_, MarkPoint>(
             "SELECT m.run_id, m.account_id, m.t_ms, m.equity FROM unnest($1::text[]) AS a(account_id) \
              CROSS JOIN LATERAL (SELECT p.run_id, p.account_id, p.t_ms, p.equity FROM paper_marks p \
+                 JOIN runs r ON r.run_id = p.run_id AND r.mode = 'live' \
                  WHERE p.account_id = a.account_id AND p.t_ms < $2 \
                  ORDER BY p.t_ms DESC, p.run_id DESC LIMIT 1) m",
         )
@@ -317,8 +320,9 @@ impl Store {
         .fetch_all(self.pool())
         .await?;
         let inside = sqlx::query_as::<_, MarkPoint>(
-            "SELECT run_id, account_id, t_ms, equity FROM paper_marks \
-             WHERE account_id = ANY($1) AND t_ms >= $2 AND t_ms < $3 LIMIT $4",
+            "SELECT p.run_id, p.account_id, p.t_ms, p.equity FROM paper_marks p \
+             JOIN runs r ON r.run_id = p.run_id AND r.mode = 'live' \
+             WHERE p.account_id = ANY($1) AND p.t_ms >= $2 AND p.t_ms < $3 LIMIT $4",
         )
         .bind(accounts.to_vec())
         .bind(from_ms)

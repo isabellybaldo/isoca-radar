@@ -1,5 +1,5 @@
 //! One throwaway database per test inside the Postgres named by TEST_DATABASE_URL (an owner/superuser URL,
-//! e.g. postgres://ct_owner:pw@127.0.0.1:55432/postgres). Without it, tests print SKIPPED and pass,
+//! e.g. postgres://ct_owner:pw@127.0.0.1:15432/postgres). Without it, tests print SKIPPED and pass,
 //! unless STORE_TESTS_REQUIRED is set (CI), where a missing URL is a failure.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 use std::sync::atomic::{AtomicU32, Ordering};

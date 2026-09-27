@@ -6,8 +6,8 @@ use crate::body::{
 };
 use crate::cells::{DurCell, EDGE_MINUTES_MS, G1Cell, G4Cell, LONG_MS, MERGE_GAPS_MS, Side};
 use crate::stats::{
-    CountMap, KmSummary, bins, dec, emp_and_median, fp_to_dec, km_sides_and_merged, median_of,
-    merge_sorted, pct, ranks_and_bins, secs, total,
+    CountMap, KmSummary, bins, dec, dur_total, emp_and_median, fp_to_dec, km_sides_and_merged,
+    median_of, merge_sorted, pct, ranks_and_bins, secs, total,
 };
 use rust_decimal::Decimal;
 
@@ -363,10 +363,14 @@ fn g3_parts(c: &DurCell, st: &DurStats) -> Parts {
         })
         .flatten();
     let clip_n = total(&c.clipped);
-    let true_n = total(&c.their.yes) + total(&c.their.no);
+    // Both medians over the same population: unflagged, uncensored episodes (`clipped` excludes
+    // flagged; the KM map's events column is exactly the unflagged, uncensored durations). Both use
+    // the sample-median convention.
+    let true_n = dur_total(&c.ours.yes).0 + dur_total(&c.ours.no).0;
     let clip_med = median_of(c.clipped.iter().map(|(v, n)| (*v, *n)), clip_n);
     let true_med = median_of(
-        merge_sorted(&c.their.yes, &c.their.no, |a, b| a + b),
+        merge_sorted(&c.ours.yes, &c.ours.no, |a, b| (a.0 + b.0, a.1 + b.1))
+            .map(|(v, (events, _))| (v, events)),
         true_n,
     );
     let bias = match (clip_med, true_med) {
@@ -407,7 +411,7 @@ fn g3_parts(c: &DurCell, st: &DurStats) -> Parts {
         format!(
             "OUR METHOD: the share of durations ≥ 50 min by Kaplan–Meier (right-censored kept), and the bias \
              one-hour windows introduce: the median of hour-clipped durations minus the median of true \
-             durations; drops {} flagged episodes.",
+             durations of the same unflagged, uncensored episodes (both sample medians); drops {} flagged episodes.",
             c.flagged.yes + c.flagged.no
         ),
     ];

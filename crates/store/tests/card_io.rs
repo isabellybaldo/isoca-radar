@@ -530,3 +530,65 @@ async fn card_cells_results_and_meta_round_trip_and_the_api_reads_them() {
     analyze.close().await;
     db.drop(owner).await;
 }
+
+#[tokio::test]
+async fn marks_with_prev_ignores_replay_marks_at_the_same_t_ms() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run_at(&owner, "live", 1).await;
+    let replay = run_at(&owner, "replay", 2).await;
+    assert!(replay > live, "the replay run sorts after the live run");
+    let id = "P0-converter/sp-idle";
+    let acct = |run_id: i64| PaperAccountRow {
+        run_id,
+        account_id: id.into(),
+        policy: "P0-converter".into(),
+        scenario: "sp-idle".into(),
+        fee_bips: dec!(0),
+        bankroll: dec!(1000),
+        per_trade: dec!(100),
+        policies_sha256: "ab".repeat(32),
+    };
+    let mark = |run_id: i64, t: i64, eq: rust_decimal::Decimal| PaperMarkRow {
+        run_id,
+        account_id: id.into(),
+        t_ms: t,
+        cash: eq,
+        equity: eq,
+        realized: dec!(0),
+        unrealized: dec!(0),
+        fees_paid: dec!(0),
+        locked: dec!(0),
+        max_drawdown: dec!(0),
+        n_positions: 0,
+    };
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![acct(live), acct(replay)],
+            paper_marks: vec![
+                mark(live, 2_000, dec!(1000.5)),
+                mark(replay, 2_000, dec!(1)),
+                mark(live, 5_000, dec!(1001.25)),
+                mark(replay, 5_000, dec!(2)),
+            ],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let analyze = rw(&db).await;
+    let marks = analyze
+        .marks_with_prev(&[id.to_string()], 4_000, 9_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        marks
+            .iter()
+            .map(|m| (m.run_id, m.t_ms, m.equity))
+            .collect::<Vec<_>>(),
+        vec![(live, 2_000, dec!(1000.5)), (live, 5_000, dec!(1001.25))],
+        "replay marks under the same account id and t_ms never reach the Edge inputs"
+    );
+    analyze.close().await;
+    db.drop(owner).await;
+}

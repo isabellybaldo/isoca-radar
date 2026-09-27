@@ -58,6 +58,7 @@ pub struct HostBand {
     minutes: u32,
     samples: Vec<i64>,
     done: bool,
+    pending: Option<RunPremiseRow>,
 }
 
 impl HostBand {
@@ -68,6 +69,7 @@ impl HostBand {
             minutes: 0,
             samples: Vec::new(),
             done: false,
+            pending: None,
         }
     }
 
@@ -88,10 +90,24 @@ impl HostBand {
             0 => None,
             n => self.samples.get((n - 1) / 2).copied(),
         };
-        Some(RunPremiseRow {
+        let row = RunPremiseRow {
             run_id: self.run_id,
             area: "host".to_string(),
             version: premises::host_version(&self.label, median),
-        })
+        };
+        self.pending = Some(row.clone());
+        Some(row)
+    }
+
+    /// The computed host row until an insert of it succeeds (`recorded`): the health task retries
+    /// it each minute, so a failed insert doesn't leave the run invisible to Edge capture. The
+    /// row is kept as computed, never recomputed; the insert is ON CONFLICT DO NOTHING.
+    pub fn pending(&self) -> Option<&RunPremiseRow> {
+        self.pending.as_ref()
+    }
+
+    /// The pending host row reached Postgres: stop retrying.
+    pub fn recorded(&mut self) {
+        self.pending = None;
     }
 }

@@ -49,6 +49,9 @@ pub struct EdgeCell {
     pub max_capital: Num,
     #[serde(default)]
     pub biggest: Option<Biggest>,
+    /// Net-positive and flagged episodes opened in the hour: kept off the table, counted (spec §5).
+    #[serde(default)]
+    pub flagged: PerSide<i64>,
 }
 
 /// Counted on the table: net-positive, not flagged, with a capped P&L. Returns that P&L.
@@ -76,6 +79,8 @@ impl EdgeCell {
         }
         self.n.yes += s * o.n.yes;
         self.n.no += s * o.n.no;
+        self.flagged.yes += s * o.flagged.yes;
+        self.flagged.no += s * o.flagged.no;
         for (k, (n, v)) in &o.captured {
             let e = self
                 .captured
@@ -114,6 +119,9 @@ impl CellData for EdgeCell {
         let mut c = EdgeCell::default();
         let mut best: Option<(Decimal, String)> = None;
         for e in opened_in(inp.episodes, h) {
+            if e.positive() && e.flagged() {
+                *c.flagged.get_mut(e.side) += 1;
+            }
             let Some(b) = counted(e) else { continue };
             c.table.get_mut(e.side).0 += b;
             *c.n.get_mut(e.side) += 1;
@@ -312,7 +320,16 @@ pub fn edge_parts(c: &EdgeCell, m: &EdgeMax, ctx: &BodyCtx<'_>) -> Parts {
         "P0-converter takes the NO side only; the YES side is locked until resolution and no account takes it."
             .to_string(),
         "Captured: each scenario's P0-converter paper account (default fee), its equity change over the window \
-         from paper_marks. Capture rate = captured ÷ on the table."
+         from paper_marks. Capture rate = captured ÷ on the table, rounded to 0.1% with round_dp (banker's \
+         rounding: half to even)."
+            .to_string(),
+        format!(
+            "On the table: net-positive episodes with a capped P&L; drops {} flagged episodes (engine_suspect or \
+             stale_transport).",
+            c.flagged.yes + c.flagged.no
+        ),
+        "Restarts: the paper accounts are restored, so the first mark after a restart books the downtime \
+         revaluation (the equity change while the scanner was down) into the new premise key's first hour."
             .to_string(),
         "Measured latency: the window's median of feed lag p50 + REST round trip p50 / 2, per health minute. \
          An estimate."

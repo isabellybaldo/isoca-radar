@@ -152,3 +152,27 @@ fn the_host_row_comes_once_after_ten_minutes_with_the_median_band() {
     }
     assert_eq!(last.unwrap().version, "1:pc-dev|unmeasured");
 }
+
+#[test]
+fn the_host_row_stays_pending_until_an_insert_succeeds() {
+    let mut band = HostBand::new(7, "vps-kvm2".into());
+    for _ in 1..HOST_BAND_MINUTES {
+        band.observe(&minute(Some(80), Some(130)));
+        assert_eq!(
+            band.pending(),
+            None,
+            "nothing to insert before the band is known"
+        );
+    }
+    let host = band.observe(&minute(Some(80), Some(130))).unwrap();
+    assert_eq!(band.pending(), Some(&host));
+    // the insert failed: later minutes keep offering the same computed row, never a new one
+    for _ in 0..3 {
+        assert_eq!(band.observe(&minute(Some(1), Some(1))), None);
+        assert_eq!(band.pending(), Some(&host), "retried each minute");
+    }
+    band.recorded();
+    assert_eq!(band.pending(), None, "one success ends the retries");
+    band.observe(&minute(Some(80), Some(130)));
+    assert_eq!(band.pending(), None);
+}

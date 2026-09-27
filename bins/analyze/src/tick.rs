@@ -497,8 +497,11 @@ type Latency = BTreeMap<i64, Vec<i64>>;
 type Deltas = BTreeMap<i64, Vec<(String, Decimal)>>;
 
 /// Edge capture's inputs for [from, to): measured latency per minute (lag p50 + RTT p50 / 2, both
-/// present) and the equity change between consecutive marks of each P0 account, counted only when
-/// both marks come from runs of this key (an account's very first mark counts against its bankroll).
+/// present) and the equity change between consecutive live marks of each P0 account whose current
+/// mark is in a run of this key. The previous mark may belong to another key's run: when both runs
+/// have the same policies the account was restored, so the delta telescopes across keys (booking
+/// the downtime revaluation into this key's first hour); other policies count from the bankroll;
+/// unknown policies skip the mark. An account's very first mark counts against its bankroll.
 async fn edge_inputs<C: CellData>(
     env: &Env<'_>,
     fam: &Family<C>,

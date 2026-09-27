@@ -382,6 +382,8 @@ pub struct G4Cell {
     /// The same episodes' peak gross edge (the overlay).
     pub gross: PerSide<CountMap>,
     /// Π_net > 0 and flagged (excluded from OUR METHOD, counted — spec §5).
+    /// Default when absent: cells stored before this field existed still load (zero flagged).
+    #[serde(default)]
     pub flagged: PerSide<i64>,
 }
 

@@ -583,16 +583,21 @@ async fn run_live(
                 t.tick().await;
                 let minute = now_ms().div_euclid(60_000) * 60_000;
                 let row = metrics.minute_row(run_id, minute);
-                let host_row = band.observe(&row);
+                band.observe(&row);
                 if writer_tx.send(WriterMsg::Health(row)).await.is_err() {
                     return;
                 }
-                if let Some(h) = host_row
-                    && let Err(e) = store.insert_run_premises(&[h]).await
-                {
-                    eprintln!(
-                        "scanner: host premise not recorded (Edge capture skips this run): {e}"
-                    );
+                // The computed host row is retried each health minute until one insert succeeds
+                // (ON CONFLICT DO NOTHING keeps a retry idempotent). Off the engine thread; a
+                // failure is logged, never fatal.
+                if let Some(h) = band.pending().cloned() {
+                    match store.insert_run_premises(&[h]).await {
+                        Ok(()) => band.recorded(),
+                        Err(e) => eprintln!(
+                            "scanner: host premise not recorded yet, retrying next minute \
+                             (Edge capture skips this run until then): {e}"
+                        ),
+                    }
                 }
                 // Drop/delete counters otherwise never reach Postgres (F2): drain each to 0 and
                 // surface a non-zero count as an integrity row.

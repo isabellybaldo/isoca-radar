@@ -425,3 +425,44 @@ fn the_papers_list_and_the_not_replicated_box() {
     assert_eq!(nr.as_array().unwrap().len(), 2);
     assert!(nr.to_string().contains("308,416,666"));
 }
+
+#[test]
+fn g3_bias_compares_clipped_and_true_medians_over_the_same_unflagged_uncensored_events() {
+    // OUR METHOD's population: unflagged, uncensored events (the KM events column). A right-censored
+    // episode (1 s) carries no true duration and is left out.
+    let ours: DurMap = [
+        (1_000, (0, 1)),
+        (10_000, (1, 0)),
+        (20_000, (1, 0)),
+        (30_000, (1, 0)),
+    ]
+    .into_iter()
+    .collect();
+    // THEIR METHOD also counts 3 flagged 15-minute episodes; they must not move the bias.
+    let their: CountMap = [(10_000, 1), (20_000, 1), (30_000, 1), (900_000, 3)]
+        .into_iter()
+        .collect();
+    let clipped: CountMap = [(10_000, 1), (20_000, 1), (30_000, 1)]
+        .into_iter()
+        .collect();
+    let c = DurCell {
+        their: PerSide {
+            yes: their,
+            no: CountMap::new(),
+        },
+        ours: PerSide {
+            yes: ours,
+            no: DurMap::new(),
+        },
+        hour_observed: 3,
+        clipped,
+        flagged: PerSide { yes: 3, no: 0 },
+        ..DurCell::default()
+    };
+    let b = g3(&c, &ctx(Status::Live));
+    assert_eq!(
+        col(&b, "median bias from one-hour windows").ours,
+        s("0"),
+        "the clipped median (20 s) minus the true median of the same population (20 s)"
+    );
+}

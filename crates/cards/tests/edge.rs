@@ -354,3 +354,96 @@ proptest! {
         prop_assert_eq!(maxes.biggest, best);
     }
 }
+
+#[test]
+fn a_negative_capture_shows_a_negative_amount_and_rate() {
+    let sc = scenarios();
+    let eps = vec![
+        ep("n1", Side::No, 0, 10, Some(dec!(2)), dec!(50)),
+        ep("n2", Side::No, 1, 11, Some(dec!(1)), dec!(50)),
+    ];
+    // sp-idle lost money over the window; 0.3125 / 3 = 10.41666…% → -10.4
+    let deltas = vec![
+        ("sp-idle".to_string(), dec!(-0.5)),
+        ("sp-idle".to_string(), dec!(0.1875)),
+    ];
+    let c = build(0, &eps, &[], &deltas);
+    let b = EdgeCell::bodies(&c, &c.max_part(), &ctx(&sc)).remove(0);
+    let get = |l: &str| {
+        b.columns
+            .iter()
+            .find(|r| r.label == l)
+            .unwrap()
+            .ours
+            .clone()
+    };
+    assert_eq!(get(ON_TABLE).as_deref(), Some("3"));
+    assert_eq!(
+        get("captured at sp-idle (145 ms)").as_deref(),
+        Some("-0.3125")
+    );
+    assert_eq!(get("capture rate, sp-idle").as_deref(), Some("-10.4"));
+    let p = b
+        .series
+        .decay
+        .iter()
+        .find(|p| p.scenario == "sp-idle")
+        .unwrap();
+    assert_eq!(
+        (p.captured.as_deref(), p.rate_pct.as_deref()),
+        (Some("-0.3125"), Some("-10.4"))
+    );
+}
+
+#[test]
+fn the_edge_card_counts_flagged_episodes_and_discloses_rounding_and_restarts() {
+    let sc = scenarios();
+    let mut stale = ep("s", Side::No, 5, 6, Some(dec!(9)), dec!(50));
+    stale.stale = true;
+    let mut suspect = ep("u", Side::Yes, 7, 8, Some(dec!(9)), dec!(50));
+    suspect.suspect = true;
+    let mut negative_flagged = ep("x", Side::No, 9, 10, Some(dec!(9)), dec!(50));
+    negative_flagged.stale = true;
+    negative_flagged.pnl_net = dec!(-0.01); // not net-positive: never on the table, not counted as dropped
+    let eps = vec![
+        ep("n1", Side::No, 0, 10, Some(dec!(1)), dec!(50)),
+        stale,
+        suspect,
+        negative_flagged,
+    ];
+    let c = build(0, &eps, &[], &[]);
+    assert_eq!((c.flagged.no, c.flagged.yes), (1, 1));
+    let json = c.to_json().unwrap();
+    assert_eq!(EdgeCell::from_json(&json).unwrap(), c);
+    let mut sum = EdgeCell::default();
+    sum.add(&c);
+    sum.add(&c);
+    sum.sub(&c);
+    assert_eq!(
+        sum.flagged, c.flagged,
+        "the flagged count adds and subtracts exactly"
+    );
+    let b = EdgeCell::bodies(&c, &c.max_part(), &ctx(&sc)).remove(0);
+    assert!(
+        b.notes
+            .iter()
+            .any(|n| n.contains("drops 2 flagged episodes")),
+        "{:?}",
+        b.notes
+    );
+    assert!(
+        b.notes.iter().any(|n| n.contains("banker's rounding")),
+        "{:?}",
+        b.notes
+    );
+    assert!(
+        b.notes.iter().any(|n| n.contains("downtime")),
+        "{:?}",
+        b.notes
+    );
+    // cells stored before the flagged count existed still load
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v.as_object_mut().unwrap().remove("flagged");
+    let old = EdgeCell::from_json(&v.to_string()).unwrap();
+    assert_eq!(old.flagged, PerSide::default());
+}

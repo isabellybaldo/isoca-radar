@@ -258,3 +258,16 @@ fn edge_cell_is_merge_exact_on_every_summed_field() {
     assert_eq!(EdgeCell::FAMILY, "edge");
     assert!(EdgeCell::AREAS.contains(&"host") && EdgeCell::AREAS.contains(&"sim"));
 }
+
+#[test]
+fn a_g4_cell_stored_before_the_flagged_count_existed_still_loads() {
+    let mut v = serde_json::to_value(G4Cell::default()).unwrap();
+    v.as_object_mut().unwrap().remove("flagged");
+    let old = serde_json::to_string(&v).unwrap();
+    assert!(!old.contains("flagged"), "{old}");
+    assert_eq!(
+        G4Cell::from_json(&old).unwrap(),
+        G4Cell::default(),
+        "a missing `flagged` reads as zero on both sides"
+    );
+}
