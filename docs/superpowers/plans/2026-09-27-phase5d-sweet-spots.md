@@ -3378,7 +3378,17 @@ git commit -m "runbook: Phase 5d on the VPS (migrate 0007, SWEET checks, 5a keys
 ## Results
 
 Task 1 (go/no-go), filled in by the implementer:
-- Date (UTC):
-- Events in sample / with tags:
-- Decision (GO / NO-GO):
+- Date (UTC): 2026-09-27 07:03 UTC
+- Events in sample / with tags: 100 / 100
+- Decision (GO / NO-GO): GO
 - Final bucket lists (GO only):
+```text
+politics : politics, us-politics, elections, us-election, trump, congress, senate, us-presidential-election, midterms, governor-midterms, trump-presidency, governor-tossups, main-election, primaries, senate-elections, us-government, house, supreme-court, courts
+sports   : sports, nba, nfl, mlb, nhl, soccer, football, tennis, golf, mma, ufc, f1, boxing, esports, cricket, basketball
+crypto   : crypto, bitcoin, ethereum, solana, crypto-prices, xrp, memecoins, token-launch, airdrops, stablecoins, crypto-listings, crypto-legal, pumpptfun, megaeth
+economy  : economy, finance, business, fed, fed-rates, inflation, stocks, earnings, commodities, ipos, economic-policy, taxes, fiscal
+world    : world, geopolitics, international-elections, middle-east, ukraine, china, europe, global-elections, foreign-policy, israel, world-elections, russia, nato, ukraine-map, world-affairs, gaza, international-election-props, brazil, france, russia-capture, macron, uk, starmer, uk-labour-leadership, india, eu, zelensky, us-iran, poland, syria, macro-geopolitics, israel-election
+culture  : pop-culture, culture, entertainment, awards, music, movies, tv, celebrities, oscars, grammys, taylor-swift
+tech     : tech, technology, ai, science, space, big-tech, openai, sam-altman, gpt-5
+```
+Sample distribution across these buckets (100 events, no clashes): politics 72, crypto 16, world 5, economy 3, tech 2, culture 1, sports 1, other 0. Excluded as ambiguous/structural (fall to `other`): `earn-4`, `pre-market`, `united-states`, `trump-zelenskyy`, `trump-putin`, `epstein`, `price-milestone`, `recurring`, `featured`, `parent-for-derivative`, `2025-predictions`, `exchange`, `resign`, `pedophile`, `england`, `security-guarantee`, `pregnant`, `military-action`, `other`, `trump-x-al-sharaa`, `hfc`, `president`, `rewards-20-4pt5-50`, `prediction-markets`, `legal`, `maxwell`, `ghislaine-maxwell`.
