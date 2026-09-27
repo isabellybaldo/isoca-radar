@@ -27,7 +27,7 @@ print a container's environment, `docker compose config` only as
 | PC | §2 build (5a §3, unchanged) |
 | PC | §3 bundle and ship (5a §4 and §7, unchanged) |
 | VPS | §4 pre-flight |
-| VPS | §5 stop the scanner, migrate 0007, start again |
+| VPS | §5 stop the scanner and analyze, migrate 0007, start again |
 | VPS | §6 post-deploy checks |
 | VPS | §7 exit |
 
@@ -79,15 +79,21 @@ plus tagging the current image `cute-trading/rust:<old-sha>` so `docker load` do
 `<none>`, plus `cp .env .env.bak-5d`). Also take the safety dump as in 5a §9, once the scanner is
 stopped in §5 below.
 
-## 5. Stop the scanner, migrate 0007, start again (on the VPS)
+## 5. Stop the scanner and analyze, migrate 0007, start again (on the VPS)
 
+`scanner`, `analyze` and `migrate` live in `compose.yml` under the `core` profile, so every command
+touching them needs `--profile core` (5a runbook §9, §10, §12). `api` and `web` live in
+`compose.web.yml` under the `web` profile, so restarting them needs both `-f` files and
+`--profile web` (5a runbook §12) — they do not exist in a plain `docker compose` invocation against
+`compose.yml` alone:
 ```bash
 cd /home/isoca/projects/cute-trading
-docker compose stop --timeout 60 scanner analyze
+docker compose --profile core stop --timeout 60 scanner analyze
 docker compose --profile core run --rm migrate; echo "migrate exit=$?"
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT max(version) FROM _sqlx_migrations WHERE success"
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT has_table_privilege('analyze_rw', 'paper_ledger', 'SELECT'), has_table_privilege('analyze_rw', 'paper_ledger', 'INSERT')"
-docker compose up -d --no-build --no-deps scanner analyze api web
+docker compose --profile core up -d --no-build --no-deps scanner analyze
+docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web
 ```
 Expect:
 - `migrate exit=0`;
@@ -98,6 +104,15 @@ Expect:
 If `migrate` fails, stop and read its log
 (`docker compose --profile core logs --tail 50 migrate`) before deciding whether to roll back —
 0007 is additive (a nullable column plus grants), so a clean failure leaves nothing half-applied.
+
+Then tail all four restarted services' logs (5a runbook §12 style) before moving to §6:
+```bash
+docker compose --profile core logs --tail 30 scanner
+docker compose --profile core logs --tail 20 analyze
+docker compose -f compose.yml -f compose.web.yml --profile web logs --tail 20 api web
+```
+Expect the scanner and analyze lines 5a runbook §12 describes (no new-image startup error), and no
+`panicked`/`error` lines from `api` or `web`.
 
 ## 6. Post-deploy checks (on the VPS, then in the browser)
 
@@ -148,7 +163,7 @@ and the card hash, and `analyze` stays inside its CPU cap and memory cap (§1 be
 
 Use 5a runbook's Rollback section for the mechanics (keep the previous `rust:dev` and `web:dev`
 image tags recorded in pre-flight; `docker compose --profile core stop analyze scanner`, retag,
-`up -d --no-build --no-deps scanner`). What's different for 5d:
+`docker compose --profile core up -d --no-build --no-deps scanner`). What's different for 5d:
 - Migration 0007 stays applied even on rollback: its column (`events.tags`) is nullable and
   unused by the old code, and its grants are read-only (`GRANT SELECT`, no write access). Nothing
   needs undoing.
