@@ -2,6 +2,7 @@
 [universe]
 refresh_secs = 300              # spec §7
 warm_start_max_age_secs = 300   # spec §8.1.2
+warm_start_fallback_max_age_secs = 86400   # a Gamma outage at start: accept an older snapshot, refresh replaces it
 canary_pairs = 200              # spec §7
 
 [shards]

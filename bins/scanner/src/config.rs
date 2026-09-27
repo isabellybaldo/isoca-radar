@@ -24,6 +24,9 @@ pub struct Config {
 pub struct UniverseCfg {
     pub refresh_secs: u64,
     pub warm_start_max_age_secs: u64,
+    /// A Gamma outage at start: accept an even older snapshot than `warm_start_max_age_secs`
+    /// rather than fail to boot; the next refresh replaces it. Must be >= `warm_start_max_age_secs`.
+    pub warm_start_fallback_max_age_secs: u64,
     pub canary_pairs: usize,
 }
 
@@ -135,6 +138,10 @@ impl Config {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.universe.warm_start_fallback_max_age_secs >= self.universe.warm_start_max_age_secs,
+            "universe.warm_start_fallback_max_age_secs must be >= warm_start_max_age_secs"
+        );
         let s = &self.shards;
         anyhow::ensure!(
             (1..=40).contains(&s.max_connections),
@@ -290,5 +297,18 @@ mod tests {
         );
         let no_cap = REPO.replace("max_in_flight = 32", "max_in_flight = 0");
         assert!(Config::parse(&no_cap).is_err());
+    }
+
+    #[test]
+    fn warm_start_fallback_must_be_at_least_the_warm_start_max_age() {
+        let (cfg, _) = Config::parse(REPO).unwrap();
+        assert!(
+            cfg.universe.warm_start_fallback_max_age_secs >= cfg.universe.warm_start_max_age_secs
+        );
+        let too_short = REPO.replace(
+            "warm_start_fallback_max_age_secs = 86400",
+            "warm_start_fallback_max_age_secs = 100",
+        );
+        assert!(Config::parse(&too_short).is_err());
     }
 }
