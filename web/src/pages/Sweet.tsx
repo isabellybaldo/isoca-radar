@@ -84,11 +84,15 @@ function SweetGrid({ s, side, dim }: { s: SweetSeries; side: SweetSide; dim: Swe
   );
 }
 
-function SweetBody({ card, s }: { card: CardBody; s: SweetSeries }) {
+/** M1: side/dim/scenario live in Sweet() so a window switch (which replaces this card by identity
+ *  in Loadable's render) never resets the chips the owner just picked. */
+function SweetBody({ card, s, side, setSide, dimAsked, setDim, scenAsked, setScen }: {
+  card: CardBody; s: SweetSeries;
+  side: SweetSide; setSide: (v: SweetSide) => void;
+  dimAsked: SweetDim; setDim: (v: SweetDim) => void;
+  scenAsked: string; setScen: (v: string) => void;
+}) {
   const nowMs = useNow(30_000);
-  const [side, setSide] = useState<SweetSide>('no');
-  const [dimAsked, setDim] = useState<SweetDim>('all');
-  const [scenAsked, setScen] = useState<string>(HEADLINE_SCENARIO);
   const dims = DIMS.filter(([d]) => d !== 'category' || s.category_available);
   const dim = dimAsked === 'category' && !s.category_available ? 'all' : dimAsked;
   const scenarios = grid(s, side, dim).scenarios;
@@ -102,7 +106,7 @@ function SweetBody({ card, s }: { card: CardBody; s: SweetSeries }) {
           { label: 'NO candidates', value: String(candidateCount(s, 'no')) },
           { label: 'YES candidates', value: String(candidateCount(s, 'yes')) },
           { label: 'rows tested', value: String(s.m) },
-          { label: 'scenario', value: HEADLINE_SCENARIO },
+          { label: 'headline scenario', value: HEADLINE_SCENARIO },
         ]}
       />
       {feeLine(s) && <p className="dim">{feeLine(s)}</p>}
@@ -142,6 +146,9 @@ export function Sweet() {
   const slow = useTicker(60_000);
   const st = useApi((s) => api.cards(win, s), [win], [slow]);
   const card = st.data?.cards.find((c) => c.card === 'SWEET');
+  const [side, setSide] = useState<SweetSide>('no');
+  const [dimAsked, setDim] = useState<SweetDim>('all');
+  const [scenAsked, setScen] = useState<string>(HEADLINE_SCENARIO);
   return (
     <Box
       title="SWEET SPOTS"
@@ -161,7 +168,18 @@ export function Sweet() {
           if (!c?.series.sweet) return <EmptyState text={SWEET_EMPTY} />;
           if (c.status === 'under_review') return <EmptyState text={recomputingText(c.computed_ms)} />;
           if (c.status === 'warming') return <EmptyState text={warmingText(c)} />;
-          return <SweetBody card={c} s={c.series.sweet} />;
+          return (
+            <SweetBody
+              card={c}
+              s={c.series.sweet}
+              side={side}
+              setSide={setSide}
+              dimAsked={dimAsked}
+              setDim={setDim}
+              scenAsked={scenAsked}
+              setScen={setScen}
+            />
+          );
         }}
       </Loadable>
     </Box>

@@ -7,7 +7,7 @@ import { ON_TABLE, UNDER_REVIEW, fmtValue, statusLabel, statusTone, updatedText,
 import { useNow, useTicker } from '../lib/hooks';
 import { formatMoney, formatMoneyCents, signOf } from '../lib/money';
 import { Box } from './Box';
-import { CardMeta, CardTable, isDim } from './CardView';
+import { CardMeta, CardTable, isDim, ThinReasons } from './CardView';
 import { EmptyState } from './EmptyState';
 import { Fold } from './Fold';
 import { LatencyAxis } from './LatencyAxis';
@@ -45,6 +45,7 @@ function EdgeBody({ card, stale }: { card: CardBody; stale: boolean }) {
         items={[...tile(row(card, ON_TABLE)), ...tile(row(card, 'captured at')), ...tile(row(card, 'capture rate')), ...tile(row(card, 'measured latency'))]}
         dim={dim}
       />
+      <ThinReasons reasons={card.thin_reasons} />
       {card.series.decay && card.series.decay.length > 0 && <LatencyAxis points={card.series.decay} measured={card.series.measured ?? null} />}
       <SplitBar
         label="on the table, by side"

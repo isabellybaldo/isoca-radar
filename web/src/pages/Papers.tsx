@@ -22,7 +22,7 @@ function PaperSection({ paper, cards, stale }: { paper: PaperEntry; cards: ApiSt
   const tag =
     paper.status === 'live' ? <Tag tone="no">LIVE</Tag> : paper.status === 'coming_later' ? <Tag>COMING LATER</Tag> : <Tag tone="flag">DROPPED</Tag>;
   return (
-    <Box title={paper.cite} help={paper.status === 'live' ? 'gebele' : 'otherPapers'} className="paper" actions={tag}>
+    <Box title={paper.cite} help={paper.status === 'live' ? 'gebele' : 'otherPapers'} className="paper" hero={paper.status === 'live'} actions={tag}>
       {paper.status !== 'live' ? (
         <p className="quip">{paper.note ?? ''}</p>
       ) : (

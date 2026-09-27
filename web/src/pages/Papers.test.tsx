@@ -44,6 +44,9 @@ describe('Papers', () => {
     expect(screen.getByRole('button', { name: 'Help: What is not replicated, and why?' })).toBeInTheDocument();
     expect(screen.getByText(/308,416,666 messages/)).toBeInTheDocument();
     expect(screen.getByText('updated 5 min ago')).not.toHaveClass('stale');
+    // M4: the live paper's box is the page's hero; the dropped/coming-later ones are not.
+    expect(screen.getByText(/^Gebele, Mutzel, Matthes/).closest('section')).toHaveClass('hero');
+    expect(screen.getByText('DROPPED').closest('section')).not.toHaveClass('hero');
     } finally {
       Date.now = real;
     }

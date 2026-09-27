@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
@@ -26,7 +26,7 @@ describe('Sweet page', () => {
     expect(await screen.findByText(ONE_LINE_CAVEAT)).toBeInTheDocument();
     expect(String(fetch.mock.calls[0][0])).toBe('/api/cards?win=30d');
     const tiles = screen.getAllByRole('listitem').filter((li) => li.classList.contains('tile')).map((li) => li.textContent);
-    expect(tiles).toEqual(['NO candidates0', 'YES candidates0', 'rows tested2', 'scenariosp-idle']); // dt comes before dd in the DOM
+    expect(tiles).toEqual(['NO candidates0', 'YES candidates0', 'rows tested2', 'headline scenariosp-idle']); // dt comes before dd in the DOM
     const chart = screen.getByRole('list', { name: 'NO · ALL · sp-idle' });
     expect(within(chart).getByText('NEGATIVE')).toBeInTheDocument();
     expect(screen.getByText(NOTHING_PAYS)).toBeInTheDocument();
@@ -56,6 +56,17 @@ describe('Sweet page', () => {
     await userEvent.click(within(screen.getByRole('group', { name: 'side' })).getByRole('button', { name: 'YES' }));
     // Review focus 3: colo-idle has no YES rows, so the chart falls back to the first YES scenario
     expect(within(screen.getByRole('list', { name: 'YES · ALL · sp-idle' })).getByText('DEAD ON PAPER')).toBeInTheDocument();
+  });
+
+  it('keeps the picked side chip pressed across a window switch (M1: state lives in Sweet(), not SweetBody)', async () => {
+    mockApi({ '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [card(rows)] }) });
+    renderPage();
+    await screen.findByText(ONE_LINE_CAVEAT);
+    const yes = () => within(screen.getByRole('group', { name: 'side' })).getByRole('button', { name: 'YES' });
+    await userEvent.click(yes());
+    expect(yes()).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(screen.getByRole('button', { name: '7D' }));
+    await waitFor(() => expect(yes()).toHaveAttribute('aria-pressed', 'true'));
   });
 
   it('keeps every number and the method in folds', async () => {

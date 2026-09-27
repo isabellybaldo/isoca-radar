@@ -38,6 +38,19 @@ export function isDim(card: CardBody, stale: boolean): boolean {
   return card.status === 'thin' || card.status === 'under_review' || stale;
 }
 
+/** M5: why a card is thin, as dim lines under the claim/tiles — no longer buried in the folded method. */
+export function ThinReasons({ reasons }: { reasons: string[] }) {
+  return (
+    <>
+      {reasons.map((t) => (
+        <p key={t} className="dim">
+          thin: {t}
+        </p>
+      ))}
+    </>
+  );
+}
+
 /** Redesign §4.3: the card's headline claim (its first row) in big type, PAPER / THEIRS / OURS. */
 export function Claim({ card, dim }: { card: CardBody; dim?: boolean }) {
   const r = card.columns[0];
@@ -102,11 +115,6 @@ export function CardMeta({ card, nowMs }: { card: CardBody; nowMs: number }) {
         </span>
       </p>
       <p className="meta premise">{card.premise_key}</p>
-      {card.thin_reasons.map((t) => (
-        <p key={t} className="dim">
-          thin: {t}
-        </p>
-      ))}
       {card.notes.map((n) => (
         <p key={n} className="note">
           {n}
@@ -129,6 +137,7 @@ export function CardView({ card, stale = false, now }: { card: CardBody; stale?:
       {card.status === 'under_review' && <p className="dim">{UNDER_REVIEW}</p>}
       <CardChart card={card} />
       <Claim card={card} dim={isDim(card, stale)} />
+      <ThinReasons reasons={card.thin_reasons} />
       <Fold id={`card:${card.card}:numbers`} label="all numbers">
         <CardTable card={card} stale={stale} />
       </Fold>
