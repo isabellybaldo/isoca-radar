@@ -170,8 +170,10 @@ mod tests {
             recv_ms: 1_530,
             server_s: 2,
         });
+        // window 1: [2000-1040, 3000-1000) = [960, 2000); window 2: [2000-1530, 3000-1500) =
+        // [470, 1500). Intersection [960, 1500), midpoint 960 + (1500-960)/2 = 1230.
         let r = m.minute_row(1, 60_000);
-        assert!(r.clock_offset_ms.is_some(), "{r:?}");
+        assert_eq!(r.clock_offset_ms, Some(1230));
         let r2 = m.minute_row(1, 120_000);
         assert_eq!(r2.clock_offset_ms, None, "drained, no samples this minute");
     }

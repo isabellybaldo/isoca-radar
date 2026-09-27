@@ -94,14 +94,13 @@ impl HostBand {
         self.done = true;
         self.samples.sort_unstable();
         // Fewer than half the minutes contributed a sample (skew, or plain missing data): the
-        // band is unmeasured rather than a median built on a minority of the window.
+        // band is unmeasured rather than a median built on a minority of the window. Below this
+        // point `self.samples` is never empty (0 * 2 < HOST_BAND_MINUTES already returned above).
         let median = if self.samples.len() * 2 < HOST_BAND_MINUTES as usize {
             None
         } else {
-            match self.samples.len() {
-                0 => None,
-                n => self.samples.get((n - 1) / 2).copied(),
-            }
+            let n = self.samples.len();
+            self.samples.get((n - 1) / 2).copied()
         };
         let row = RunPremiseRow {
             run_id: self.run_id,
