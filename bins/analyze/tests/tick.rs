@@ -1503,7 +1503,7 @@ async fn a_restart_seeds_last_tick_ms_so_the_late_rule_still_reaches_the_episode
 }
 
 #[tokio::test]
-async fn a_sweet_only_read_failure_never_stops_the_5a_families() {
+async fn a_sweet_only_read_failure_fails_the_whole_tick_and_the_next_one_heals() {
     let Some((owner, db)) = common::fresh().await else {
         return;
     };
@@ -1528,9 +1528,10 @@ async fn a_sweet_only_read_failure_never_stops_the_5a_families() {
         .write_batch(&no_attempt(r, "e1", T0 + H + 30_000, dec!(0.5), 1))
         .await
         .unwrap();
-    // Phase 5d ruling 2026-09-27: simulate a missing grant on a SWEET-only table (analyze_rw reads
-    // paper_intents only for SWEET; G1/EDGE never touch it) so SWEET's own read fails while every
-    // other family's tables stay readable.
+    // A missing grant on a SWEET-only table (analyze_rw reads paper_intents only for SWEET;
+    // G1/EDGE never touch it) must fail the whole tick, the same as any other family's read
+    // failing: no partial write, cursor/last_hour untouched, so the next tick heals from
+    // card_cells/meta instead of persisting an empty SWEET over good data.
     owner
         .raw_exec("REVOKE SELECT ON paper_intents FROM analyze_rw")
         .await
@@ -1539,18 +1540,32 @@ async fn a_sweet_only_read_failure_never_stops_the_5a_families() {
     let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "t", scenarios())
         .await
         .unwrap();
+    let err = a.tick(T0 + H + 45_000).await.unwrap_err();
+    a.record_error(T0 + H + 45_000, &format!("{err:#}")).await;
+    a.reset();
+    let e: Value =
+        serde_json::from_str(&rw.card_meta_get("last_error").await.unwrap().unwrap()).unwrap();
+    assert_eq!(e["ms"].as_i64(), Some(T0 + H + 45_000));
+    owner
+        .raw_exec("GRANT SELECT ON paper_intents TO analyze_rw")
+        .await
+        .unwrap();
     a.tick(T0 + H + 45_000)
         .await
-        .expect("SWEET's own read failure must not fail the whole tick");
+        .expect("the next tick succeeds once the grant is restored");
+    assert_eq!(
+        rw.card_meta_get("last_error").await.unwrap().as_deref(),
+        Some("null")
+    );
     let g1 = body(&rw, "24h", "G1").await;
     assert_eq!(cell(&g1, "NO-side episodes", "ours"), "1");
     let edge = body(&rw, "24h", "EDGE").await;
     assert_eq!(cell(&edge, "edge on the table", "ours"), "0.33");
-    // SWEET itself never got past its first (catching-up) read, so it stays under_review — but it
-    // did not take G1/EDGE down with it, and the tick as a whole reported success above.
+    // This scenario never has an executed intent (only a no_attempt), so SWEET is thin once it
+    // actually runs (its data starts inside the window) — the point is the tick as a whole healed
+    // on retry, not any particular SWEET status.
     let sweet = body(&rw, "24h", "SWEET").await;
-    assert_eq!(sweet["status"], "under_review");
-    assert!(rw.card_meta_get("fam:sweet").await.unwrap().is_none());
+    assert_eq!(sweet["status"], "warming");
     rw.close().await;
     db.drop(owner).await;
 }

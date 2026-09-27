@@ -237,16 +237,7 @@ impl Analyzer {
                 .map(|a| (a.account_id, a.bankroll))
                 .collect(),
         };
-        // Phase 5d ruling 2026-09-27: a SWEET-only read failure (missing grant, statement
-        // timeout, TooManyRows) must not stop the 5a families from updating; log it and carry on
-        // with no accounts, so this tick's SWEET sync sees nothing to build.
-        let sweet_accts = match sweet_accounts(&self.store).await {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("analyze: SWEET accounts read failed, skipping SWEET this tick: {e:#}");
-                SweetAccounts::default()
-            }
-        };
+        let sweet_accts = sweet_accounts(&self.store).await?;
         let env = Env {
             store: &self.store,
             now_ms,
@@ -270,11 +261,7 @@ impl Analyzer {
         sync(&env, &mut self.dur, &mut results, &mut meta, &mut report).await?;
         sync(&env, &mut self.g4, &mut results, &mut meta, &mut report).await?;
         sync(&env, &mut self.edge, &mut results, &mut meta, &mut report).await?;
-        // Same ruling: SWEET's own sync (its reads happen inside build_hours) is isolated the same
-        // way, so the 5a families above still get their results written this tick.
-        if let Err(e) = sync(&env, &mut self.sweet, &mut results, &mut meta, &mut report).await {
-            eprintln!("analyze: SWEET sync failed, skipping SWEET this tick: {e:#}");
-        }
+        sync(&env, &mut self.sweet, &mut results, &mut meta, &mut report).await?;
         report.ms = started.elapsed().as_millis();
         meta.push((
             "tick".to_string(),
