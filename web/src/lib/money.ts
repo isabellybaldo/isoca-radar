@@ -66,6 +66,32 @@ export function formatDecimal(value: string | null | undefined): string {
   return `${minus && !isZero(value) ? '−' : ''}${groupThousands(int)}${frac ? `.${frac}` : ''}`;
 }
 
+/** Shifts a decimal string right by `places` (× 10^places), string/BigInt math only: no float ever
+ *  sees the value. Used by `formatPercent` (× 100); not exported, since nothing else needs it yet. */
+function shiftDecimalRight(value: string, places: number): string {
+  const m = DEC.exec(value.trim());
+  if (!m) return value;
+  const [, minus, int, frac = ''] = m;
+  let digits = int + frac;
+  let fracLen = frac.length - places;
+  if (fracLen < 0) {
+    digits += '0'.repeat(-fracLen);
+    fracLen = 0;
+  }
+  const cut = digits.length - fracLen;
+  const intPart = digits.slice(0, cut).replace(/^0+(?=\d)/, '');
+  const fracPart = digits.slice(cut);
+  return `${minus}${intPart}${fracPart ? `.${fracPart}` : ''}`;
+}
+
+/** A fraction as a percent, e.g. "0.12" → "12%", "0.005" → "0.5%"; null → "—". String/BigInt math
+ *  only (never a float): annualized rates are decimal strings, not money, so `formatDecimal` (not
+ *  `formatMoney`) renders the shifted value. */
+export function formatPercent(value: string | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  return `${formatDecimal(shiftDecimalRight(value, 2))}%`;
+}
+
 /** Exact order of two decimal strings (-1, 0, 1), by string and BigInt math only. Not-a-decimal is 0. */
 export function compareDecimal(a: string, b: string): -1 | 0 | 1 {
   const ma = DEC.exec(a.trim());

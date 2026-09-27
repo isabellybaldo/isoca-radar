@@ -69,14 +69,18 @@ export function footnote(m: number): string {
   return `${m} rows tested; each interval is widened so that, together, a false 'candidate' shows up less than 1 time in 20.`;
 }
 
-const tested = (r: SweetRow) => r.label !== 'thin' && r.label !== 'not_tested';
+/** A row backend counts toward m (`cards::sweet::is_thin`/`is_not_tested`): thin, not_tested and
+ *  dead_on_paper (a YES row P1 never traded, same as not_tested — spec §7.4) are all excluded. */
+const tested = (r: SweetRow) => r.label !== 'thin' && r.label !== 'not_tested' && r.label !== 'dead_on_paper';
 
 /** Spec 5d §8: one sentence per side at the headline scenario, the 10 bips figure beside it (NO). */
 export function headline(s: SweetSeries, side: SweetSide): string {
   const rows = s.rows.filter((r) => r.side === side && r.scenario === HEADLINE_SCENARIO && r.fee_bips === 0);
   const cands = rows.filter((r) => r.label === 'candidate');
   const fee10 = s.fees.find((f) => f.fee_bips === 10);
-  const fee = side === 'no' && fee10 ? ` (at 10 bips: ${fee10.label === 'candidate' ? 1 : 0})` : '';
+  const fee = side === 'no' && fee10
+    ? ` (whole NO side at 10 bips: ${LABEL_TAG[fee10.label]}, mean ${formatMoney(fee10.mean, { signed: true })})`
+    : '';
   const SIDE = side.toUpperCase();
   if (cands.length === 0) return `${SIDE}: 0 candidates in ${rows.filter(tested).length} tested rows${fee}.`;
   const named = cands

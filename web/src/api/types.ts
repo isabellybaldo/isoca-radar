@@ -254,6 +254,7 @@ export interface SweetRow {
   on_table_eligible: Dec;
   captured: Dec;
   captured_leftover0: Dec;
+  mean_leftover0: Dec | null;
   mean: Dec | null;
   lo: Dec | null;
   hi: Dec | null;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { sweetRow } from '../test/fixtures';
 import type { SweetSeries } from '../api/types';
-import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, footnote, grid, headline, interval } from './sweet';
+import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, footnote, grid, headline, interval, nothingPays } from './sweet';
 
 const series = (rows = [sweetRow()], o: Partial<SweetSeries> = {}): SweetSeries => ({
   rows, m: rows.filter((r) => r.label !== 'thin' && r.label !== 'not_tested').length, z: '2.576',
@@ -26,10 +26,16 @@ describe('sweet helpers', () => {
       sweetRow({ fee_bips: 10, label: 'negative' }),
     ];
     expect(headline(series(rows, { fees: [{ fee_bips: 10, captured: '-1', mean: '-0.1', label: 'negative' }] }), 'no'))
-      .toBe('NO: 0 candidates in 2 tested rows (at 10 bips: 0).');
+      .toBe('NO: 0 candidates in 2 tested rows (whole NO side at 10 bips: NEGATIVE, mean −$0.10).');
     const cands = [sweetRow({ dimension: 'category', bucket: 'sports', label: 'candidate' }), sweetRow({ dimension: 's', bucket: '2', label: 'candidate' })];
     expect(headline(series(cands), 'no')).toBe('NO: 2 candidates: sports, 2 legs.');
     expect(headline(series([]), 'yes')).toBe('YES: 0 candidates in 0 tested rows.');
+  });
+
+  it('excludes dead_on_paper from the tested count and from "nothing pays", same as backend m', () => {
+    const rows = [sweetRow({ scenario: 'sp-idle', label: 'dead_on_paper' })];
+    expect(headline(series(rows), 'no')).toBe('NO: 0 candidates in 0 tested rows.');
+    expect(nothingPays(series(rows))).toBe(false);
   });
 
   it('lays out buckets by scenarios and formats intervals as money', () => {

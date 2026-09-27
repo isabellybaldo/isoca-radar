@@ -161,7 +161,11 @@ export const HELP = {
   },
   sweetYes: {
     title: 'Why is YES beyond 30 days not tested?',
-    text: 'The YES paper account only buys complete baskets that resolve within 30 days and clear a 10% annualized edge. Anything else it skips, so there is nothing captured to measure; the row shows the edge on the table and whether even that clears the hurdle.',
+    text: 'The YES paper account only buys complete baskets that resolve within 30 days and clear a 10% annualized edge. Anything else it skips, so there is nothing captured to measure; the row shows the edge on the table and whether even that clears the hurdle. The annualized figure is a simple annual rate, days floored at 7 like P1.',
+  },
+  sweetNo: {
+    title: 'What does the NO mean measure?',
+    text: 'Dollars per $100 per trade, not a total: the NO account trades up to about $100 an attempt, so the mean is what one attempt like that made or lost. It is not annualized: the NO side gets its money back in seconds, so there is no lock-up to annualize away.',
   },
 } satisfies Record<string, HelpText>;
 
