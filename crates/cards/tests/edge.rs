@@ -72,6 +72,7 @@ fn ctx<'a>(sc: &'a [ScenarioLat]) -> BodyCtx<'a> {
         since_ms: Some(0),
         computed_ms: H,
         scenarios: sc,
+        hurdle: None,
     }
 }
 

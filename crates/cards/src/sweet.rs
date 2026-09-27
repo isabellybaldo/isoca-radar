@@ -7,10 +7,13 @@
 //! the premise-key suffix, so an edit starts a new key and 5a's catch-up rebuilds the card from
 //! stored history. (Plain labels — `OTHER`, `UNTAGGED`, `NOT_NET_POSITIVE`, `DROPPED`, `DIMS` —
 //! don't change a computation, so they are left out.)
+use crate::body::{BodyCtx, Card, Parts, Series};
 use crate::cells::{CellData, HourInput, Num, Side};
+use crate::stats::dec;
 use crate::{DAY_MS, HOUR_MS, hour_of};
 use arb_core::premises::sha8;
 use rust_decimal::Decimal;
+use rust_decimal::MathematicalOps;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -770,4 +773,363 @@ impl CellData for SweetCell {
     fn max_part(&self) {}
 
     fn merge_max(_: &mut (), _: &()) {}
+}
+
+pub const CAVEAT: &str = "Captured is paper: first in line at t_x against the recorded book, minus our own taken liquidity. Real bots compete for the same depth; a friend's bot filled 6 of 24 signals. A candidate is a question for real small orders, not an answer.";
+
+pub fn footnote(m: i64) -> String {
+    format!(
+        "{m} rows tested; each interval is widened so that, together, a false 'candidate' shows up less than 1 time in 20."
+    )
+}
+
+pub fn z_for(m: i64) -> Decimal {
+    for (lim, z) in Z_TABLE {
+        if m <= lim {
+            return Decimal::new(z, 3);
+        }
+    }
+    Decimal::new(Z_TABLE[Z_TABLE.len() - 1].1, 3)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowStats {
+    pub n: i64,
+    pub mean: Option<Decimal>,
+    /// Cluster-robust (event-hour clusters), ratio estimator (spec §7.2); None below 2 clusters.
+    pub se: Option<Decimal>,
+    /// (Σ|x|)² / Σx²; None when Σx² = 0.
+    pub eff_n: Option<Decimal>,
+}
+
+pub fn row_stats(a: &Acc) -> RowStats {
+    let n = a.n_exec();
+    if n <= 0 {
+        return RowStats {
+            n,
+            mean: None,
+            se: None,
+            eff_n: None,
+        };
+    }
+    let nd = Decimal::from(n);
+    let mean = a.sx.0 / nd;
+    let ssr = (a.sc2.0 - Decimal::TWO * mean * a.scn.0 + mean * mean * Decimal::from(a.sn2))
+        .max(Decimal::ZERO);
+    let se = if a.clusters >= 2 {
+        let c = Decimal::from(a.clusters);
+        (c / (c - Decimal::ONE) * ssr).sqrt().map(|r| r / nd)
+    } else {
+        None
+    };
+    let eff_n = (a.sx2.0 > Decimal::ZERO).then(|| a.sabs.0 * a.sabs.0 / a.sx2.0);
+    RowStats {
+        n,
+        mean: Some(mean),
+        se,
+        eff_n,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Label {
+    Candidate,
+    Negative,
+    Inconclusive,
+    Thin,
+    NotTested,
+    DeadOnPaper,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    pub label: Label,
+    pub lo: Option<Decimal>,
+    pub hi: Option<Decimal>,
+    pub annualized: Option<Decimal>,
+    pub annualized_lo: Option<Decimal>,
+    pub annualized_upper: Option<Decimal>,
+    pub few_trades: bool,
+}
+
+pub fn is_thin(a: &Acc) -> bool {
+    a.n_exec() < MIN_EXEC || a.clusters < MIN_CLUSTERS
+}
+
+/// A YES row where P1 took nothing: every intent was one of its three filter skips (spec §7.4).
+pub fn is_not_tested(side: Side, a: &Acc) -> bool {
+    side == Side::Yes && a.attempts > 0 && a.filter_skips == a.attempts
+}
+
+fn year() -> Decimal {
+    Decimal::from(365)
+}
+
+pub fn verdict(side: Side, a: &Acc, z: Decimal, hurdle: Option<Decimal>) -> Verdict {
+    let st = row_stats(a);
+    let (lo, hi) = match (st.mean, st.se) {
+        (Some(m), Some(se)) => (Some(m - z * se), Some(m + z * se)),
+        _ => (None, None),
+    };
+    let yes_annualizable = side == Side::Yes && a.cost_days.0 > Decimal::ZERO && a.nodays == 0;
+    let annualized = yes_annualizable.then(|| a.sx.0 / a.cost_days.0 * year());
+    let annualized_lo = if yes_annualizable {
+        lo.map(|l| l * Decimal::from(st.n) / a.cost_days.0 * year())
+    } else {
+        None
+    };
+    let annualized_upper =
+        (side == Side::Yes && a.up_c.0 > Decimal::ZERO).then(|| a.up_w.0 / a.up_c.0);
+    let few_trades = st
+        .eff_n
+        .is_some_and(|e| e < Decimal::from(FEW_TRADES_EFF_N));
+    let label = if is_not_tested(side, a) {
+        match (annualized_upper, hurdle) {
+            (Some(u), Some(h)) if u < h => Label::DeadOnPaper,
+            _ => Label::NotTested,
+        }
+    } else if is_thin(a) {
+        Label::Thin
+    } else if lo.is_some_and(|l| l > Decimal::ZERO)
+        && (side == Side::No || matches!((annualized_lo, hurdle), (Some(al), Some(h)) if al >= h))
+    {
+        Label::Candidate
+    } else if hi.is_some_and(|h| h < Decimal::ZERO) {
+        Label::Negative
+    } else {
+        Label::Inconclusive
+    };
+    Verdict {
+        label,
+        lo,
+        hi,
+        annualized,
+        annualized_lo,
+        annualized_upper,
+        few_trades,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweetRow {
+    pub side: String,
+    /// The account's scenario (without the fee suffix).
+    pub scenario: String,
+    pub fee_bips: i64,
+    pub latency_ms: Option<i64>,
+    pub dimension: String,
+    pub bucket: String,
+    pub label: Label,
+    pub few_trades: bool,
+    pub n_exec: i64,
+    pub n_filled: i64,
+    pub n_missed: i64,
+    pub clusters: i64,
+    pub n_attempts: i64,
+    pub skipped: BTreeMap<String, i64>,
+    pub episodes: i64,
+    pub flagged: i64,
+    pub on_table: String,
+    pub on_table_eligible: String,
+    pub captured: String,
+    pub captured_leftover0: String,
+    pub mean: Option<String>,
+    pub lo: Option<String>,
+    pub hi: Option<String>,
+    pub eff_n: Option<String>,
+    pub cost: String,
+    pub annualized: Option<String>,
+    pub annualized_lo: Option<String>,
+    pub annualized_upper: Option<String>,
+    pub leftover_unpriced: i64,
+    pub pooled: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweetFee {
+    pub fee_bips: i64,
+    pub captured: String,
+    pub mean: Option<String>,
+    pub label: Label,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweetSeries {
+    pub rows: Vec<SweetRow>,
+    pub m: i64,
+    pub z: String,
+    pub category_available: bool,
+    pub hurdle: Option<String>,
+    /// The NO side's "all" rows at the headline scenario, by fee (spec §8).
+    pub fees: Vec<SweetFee>,
+}
+
+/// Display precision for per-attempt figures (money): exact sums stay exact.
+fn d6(v: Decimal) -> String {
+    dec(v.round_dp(6))
+}
+
+fn order(list: &[&str], v: &str) -> usize {
+    list.iter().position(|x| *x == v).unwrap_or(list.len())
+}
+
+fn bucket_order(dim: &str, bucket: &str) -> usize {
+    match dim {
+        "category" => CATEGORIES
+            .iter()
+            .position(|(b, _)| *b == bucket)
+            .unwrap_or_else(|| {
+                if bucket == OTHER {
+                    CATEGORIES.len()
+                } else {
+                    CATEGORIES.len() + 1
+                }
+            }),
+        "days" => order(&DAYS_BUCKETS, bucket),
+        "s" => order(&S_BUCKETS, bucket),
+        "hour" => order(&HOUR_BUCKETS, bucket),
+        _ => 0,
+    }
+}
+
+pub fn sweet_parts(c: &SweetCell, ctx: &BodyCtx<'_>) -> Parts {
+    let parsed: Vec<(Side, String, String, String, &Acc)> = c
+        .rows
+        .iter()
+        .filter_map(|(k, a)| parse_key(k).map(|(s, sc, d, b)| (s, sc, d, b, a)))
+        .collect();
+    let m = i64::try_from(
+        parsed
+            .iter()
+            .filter(|(s, _, _, _, a)| !is_thin(a) && !is_not_tested(*s, a))
+            .count(),
+    )
+    .unwrap_or(i64::MAX);
+    let z = z_for(m);
+    let latency = |name: &str| {
+        ctx.scenarios
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.latency_ms)
+    };
+    let mut rows: Vec<SweetRow> = parsed
+        .iter()
+        .map(|(side, scen, dim, bucket, a)| {
+            let v = verdict(*side, a, z, ctx.hurdle);
+            let st = row_stats(a);
+            let (base, fee) = fee_of(scen);
+            SweetRow {
+                side: side_str(*side).to_string(),
+                latency_ms: latency(&base),
+                scenario: base,
+                fee_bips: fee,
+                dimension: dim.clone(),
+                bucket: bucket.clone(),
+                label: v.label,
+                few_trades: v.few_trades,
+                n_exec: a.n_exec(),
+                n_filled: a.filled,
+                n_missed: a.missed,
+                clusters: a.clusters,
+                n_attempts: a.attempts,
+                skipped: a.skipped.clone(),
+                episodes: a.eps,
+                flagged: a.flagged,
+                on_table: dec(a.on_table.0),
+                on_table_eligible: dec(a.on_table_elig.0),
+                captured: dec(a.sx.0),
+                captured_leftover0: dec(a.sx0.0),
+                mean: st.mean.map(d6),
+                lo: v.lo.map(d6),
+                hi: v.hi.map(d6),
+                eff_n: st.eff_n.map(|e| dec(e.round_dp(2))),
+                cost: dec(a.cost.0),
+                annualized: v.annualized.map(|x| dec(x.round_dp(4))),
+                annualized_lo: v.annualized_lo.map(|x| dec(x.round_dp(4))),
+                annualized_upper: v.annualized_upper.map(|x| dec(x.round_dp(4))),
+                leftover_unpriced: a.unpriced,
+                pooled: a.pooled,
+            }
+        })
+        .collect();
+    rows.sort_by(|x, y| {
+        (
+            x.side.as_str(),
+            order(&DIMS, &x.dimension),
+            bucket_order(&x.dimension, &x.bucket),
+            x.latency_ms,
+            x.fee_bips,
+            x.scenario.as_str(),
+        )
+            .cmp(&(
+                y.side.as_str(),
+                order(&DIMS, &y.dimension),
+                bucket_order(&y.dimension, &y.bucket),
+                y.latency_ms,
+                y.fee_bips,
+                y.scenario.as_str(),
+            ))
+    });
+    let fees: Vec<SweetFee> = rows
+        .iter()
+        .filter(|r| r.side == "no" && r.dimension == "all" && r.scenario == HEADLINE)
+        .map(|r| SweetFee {
+            fee_bips: r.fee_bips,
+            captured: r.captured.clone(),
+            mean: r.mean.clone(),
+            label: r.label,
+        })
+        .collect();
+    let n = rows
+        .iter()
+        .filter(|r| r.dimension == "all" && r.fee_bips == 0)
+        .map(|r| r.n_exec)
+        .sum();
+    let mut notes = vec![
+        CAVEAT.to_string(),
+        footnote(m),
+        "Rows are one dimension at a time; the unit is one executed paper attempt (filled or missed), clustered by event and hour.".to_string(),
+        "Leftover legs are valued at their 30 s markout mid; captured_leftover0 values them at 0.".to_string(),
+        "YES rows measure only what P1 trades: complete baskets resolving within 30 days with at least the hurdle annualized; the rest is not tested.".to_string(),
+        "YES complete sets are counted at 1 each (a non-binary resolution is an integrity class of its own).".to_string(),
+        "Flagged episodes (engine_suspect, stale_transport) are excluded and counted, so SWEET does not reconcile with account equity.".to_string(),
+    ];
+    if ctx.hurdle.is_none() {
+        notes.push(
+            "The YES hurdle could not be read from policies.toml: no YES row can be a candidate."
+                .to_string(),
+        );
+    }
+    if !CATEGORY_AVAILABLE {
+        notes.push("No category: Gamma listed no tags for these events.".to_string());
+    }
+    Parts {
+        card: "SWEET",
+        paper: "sweet",
+        title: "Sweet spots",
+        params: params_text(),
+        n,
+        columns: Vec::new(),
+        series: Series {
+            sweet: Some(SweetSeries {
+                rows,
+                m,
+                z: dec(z),
+                category_available: CATEGORY_AVAILABLE,
+                hurdle: ctx.hurdle.map(dec),
+                fees,
+            }),
+            ..Series::default()
+        },
+        notes,
+        thin: Vec::new(),
+        episode_link: None,
+    }
+}
+
+impl Card for SweetCell {
+    fn parts(agg: &Self, _max: &(), ctx: &BodyCtx<'_>) -> Vec<Parts> {
+        vec![sweet_parts(agg, ctx)]
+    }
 }

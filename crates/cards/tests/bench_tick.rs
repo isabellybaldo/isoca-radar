@@ -165,6 +165,7 @@ fn tick<C: Card>(
             since_ms: Some(0),
             computed_ms: to,
             scenarios: sc,
+            hurdle: None,
         };
         for b in C::bodies(agg, &max, &ctx) {
             bytes += serde_json::to_string(&b).unwrap().len();

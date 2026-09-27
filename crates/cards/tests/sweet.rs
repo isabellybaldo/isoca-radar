@@ -557,3 +557,282 @@ fn sweet_keys_its_family_with_the_suffix_and_rebuilds_late_hours() {
     assert_eq!(cards::cells::G1Cell::key_suffix(), "");
     assert_eq!(cards::edge::EdgeCell::LATE_MS, 0);
 }
+
+use cards::body::{BodyCtx, Card, ScenarioLat, Status};
+
+fn acc_with(xs: &[(&str, Decimal)]) -> Acc {
+    // one executed attempt per (event, x), all filled; clusters by event within one hour
+    let mut a = Acc::default();
+    let mut by: BTreeMap<&str, (i64, Decimal)> = BTreeMap::new();
+    for (ev, x) in xs {
+        a.attempts += 1;
+        a.filled += 1;
+        a.sx.0 += *x;
+        a.sx2.0 += *x * *x;
+        a.sabs.0 += x.abs();
+        a.cost.0 += dec!(10);
+        a.cost_days.0 += dec!(10) * dec!(5);
+        let e = by.entry(ev).or_insert((0, Decimal::ZERO));
+        e.0 += 1;
+        e.1 += *x;
+    }
+    for (n, c) in by.values() {
+        a.clusters += 1;
+        a.sc2.0 += *c * *c;
+        a.scn.0 += *c * Decimal::from(*n);
+        a.sn2 += n * n;
+    }
+    a
+}
+fn evs(n: usize, x: Decimal) -> Vec<(String, Decimal)> {
+    (0..n).map(|i| (format!("ev{i}"), x)).collect()
+}
+fn acc_n(n: usize, x: Decimal) -> Acc {
+    let v = evs(n, x);
+    acc_with(&v.iter().map(|(e, x)| (e.as_str(), *x)).collect::<Vec<_>>())
+}
+
+#[test]
+fn z_uses_the_next_larger_m() {
+    assert_eq!(z_for(0), dec!(1.960));
+    assert_eq!(z_for(1), dec!(1.960));
+    assert_eq!(z_for(2), dec!(2.576));
+    assert_eq!(z_for(51), dec!(3.481));
+    assert_eq!(z_for(500), dec!(3.891));
+    assert_eq!(
+        z_for(10_000),
+        dec!(3.891),
+        "rows never exceed 196; the last entry is a floor"
+    );
+}
+
+#[test]
+fn the_cluster_se_equals_the_plain_se_when_every_cluster_has_one_attempt() {
+    // xs = 1, 2, 3, 4: mean 2.5, sample sd = sqrt(5/3), se = sd / 2
+    let a = acc_with(&[
+        ("a", dec!(1)),
+        ("b", dec!(2)),
+        ("c", dec!(3)),
+        ("d", dec!(4)),
+    ]);
+    let s = row_stats(&a);
+    assert_eq!(s.n, 4);
+    assert_eq!(s.mean, Some(dec!(2.5)));
+    let se = s.se.unwrap();
+    // sqrt(4/3 * 5) / 4 = 0.6454972...
+    assert!((se - dec!(0.6454972)).abs() < dec!(0.0000001), "{se}");
+}
+
+#[test]
+fn clusters_widen_the_se_when_one_event_repeats() {
+    let spread = row_stats(&acc_with(&[
+        ("a", dec!(1)),
+        ("b", dec!(1)),
+        ("c", dec!(-1)),
+        ("d", dec!(-1)),
+    ]));
+    let clumped = row_stats(&acc_with(&[
+        ("a", dec!(1)),
+        ("a", dec!(1)),
+        ("c", dec!(-1)),
+        ("c", dec!(-1)),
+    ]));
+    assert!(clumped.se.unwrap() > spread.se.unwrap());
+    assert_eq!(
+        row_stats(&acc_with(&[("a", dec!(1))])).se,
+        None,
+        "one cluster: no se"
+    );
+}
+
+#[test]
+fn missed_attempts_count_in_the_mean() {
+    let mut a = acc_with(&[("a", dec!(1)), ("b", dec!(1))]);
+    a.filled -= 1;
+    a.missed += 1; // the second was a miss that still traded
+    assert_eq!(row_stats(&a).n, 2);
+    assert_eq!(row_stats(&a).mean, Some(dec!(1)));
+}
+
+#[test]
+fn labels_follow_the_interval_the_minimums_and_the_hurdle() {
+    let z = dec!(1.960);
+    let h = Some(dec!(0.10));
+    // 30 events, x = +0.10 each: se 0, lo = 0.10 > 0 → candidate (NO side has no hurdle)
+    assert_eq!(
+        verdict(Side::No, &acc_n(30, dec!(0.10)), z, h).label,
+        Label::Candidate
+    );
+    assert_eq!(
+        verdict(Side::No, &acc_n(30, dec!(-0.10)), z, h).label,
+        Label::Negative
+    );
+    assert_eq!(
+        verdict(Side::No, &acc_n(29, dec!(0.10)), z, h).label,
+        Label::Thin
+    );
+    // 30 attempts in 29 clusters: thin
+    let mut v = evs(29, dec!(0.10));
+    v.push(("ev0".into(), dec!(0.10)));
+    let a = acc_with(&v.iter().map(|(e, x)| (e.as_str(), *x)).collect::<Vec<_>>());
+    assert_eq!((a.n_exec(), a.clusters), (30, 29));
+    assert_eq!(verdict(Side::No, &a, z, h).label, Label::Thin);
+    // mixed signs: inconclusive
+    let mut mixed = evs(15, dec!(1));
+    mixed.extend((15..30).map(|i| (format!("ev{i}"), dec!(-1))));
+    let m = acc_with(
+        &mixed
+            .iter()
+            .map(|(e, x)| (e.as_str(), *x))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(verdict(Side::No, &m, z, h).label, Label::Inconclusive);
+    // YES: lo 0.10 per $10 over 5 days: 0.10 x 30 / (300 x 5) x 365 = 0.73 >= 0.10 → candidate
+    assert_eq!(
+        verdict(Side::Yes, &acc_n(30, dec!(0.10)), z, h).label,
+        Label::Candidate
+    );
+    // YES with the hurdle at 1.00: the annualized lower bound fails → inconclusive
+    assert_eq!(
+        verdict(Side::Yes, &acc_n(30, dec!(0.10)), z, Some(dec!(1))).label,
+        Label::Inconclusive
+    );
+    // YES without a hurdle (analyze could not read it): never a candidate
+    assert_eq!(
+        verdict(Side::Yes, &acc_n(30, dec!(0.10)), z, None).label,
+        Label::Inconclusive
+    );
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn all_three_p1_filter_skips_make_a_yes_row_not_tested_and_a_poor_upper_bound_dead() {
+    for r in P1_FILTER_SKIPS {
+        let mut a = Acc::default();
+        a.attempts = 3;
+        a.filter_skips = 3;
+        a.skipped.insert(r.to_string(), 3);
+        a.up_w.0 = dec!(5);
+        a.up_c.0 = dec!(100); // upper bound 5% < 10%
+        assert_eq!(
+            verdict(Side::Yes, &a, dec!(1.96), Some(dec!(0.10))).label,
+            Label::DeadOnPaper,
+            "{r}"
+        );
+        a.up_w.0 = dec!(50); // 50% ≥ 10%
+        assert_eq!(
+            verdict(Side::Yes, &a, dec!(1.96), Some(dec!(0.10))).label,
+            Label::NotTested,
+            "{r}"
+        );
+        assert_eq!(
+            verdict(Side::No, &a, dec!(1.96), Some(dec!(0.10))).label,
+            Label::Thin,
+            "NO rows are never not_tested"
+        );
+    }
+}
+
+#[test]
+fn few_trades_fire_below_an_effective_n_of_five() {
+    let mut v = evs(29, dec!(0.01));
+    v.push(("big".into(), dec!(50)));
+    let a = acc_with(&v.iter().map(|(e, x)| (e.as_str(), *x)).collect::<Vec<_>>());
+    assert!(verdict(Side::No, &a, dec!(1.96), None).few_trades);
+    assert!(!verdict(Side::No, &acc_n(30, dec!(1)), dec!(1.96), None).few_trades);
+}
+
+fn ctx<'a>(sc: &'a [ScenarioLat], hurdle: Option<Decimal>) -> BodyCtx<'a> {
+    BodyCtx {
+        win: "30d",
+        base: Status::Live,
+        premise_key: "k",
+        analyze_version: "t",
+        from_ms: Some(0),
+        to_ms: Some(H),
+        since_ms: Some(0),
+        computed_ms: H,
+        scenarios: sc,
+        hurdle,
+    }
+}
+fn lats() -> Vec<ScenarioLat> {
+    vec![
+        ScenarioLat {
+            name: "sp-idle".into(),
+            net_ms: 145,
+            latency_ms: 300,
+        },
+        ScenarioLat {
+            name: "colo-idle".into(),
+            net_ms: 1,
+            latency_ms: 52,
+        },
+    ]
+}
+
+#[test]
+fn an_empty_window_renders_every_row_thin_with_m_zero() {
+    let sc = lats();
+    let body = SweetCell::bodies(&SweetCell::default(), &(), &ctx(&sc, Some(dec!(0.10))));
+    assert_eq!(body.len(), 1);
+    let b = &body[0];
+    assert_eq!(
+        (b.card.as_str(), b.paper.as_str(), b.status),
+        ("SWEET", "sweet", Status::Live)
+    );
+    let s = b.series.sweet.as_ref().unwrap();
+    assert_eq!((s.m, s.z.as_str(), s.rows.len()), (0, "1.96", 0));
+    assert!(b.notes.iter().any(|n| n == CAVEAT));
+}
+
+#[test]
+fn the_body_carries_rows_m_z_fees_latency_and_the_footnote() {
+    let sc = lats();
+    let mut c = SweetCell::default();
+    c.rows.insert(
+        row_key(Side::No, "sp-idle", "all", "all"),
+        acc_n(30, dec!(0.10)),
+    );
+    c.rows.insert(
+        row_key(Side::No, "sp-idle", "days", "1-7"),
+        acc_n(30, dec!(-0.10)),
+    );
+    c.rows.insert(
+        row_key(Side::No, "colo-idle", "all", "all"),
+        acc_n(3, dec!(0.10)),
+    );
+    c.rows.insert(
+        row_key(Side::No, "sp-idle@10", "all", "all"),
+        acc_n(30, dec!(0.05)),
+    );
+    let b = &SweetCell::bodies(&c, &(), &ctx(&sc, Some(dec!(0.10))))[0];
+    let s = b.series.sweet.as_ref().unwrap();
+    assert_eq!(s.m, 3, "the thin colo-idle row is not tested");
+    assert_eq!(s.z, "2.576");
+    let r = s
+        .rows
+        .iter()
+        .find(|r| r.scenario == "sp-idle" && r.dimension == "all")
+        .unwrap();
+    assert_eq!(
+        (r.label, r.latency_ms, r.fee_bips, r.n_exec),
+        (Label::Candidate, Some(300), 0, 30)
+    );
+    assert_eq!(r.mean.as_deref(), Some("0.1"));
+    let fee = s.rows.iter().find(|r| r.fee_bips == 10).unwrap();
+    assert_eq!(
+        (fee.scenario.as_str(), fee.latency_ms),
+        ("sp-idle", Some(300))
+    );
+    assert_eq!(
+        s.fees.iter().map(|f| f.fee_bips).collect::<Vec<_>>(),
+        vec![0, 10]
+    );
+    assert!(b.notes.contains(&footnote(3)));
+    assert_eq!(
+        footnote(3),
+        "3 rows tested; each interval is widened so that, together, a false 'candidate' shows up less than 1 time in 20."
+    );
+    assert!(b.hash.len() == 64);
+}

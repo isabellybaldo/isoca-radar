@@ -16,6 +16,7 @@ fn ctx(base: Status) -> BodyCtx<'static> {
         since_ms: Some(900 * 3_600_000),
         computed_ms: 1_167 * 3_600_000 + 5,
         scenarios: &[],
+        hurdle: None,
     }
 }
 

@@ -671,6 +671,8 @@ fn family_results<C: Card>(
             since_ms: since,
             computed_ms: env.now_ms,
             scenarios: env.scenarios,
+            // Task 8 wires the real YES hurdle (P1's min_annualized from policies.toml).
+            hurdle: None,
         }
     };
     let mut emit = |parts: Vec<Parts>, ctx: &BodyCtx<'_>| -> anyhow::Result<()> {
