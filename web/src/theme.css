@@ -117,6 +117,7 @@ svg.tl { display: block; width: 100%; height: 70px; }
 .sw.p2 { background: var(--rose); }
 .sw.p3 { background: var(--salmon); }
 .cardgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.box.paper > .box-head h2 { font-family: var(--body); font-size: 13px; font-weight: 400; color: var(--dim); }
 .cardv { border: 2px solid var(--line); background: var(--chip); padding: 8px; min-width: 0; display: grid; gap: 6px; align-content: start; }
 .cardv h3 { font-family: var(--px); font-size: 9px; line-height: 1.5; flex: 1; min-width: 0; }
 .cardv .rowlabel { color: var(--dim); }
@@ -135,7 +136,7 @@ svg.histo { display: block; width: 100%; height: 60px; background: var(--bg); }
 .histo .net { fill: var(--accent); }
 .stale { color: var(--salmon); }
 ul.plain { list-style: none; display: grid; gap: 6px; }
-@media (max-width: 760px) { .cardgrid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 900px) { .cardgrid { grid-template-columns: minmax(0, 1fr); } }
 .teaser { color: var(--teal); }
 @media (prefers-reduced-motion: reduce) { .toggle.wiggle, .blink { animation: none; } }
 .box-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

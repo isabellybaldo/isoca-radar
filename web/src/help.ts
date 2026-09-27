@@ -109,7 +109,7 @@ export const HELP = {
   },
   papers: {
     title: 'What is this page?',
-    text: 'Published results on prediction-market arbitrage, recomputed live on our own data. Each card shows the paper’s number, the paper’s method on our data, and our method, with the sample size, a status and a hash that identifies exactly what was computed.',
+    text: 'Their number, their method on our data, our method. Same market, different weeks. Published results on prediction-market arbitrage, recomputed live on our own data. Each card shows the paper’s number, the paper’s method on our data, and our method, with the sample size, a status and a hash that identifies exactly what was computed.',
   },
   gebele: {
     title: 'What does this paper measure?',
