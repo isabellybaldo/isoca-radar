@@ -3,8 +3,10 @@
 //! reads the rows (store) and calls in. No IO, no clock, no floats.
 //!
 //! Parameters are versioned card-side, not as a premise area (spec §6, review B1): every constant
-//! below enters `params_text()`, whose sha8 is the premise-key suffix, so an edit starts a new key
-//! and 5a's catch-up rebuilds the card from stored history.
+//! that changes which rows exist or how a row is computed enters `params_text()`, whose sha8 is
+//! the premise-key suffix, so an edit starts a new key and 5a's catch-up rebuilds the card from
+//! stored history. (Plain labels — `OTHER`, `UNTAGGED`, `NOT_NET_POSITIVE`, `DROPPED`, `DIMS` —
+//! don't change a computation, so they are left out.)
 use crate::cells::Side;
 use crate::{DAY_MS, HOUR_MS};
 use arb_core::premises::sha8;
@@ -233,6 +235,12 @@ pub fn params_text() -> String {
     for (m, z) in Z_TABLE {
         let _ = write!(s, "{m}:{z},");
     }
+    let _ = write!(
+        s,
+        ";fee_bips={};filter_skips={}",
+        FEE_BIPS.map(|f| f.to_string()).join(","),
+        P1_FILTER_SKIPS.join(","),
+    );
     s.push_str(";cats=");
     for (b, slugs) in CATEGORIES {
         let _ = write!(s, "{b}:{}|", slugs.join(","));
@@ -326,8 +334,8 @@ pub fn fee_of(scenario: &str) -> (String, i64) {
 }
 
 /// An intent's state for SWEET: (skip reason, pending). An intent with no skip and no exec row is
-/// pending while its planned execution is under IN_FLIGHT_MS old, and dropped after that (a
-/// restart drops pending intents).
+/// pending while its planned execution is at most IN_FLIGHT_MS old (exactly IN_FLIGHT_MS still
+/// counts), and dropped only once it is older than that (a restart drops pending intents).
 pub fn classify_intent(
     skip: Option<String>,
     planned_exec_ms: Option<i64>,
@@ -338,7 +346,7 @@ pub fn classify_intent(
         return (skip, false);
     }
     match planned_exec_ms {
-        Some(t) if t > now_ms - IN_FLIGHT_MS => (None, true),
+        Some(t) if t >= now_ms - IN_FLIGHT_MS => (None, true),
         _ => (Some(DROPPED.to_string()), false),
     }
 }
@@ -367,6 +375,10 @@ pub struct Attempt {
     pub side: Side,
     /// The row scenario (`row_scenario`).
     pub scenario: String,
+    /// The episode's complete-set size S (its number of legs). A YES leg that filled 0 writes no
+    /// ledger row (`Account::buy`, sim/account.rs:172-174), so `captured` compares this against
+    /// the legs actually present in `lines` rather than trusting `net.len()` alone.
+    pub s_legs: i64,
     /// The skip reason (`classify_intent`), None when executed or pending.
     pub skip: Option<String>,
     /// (exec_ms, q_eff) once executed.
@@ -420,9 +432,14 @@ pub fn captured(a: &Attempt) -> Captured {
             out.pooled += 1;
         }
     }
+    // Spec §4: sets = min over the S legs. A leg that filled 0 writes no row (`net` lacks it), so
+    // a YES episode with fewer legs present than its S never pays out a set at all — not just a
+    // smaller one.
     let sets = match a.side {
-        Side::Yes => net.values().min().copied().unwrap_or(Decimal::ZERO),
-        Side::No => Decimal::ZERO,
+        Side::Yes if i64::try_from(net.len()).unwrap_or(i64::MAX) >= a.s_legs => {
+            net.values().min().copied().unwrap_or(Decimal::ZERO)
+        }
+        _ => Decimal::ZERO,
     };
     let mut leftover = Decimal::ZERO;
     for (leg, q) in &net {

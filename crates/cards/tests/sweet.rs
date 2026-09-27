@@ -37,6 +37,7 @@ fn convert(q: Decimal, cash: Decimal) -> Line {
 fn attempt(
     side: Side,
     q_eff: Decimal,
+    s_legs: i64,
     lines: Vec<Line>,
     mids: &[(&str, &str, Decimal)],
 ) -> Attempt {
@@ -44,6 +45,7 @@ fn attempt(
         episode_id: "e1".into(),
         side,
         scenario: "sp-idle".into(),
+        s_legs,
         skip: None,
         exec: Some((0, q_eff)),
         pending: false,
@@ -165,6 +167,11 @@ fn intents_classify_as_skipped_pending_executed_or_dropped() {
         "a restart dropped it"
     );
     assert_eq!(
+        classify_intent(None, Some(now - IN_FLIGHT_MS), false, now),
+        (None, true),
+        "exactly IN_FLIGHT_MS old is still pending; dropped only past it"
+    );
+    assert_eq!(
         classify_intent(None, None, false, now),
         (Some(DROPPED.into()), false)
     );
@@ -175,6 +182,7 @@ fn a_no_attempt_converts_and_realizes_its_edge() {
     let a = attempt(
         Side::No,
         dec!(10),
+        2,
         vec![
             buy("m0", "no", dec!(10), dec!(-4.00)),
             buy("m1", "no", dec!(10), dec!(-5.10)),
@@ -199,6 +207,7 @@ fn a_yes_attempt_counts_its_complete_sets_at_one_each() {
     let a = attempt(
         Side::Yes,
         dec!(10),
+        3,
         vec![
             buy("a", "yes", dec!(10), dec!(-3.00)),
             buy("b", "yes", dec!(10), dec!(-3.50)),
@@ -213,9 +222,11 @@ fn a_yes_attempt_counts_its_complete_sets_at_one_each() {
 #[test]
 fn a_missed_attempt_with_a_partial_buy_and_unwind_is_negative() {
     // q_eff = 0: one leg bought 10, the other none; 6 unwound; 4 left, valued at the 30 s mid.
+    // s_legs = 2: the episode has two legs, but the other filled 0 and wrote no ledger row.
     let a = attempt(
         Side::No,
         dec!(0),
+        2,
         vec![
             buy("m0", "no", dec!(10), dec!(-4.00)),
             sell("m0", "no", dec!(6), dec!(2.30)),
@@ -239,6 +250,7 @@ fn a_yes_leftover_beyond_the_sets_is_valued_at_its_mid_or_zero_when_unpriced() {
     let priced = captured(&attempt(
         Side::Yes,
         dec!(10),
+        3,
         lines.clone(),
         &[("a", "yes", dec!(0.30))],
     ));
@@ -246,11 +258,34 @@ fn a_yes_leftover_beyond_the_sets_is_valued_at_its_mid_or_zero_when_unpriced() {
         (priced.x, priced.x0, priced.unpriced),
         (dec!(0.10), dec!(-0.50), 0)
     );
-    let unpriced = captured(&attempt(Side::Yes, dec!(10), lines, &[]));
+    let unpriced = captured(&attempt(Side::Yes, dec!(10), 3, lines, &[]));
     assert_eq!(
         (unpriced.x, unpriced.x0, unpriced.unpriced),
         (dec!(-0.50), dec!(-0.50), 1)
     );
+}
+
+#[test]
+fn a_yes_attempt_missing_a_whole_leg_pays_no_set_at_all() {
+    // S = 3, but leg c filled 0 and wrote no ledger row at all (sim/account.rs:172-174): a and b
+    // are fully bought and nothing was unwound, yet this is not two complete sets — it is zero.
+    let a = attempt(
+        Side::Yes,
+        dec!(0),
+        3,
+        vec![
+            buy("a", "yes", dec!(10), dec!(-3.00)),
+            buy("b", "yes", dec!(10), dec!(-3.50)),
+        ],
+        &[("a", "yes", dec!(0.30)), ("b", "yes", dec!(0.35))],
+    );
+    let c = captured(&a);
+    // x0 = cash_back - cash_out with no set credit (sets = 0, not min(10, 10) = 10).
+    assert_eq!(c.x0, dec!(-6.50), "no set credit: leg c never filled");
+    // x = x0 + leftovers at their mids: all of a and b are leftover now, priced at 0.30 and 0.35.
+    assert_eq!(c.x, dec!(0.00), "x = x0 + leftovers at their mids");
+    assert_eq!(c.unpriced, 0);
+    assert_eq!(c.pooled, 0);
 }
 
 #[test]
@@ -260,6 +295,7 @@ fn pooled_shares_follow_each_rows_episode_and_never_count_twice() {
     let e1 = attempt(
         Side::No,
         dec!(10),
+        2,
         vec![
             buy("m0", "no", dec!(10), dec!(-4.00)),
             buy("m1", "no", dec!(10), dec!(-5.10)),
@@ -270,6 +306,7 @@ fn pooled_shares_follow_each_rows_episode_and_never_count_twice() {
     let e2 = attempt(
         Side::No,
         dec!(5),
+        2,
         vec![
             buy("m0", "no", dec!(5), dec!(-2.00)),
             buy("m1", "no", dec!(5), dec!(-2.50)),
@@ -292,6 +329,7 @@ fn pooled_shares_follow_each_rows_episode_and_never_count_twice() {
     let odd = attempt(
         Side::No,
         dec!(5),
+        1,
         vec![
             buy("m0", "no", dec!(5), dec!(-2.00)),
             sell("m0", "no", dec!(8), dec!(3.20)),
@@ -319,6 +357,8 @@ fn the_key_suffix_is_a_semicolon_segment_over_every_parameter() {
         "1:1960",
         "500:3891",
         "days=lt1,1-7,7-30,30-90,90-365,ge365,unknown",
+        "fee_bips=10,50",
+        "filter_skips=annualized_too_low,no_lockup_figures,too_long",
     ] {
         assert!(p.contains(needle), "params_text lacks {needle}: {p}");
     }
