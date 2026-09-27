@@ -146,8 +146,8 @@ ul.plain { list-style: none; display: grid; gap: 6px; }
 .pagehead-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; flex: 1; min-width: 0; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 8px; margin: 6px 0 10px; }
 .tile { display: flex; flex-direction: column-reverse; gap: 2px; border: 2px solid var(--line2); background: var(--chip); padding: 6px 8px; min-width: 0; }
-.tile dt { color: var(--dim); font-size: 13px; }
-.tile dd { font-family: var(--big); font-size: 34px; line-height: 1; white-space: nowrap; }
+.tile-label { color: var(--dim); font-size: 13px; }
+.tile-value { font-family: var(--big); font-size: 34px; line-height: 1; white-space: nowrap; }
 .fold { border: 2px solid var(--line2); margin-top: 8px; }
 .fold > summary { cursor: pointer; padding: 4px 8px; color: var(--dim); list-style: none; }
 .fold > summary::-webkit-details-marker { display: none; }

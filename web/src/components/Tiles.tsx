@@ -7,18 +7,20 @@ export interface Tile {
   tone?: 'pos' | 'neg';
 }
 
-/** Big numbers with a small sentence-case label (spec §3.1): only where the number is the answer (§3.3). */
+/** Big numbers with a small sentence-case label (spec §3.1): only where the number is the answer
+ *  (§3.3). M8: a real <ul>/<li> list (dl/dt/dd is not a listitem-of-listitems a11y checkers accept)
+ *  — label-then-value in the DOM, the value visually on top via .tile's column-reverse. */
 export function Tiles({ items, dim }: { items: Tile[]; dim?: boolean }) {
   return (
-    <dl className={dim ? 'tiles dim' : 'tiles'} role="list">
+    <ul className={dim ? 'tiles dim' : 'tiles'}>
       {items.map((t) => (
-        <div key={t.label} className="tile" role="listitem">
-          <dt>{t.label}</dt>
-          <dd className={t.tone} title={t.title}>
+        <li key={t.label} className="tile">
+          <span className="tile-label">{t.label}</span>
+          <span className={['tile-value', t.tone].filter(Boolean).join(' ')} title={t.title}>
             {t.value}
-          </dd>
-        </div>
+          </span>
+        </li>
       ))}
-    </dl>
+    </ul>
   );
 }

@@ -49,10 +49,10 @@ export function extremes(values: string[]): { min: string; max: string } | null 
 const ledgerColumns: Column<LedgerEntry>[] = [
   { key: 't', label: 'TIME', render: (l) => fmtUtcDateTime(l.t_ms) },
   { key: 'kind', label: 'KIND', render: (l) => l.kind },
-  { key: 'qty', label: 'QTY', render: (l) => formatDecimal(l.qty) },
-  { key: 'cash', label: 'CASH', render: (l) => <Money value={l.cash_delta} signed tone /> },
-  { key: 'fees', label: 'FEES', render: (l) => <Money value={l.fees} /> },
-  { key: 'realized', label: 'REALIZED', render: (l) => <Money value={l.realized_delta} signed tone /> },
+  { key: 'qty', label: 'QTY', render: (l) => formatDecimal(l.qty), num: true },
+  { key: 'cash', label: 'CASH', render: (l) => <Money value={l.cash_delta} signed tone />, num: true },
+  { key: 'fees', label: 'FEES', render: (l) => <Money value={l.fees} />, num: true },
+  { key: 'realized', label: 'REALIZED', render: (l) => <Money value={l.realized_delta} signed tone />, num: true },
 ];
 
 const positionColumns: Column<Position>[] = [
@@ -73,8 +73,8 @@ const positionColumns: Column<Position>[] = [
     ),
   },
   { key: 'side', label: 'SIDE', render: (p) => `${p.outcome.toUpperCase()}${p.returned ? ' (returned)' : ''}` },
-  { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty) },
-  { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} /> },
+  { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty), num: true },
+  { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} />, num: true },
 ];
 
 const CONTROL = 'P3-naive';

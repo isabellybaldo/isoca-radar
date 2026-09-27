@@ -59,7 +59,7 @@ describe('EdgeCapture', () => {
       const matches = screen.getAllByText('edge on the table');
       expect(matches).toHaveLength(2); // the tile's dt and the folded table's rowlabel cell
       expect(tableRowOf(matches)).toHaveClass('dim');
-      expect(container.querySelector('dl.tiles')).toHaveClass('dim');
+      expect(container.querySelector('ul.tiles')).toHaveClass('dim');
     });
   });
 
@@ -67,7 +67,7 @@ describe('EdgeCapture', () => {
     mockApi({ '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [edgeFixture({ win: '24h', status: 'under_review' })] }) });
     const { container } = renderBox();
     await screen.findByText(UNDER_REVIEW);
-    expect(container.querySelector('dl.tiles')).toHaveClass('dim');
+    expect(container.querySelector('ul.tiles')).toHaveClass('dim');
   });
 
   it('keeps the Edge rows undimmed when the last tick is fresh', async () => {

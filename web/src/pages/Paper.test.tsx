@@ -82,6 +82,10 @@ describe('Paper', () => {
     expect(screen.getByText('−$286.60')).toHaveClass('neg');
     expect(screen.getByText('Fed decision in October?')).toBeInTheDocument();
     expect(await screen.findByText('−$99.84')).toBeInTheDocument();
+    // M6: money/qty columns in the ledger and positions tables get td.num (no mid-value wrap).
+    expect(screen.getByText('−$99.84').closest('td')).toHaveClass('num');
+    const posRow = screen.getByText('Fed decision in October?').closest('tr')!;
+    expect(posRow.querySelectorAll('td.num')).toHaveLength(2); // QTY, BASIS
     const legend = screen.getByRole('list', { name: 'equity now' });
     expect(within(legend).getByText('P3 naive')).toBeInTheDocument();
     expect(within(legend).getByText('$713.40')).toBeInTheDocument();

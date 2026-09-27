@@ -93,6 +93,11 @@ describe('Episodes', () => {
     expect(HELP.flags.text).toContain(FLAG_WORDS.censor_gap);
   });
 
+  it('M7: says UTC once in the filters help, and keeps "Seven days at a time."', () => {
+    expect(HELP.filters.text.match(/UTC/g)).toHaveLength(1);
+    expect(HELP.filters.text).toContain('Seven days at a time.');
+  });
+
   it('gives each flag tag a tooltip with its sentence', async () => {
     mockApi({ '/api/episodes': { items: [episodeSummaryFixture({ suspect: true, stale: true, censored: true })], next_cursor: null } });
     renderAt('/episodes');
