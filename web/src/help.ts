@@ -9,7 +9,7 @@ export interface HelpText {
 export const HELP = {
   health: {
     title: 'What are the hearts?',
-    text: 'Ten hearts is a healthy scanner: every shard connected, no dropped messages in the last 5 minutes, feed lag under a second, capture running. Each trouble costs hearts and is named in words next to them.',
+    text: 'Ten hearts is a healthy scanner: every shard connected, no dropped messages in the last 5 minutes, feed lag under a second, capture running. Each trouble costs hearts and is named in words next to them. A clock more than 250 ms away from Polymarket\'s also costs a heart: after a host freeze the feed lag reads wrong until the clock is back.',
   },
   open: {
     title: 'What is an episode?',
