@@ -197,3 +197,8 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .split-bar { display: flex; height: 14px; border: 2px solid var(--line2); }
 .split-part { display: block; height: 100%; width: auto; margin: 0; }
 @media (max-width: 600px) { .lat-row { grid-template-columns: 1fr; } }
+.claim-wrap { display: grid; gap: 2px; }
+.claim { display: flex; gap: 18px; flex-wrap: wrap; }
+.claim dt { color: var(--dim); font-size: 13px; }
+.claim dd { font-family: var(--big); font-size: 30px; line-height: 1; white-space: nowrap; }
+.cardv { border: 2px solid var(--line2); }
