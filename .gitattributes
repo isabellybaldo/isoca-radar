@@ -1,2 +1,4 @@
 *.sh text eol=lf
 crates/arb-core/premises.lock text eol=lf
+*.sql text eol=lf
+config/*.toml text eol=lf
