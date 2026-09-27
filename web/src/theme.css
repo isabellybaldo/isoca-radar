@@ -75,6 +75,8 @@ tr.dim td { color: var(--dim); }
 .neg { color: var(--bad); }
 .dim { color: var(--dim); }
 .quip { opacity: 0.9; }
+.box.dimmed, .box.dimmed a { color: var(--dim); }
+.legend-note { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .error { color: var(--salmon); }
 .blink { animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }

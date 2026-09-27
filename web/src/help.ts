@@ -15,7 +15,15 @@ export const HELP = {
   },
   today: {
     title: 'What does today count?',
-    text: 'Episodes opened since 00:00 UTC. Gross ignores fees, net includes them; the difference is what the fee schedule keeps. The last line compares the edge that was there with what a 145 ms trader would have caught.',
+    text: 'Arbitrage episodes opened since 00:00 UTC: complete YES and NO baskets only, by side. Incomplete sets are not counted. Edge on the table adds up each one’s profit had you spent at most $100 on it; an episode whose $100 figure was not measured is left out of the sum, not counted as zero. The last line compares the edge that was there with what a 145 ms trader would have caught.',
+  },
+  columns: {
+    title: 'What do the columns mean?',
+    text: 'KIND: YES buys every YES token (exactly one pays $1); NO buys every NO token and converts them back to collateral. S: how many outcomes are in the set bought. PROFIT @ $100: the net profit at the peak if you spent at most $100. NET @ DEPTH and GROSS: the profit after and before taker fees, taking all the depth the books offered. Q*: that executable size, in shares. AGE: time since it opened. EDGE: the per-share edge, drawn as a bar relative to the biggest open one.',
+  },
+  incomplete: {
+    title: 'Why is an incomplete set not arbitrage?',
+    text: 'The listed outcomes may not cover every result: an outcome outside the set (often "Other") can win, and then every token bought pays nothing. The price gap is real, the guarantee is not. They are listed for context and counted nowhere as money.',
   },
   filters: {
     title: 'What do the filters do?',

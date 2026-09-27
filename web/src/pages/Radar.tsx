@@ -1,7 +1,8 @@
+import { useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client';
 import { useStream } from '../api/StreamContext';
-import type { EpisodeSummary, HealthNow } from '../api/types';
+import type { EpisodeSummary, HealthNow, Today } from '../api/types';
 import { useApi } from '../api/useApi';
 import { Age } from '../components/Age';
 import { Box } from '../components/Box';
@@ -13,21 +14,30 @@ import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
-import { teaserLine } from '../lib/cards';
+import { teaserLine, withThinEdge } from '../lib/cards';
 import { useNow, useTicker } from '../lib/hooks';
 import { kindTag } from '../lib/labels';
-import { formatDecimal } from '../lib/money';
+import { formatDecimal, formatMoney } from '../lib/money';
 
-export const EMPTY_RADAR = '0 opportunities. The market is efficient, or we are slow. Probably both.';
+export const NO_ARB = 'No arbitrage open right now. They rarely last.';
 export const NO_HEALTH = 'No health rows yet. The scanner may be asleep.';
 export const OPEN_STALE = 'scanner not reporting — list may be stale';
+export const INCOMPLETE_WHY = "An outcome outside the set can win (e.g. 'Other'). Shown for context, not money.";
+/** True of every episode counted: each one was net-positive while it lasted, by definition. */
+export const TODAY_SUBTITLE = 'Every one paid on paper, for as long as it lasted. Usually not long.';
 /** Past this age (ms) the last health minute is old enough that the open-episodes list itself may
  * no longer reflect reality (the scanner could be down, and nothing would ever close these rows). */
 const STALE_HEALTH_MS = 180_000;
+const ARB_KINDS = ['yes_basket', 'no_basket'];
 
-/** Spec §5: N gross, M net. "Fees: N−M. Us: M." */
-export function todayQuip(gross: number, net: number): string {
-  return `${gross} gross, ${net} net. "Fees: ${gross - net}. Us: ${net}."`;
+/** Complete YES or NO baskets are arbitrage; incomplete sets (and anything else) are not. */
+export function isArbitrage(kind: string): boolean {
+  return ARB_KINDS.includes(kind);
+}
+
+/** "Arbitrage episodes today: N (NO k · YES m) · edge on the table: +$X (capped at $100 each)". */
+export function todayLine(t: Today): string {
+  return `Arbitrage episodes today: ${t.arb} (NO ${t.no} · YES ${t.yes}) · edge on the table: ${formatMoney(t.edge_budget100, { signed: true })} (capped at $100 each)`;
 }
 
 /** Messages per minute → per second, "4.3k" style. Counts, not money. */
@@ -73,19 +83,9 @@ function EdgeBar({ edge, max }: { edge: string; max: number }) {
   );
 }
 
-export function Radar() {
-  const { episodeTick, healthTick } = useStream();
-  const slow = useTicker(30_000);
-  const health = useApi((s) => api.healthNow(s), [], [healthTick, slow]);
-  const open = useApi((s) => api.openEpisodes(s), [], [episodeTick, slow]);
-  const today = useApi((s) => api.today(s), [], [episodeTick, slow]);
-  const edgeToday = useApi((s) => api.cards('today', s), [], [slow]);
-  const edge = edgeToday.data?.cards.find((c) => c.card === 'EDGE');
-  const now = useNow(100);
-  const rows = open.data?.items ?? [];
-  const staleHealth = (health.data?.health?.age_ms ?? 0) > STALE_HEALTH_MS;
+function episodeColumns(rows: EpisodeSummary[], now: number): Column<EpisodeSummary>[] {
   const maxEdge = Math.max(0, ...rows.map((r) => Number(r.edge)));
-  const columns: Column<EpisodeSummary>[] = [
+  return [
     {
       key: 'kind',
       label: 'KIND',
@@ -100,40 +100,96 @@ export function Radar() {
       render: (r) => <Link to={`/episodes/${encodeURIComponent(r.id)}`}>{r.event_title ?? r.id}</Link>,
     },
     { key: 's', label: 'S', render: (r) => r.s_legs },
-    { key: 'net', label: 'NET', render: (r) => <Money value={r.net} signed tone /> },
-    { key: 'gross', label: 'GROSS', render: (r) => <Money value={r.gross} signed /> },
-    { key: 'q', label: 'Q*', render: (r) => formatDecimal(r.q_star) },
+    { key: 'b100', label: 'PROFIT @ $100', render: (r) => <Money value={r.net_budget100} signed tone /> },
+    { key: 'net', label: 'NET @ DEPTH', render: (r) => <Money value={r.net} signed tone /> },
+    { key: 'gross', label: 'GROSS @ DEPTH', render: (r) => <Money value={r.gross} signed /> },
+    { key: 'q', label: 'Q* (SHARES)', render: (r) => formatDecimal(r.q_star) },
     { key: 'age', label: 'AGE', render: (r) => <Age sinceMs={r.opened_ms} nowMs={now} /> },
     { key: 'edge', label: 'EDGE', render: (r) => <EdgeBar edge={r.edge} max={maxEdge} /> },
   ];
+}
+
+function ColumnLegend() {
+  return (
+    <div className="legend-note" aria-label="column legend">
+      <ul className="plain dim">
+        <li>KIND: YES = buy every YES (exactly one pays $1); NO = buy every NO and convert.</li>
+        <li>S: outcomes in the set.</li>
+        <li>PROFIT @ $100: net profit if you spent at most $100.</li>
+        <li>NET @ DEPTH / GROSS: after / before fees, taking the full available depth.</li>
+        <li>Q*: executable size in shares. AGE: time since it opened. EDGE: per-share edge, bar relative to the biggest here.</li>
+      </ul>
+      <Help id="columns" />
+    </div>
+  );
+}
+
+function IncompleteSets({ rows, now }: { rows: EpisodeSummary[]; now: number }) {
+  const [open, setOpen] = useState(false);
+  const noun = rows.length === 1 ? 'incomplete set' : 'incomplete sets';
+  return (
+    <Box title={`NOT ARBITRAGE: INCOMPLETE SETS · ${rows.length}`} help="incomplete" className="dimmed">
+      <p className="dim">{INCOMPLETE_WHY}</p>
+      {rows.length > 0 && (
+        <>
+          <div className="pager">
+            <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+              {`${open ? 'hide' : 'show'} ${rows.length} ${noun}`}
+            </button>
+          </div>
+          {open && <Table columns={episodeColumns(rows, now)} rows={rows} rowKey={(r) => r.id} rowClass={() => 'dim'} />}
+        </>
+      )}
+    </Box>
+  );
+}
+
+export function Radar() {
+  const { episodeTick, healthTick } = useStream();
+  const slow = useTicker(30_000);
+  const health = useApi((s) => api.healthNow(s), [], [healthTick, slow]);
+  const open = useApi((s) => api.openEpisodes(s), [], [episodeTick, slow]);
+  const today = useApi((s) => api.today(s), [], [episodeTick, slow]);
+  const edgeToday = useApi((s) => api.cards('today', s), [], [slow]);
+  const edge = edgeToday.data?.cards.find((c) => c.card === 'EDGE');
+  const now = useNow(100);
+  const all = open.data?.items ?? [];
+  const arb = all.filter((r) => isArbitrage(r.kind));
+  const rest = all.filter((r) => !isArbitrage(r.kind));
+  const staleHealth = (health.data?.health?.age_ms ?? 0) > STALE_HEALTH_MS;
   return (
     <>
       <Loadable state={health} what="health">
         {(d) => (d.health === null ? <Box help="health"><EmptyState text={NO_HEALTH} /></Box> : <HealthBar h={d.health} />)}
       </Loadable>
-      <Box title={`OPEN EPISODES · ${rows.length}`} help="open">
-        {staleHealth && <Tag tone="flag">{OPEN_STALE}</Tag>}
-        <Loadable state={open} what="open episodes">
-          {(d) =>
-            d.items.length === 0 ? (
-              <EmptyState text={EMPTY_RADAR} />
-            ) : (
-              <Table columns={columns} rows={d.items} rowKey={(r) => r.id} />
-            )
-          }
-        </Loadable>
-      </Box>
       <Box title="TODAY (UTC)" help="today">
         <Loadable state={today} what="today">
           {(d) => (
             <>
-              <Spark values={d.hourly.map((h) => h.gross)} label="gross episodes per hour today" />
-              <p className="quip">{todayQuip(d.gross, d.net)}</p>
-              {edge && <p className="quip teaser">{teaserLine(edge)}</p>}
+              <Spark values={d.hourly.map((h) => h.arb)} label="arbitrage episodes per hour today" />
+              <p className="quip">{todayLine(d)}</p>
+              <p className="dim">{TODAY_SUBTITLE}</p>
+              {edge && <p className="quip teaser">{teaserLine(withThinEdge(edge))}</p>}
             </>
           )}
         </Loadable>
       </Box>
+      <Box title={`ARBITRAGE (YES / NO) · ${arb.length}`} help="open">
+        {staleHealth && <Tag tone="flag">{OPEN_STALE}</Tag>}
+        <Loadable state={open} what="open episodes">
+          {() =>
+            arb.length === 0 ? (
+              <EmptyState text={NO_ARB} />
+            ) : (
+              <>
+                <Table columns={episodeColumns(arb, now)} rows={arb} rowKey={(r) => r.id} />
+                <ColumnLegend />
+              </>
+            )
+          }
+        </Loadable>
+      </Box>
+      <IncompleteSets rows={rest} now={now} />
     </>
   );
 }

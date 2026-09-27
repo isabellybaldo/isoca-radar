@@ -16,17 +16,20 @@ export function episodeSummaryFixture(o: Partial<EpisodeSummary> = {}): EpisodeS
   return {
     id: 'live-1-00000001', kind: 'no_basket', realization: 'converter', event_title: 'Bitcoin price on September 26?',
     event_slug: 'bitcoin', n_legs: 7, s_legs: 5, opened_ms: 1_790_000_000_000, closed_ms: null, duration_ms: null,
-    edge: '0.0049', q_star: '83', net: '0.41', gross: '1.37', suspect: false, stale: false, censored: false,
+    edge: '0.0049', q_star: '83', net: '0.41', gross: '1.37', net_budget100: '0.33', suspect: false, stale: false, censored: false,
     ...o,
   };
 }
 
-export function todayFixture(gross: number, net: number): Today {
+/** `no` NO and `yes` YES arbitrage episodes, all in hour 1. */
+export function todayFixture(no = 0, yes = 0, edge: string | null = null): Today {
   return {
     day_start_ms: 1_789_948_800_000,
-    gross,
-    net,
-    hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, gross: hour === 1 ? gross : 0, net: hour === 1 ? net : 0 })),
+    arb: no + yes,
+    no,
+    yes,
+    edge_budget100: edge,
+    hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, arb: hour === 1 ? no + yes : 0 })),
   };
 }
 

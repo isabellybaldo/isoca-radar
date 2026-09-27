@@ -57,6 +57,8 @@ export interface EpisodeSummary {
   q_star: Dec;
   net: Dec;
   gross: Dec;
+  /** Net profit at the peak with at most $100 spent; null when not sized. */
+  net_budget100: Dec | null;
   suspect: boolean;
   stale: boolean;
   censored: boolean;
@@ -146,11 +148,15 @@ export interface EpisodeDetail {
   legs: Leg[];
   observations: Observation[];
 }
+/** Live complete-basket (YES / NO) arbitrage episodes opened today, UTC. */
 export interface Today {
   day_start_ms: number;
-  gross: number;
-  net: number;
-  hourly: { hour: number; gross: number; net: number }[];
+  arb: number;
+  no: number;
+  yes: number;
+  /** Sum of each episode's $100-capped net profit; null when none was measured. */
+  edge_budget100: Dec | null;
+  hourly: { hour: number; arb: number }[];
 }
 export interface Integrity {
   from_ms: number;
