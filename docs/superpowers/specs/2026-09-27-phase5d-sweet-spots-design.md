@@ -224,7 +224,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
 
 - **D1. Captured = per-attempt ledger cash plus the YES complete-set payout plus leftovers at the 30 s mid,** not equity deltas. Equity can't be split by episode, and settlement rows have no `episode_id`. Leftovers at 0 are shown as a sensitivity.
 - **D2. Only the default-fee P0 (NO) and P1 (YES) accounts count.** P3 is a control and P2 is dormant. The 10 and 50 bips accounts appear only as the fee column.
-- **D3. No `policies.toml` edit.** YES rows beyond P1's filters are `not_tested`. Adding an unfiltered P1 account would test them, but it resets every paper account. Owner's call, later.
+- **D3. No `policies.toml` edit.** YES rows beyond P1's filters are `not_tested`. Adding an unfiltered P1 account would test them, but it resets every paper account. **Owner decided 2026-09-27: they stay untested.**
 - **D4. One-way slices only;** no cross product (§7.3).
 - **D5. n ≥ 30 executed attempts and ≥ 30 event-hour clusters** for any verdict; a cluster-robust interval; **Bonferroni** over all non-thin rows; the "few trades" label at effective n < 5. The review suggested considering 50 clusters; 30 is kept until real volumes are known, and the plan's deploy step re-checks it against the first 30 days.
 - **D6. The hurdle is P1's `min_annualized` (10%),** shared with the policy, applied to the interval's lower bound.
