@@ -59,10 +59,6 @@ button { font: inherit; color: inherit; }
 .hearts { color: var(--salmon); letter-spacing: 2px; font-size: 24px; }
 .stat b { font-family: var(--px); font-size: 10px; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 10px; }
-.card { border: 2px solid var(--line); padding: 8px; background: var(--chip); }
-.card .p { font-family: var(--px); font-size: 8px; margin-bottom: 6px; }
-.card .eq { font-family: var(--big); font-size: 32px; line-height: 1; margin-bottom: 4px; }
 .scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 15px; }
 th { font-family: var(--px); font-size: 7px; text-align: left; padding: 4px; border-bottom: 2px solid var(--line); white-space: nowrap; }

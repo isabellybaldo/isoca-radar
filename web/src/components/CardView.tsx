@@ -10,8 +10,7 @@ import { Fold } from './Fold';
 import { SubHead } from './SubHead';
 import { Tag } from './Tag';
 
-// EDGE sits inside the Edge capture box, whose own (?) explains the edge: its card (?) explains the status.
-const CARD_HELP: Record<string, HelpId> = { G1: 'g1', G2: 'g2', G3: 'g3', G4: 'g4', EDGE: 'status' };
+const CARD_HELP: Record<string, HelpId> = { G1: 'g1', G2: 'g2', G3: 'g3', G4: 'g4' };
 type Col = 'paper' | 'their' | 'ours';
 const COLS: { key: Col; label: string }[] = [
   { key: 'paper', label: 'PAPER' },

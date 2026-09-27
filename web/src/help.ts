@@ -55,21 +55,9 @@ export const HELP = {
     title: 'What are the re-checks?',
     text: 'One, two and five seconds after an episode opens, the scanner asks the exchange for the same books again. They show whether the edge was still there for someone slower than the websocket. Skipped means the re-check budget was full.',
   },
-  scenario: {
-    title: 'What is a scenario?',
-    text: 'A latency assumption for the paper accounts: how long from seeing an episode to the order reaching the matching engine. colo-idle is a machine next to the exchange; sp-idle is São Paulo on a quiet day; sp-burst the same when everyone is trading.',
-  },
   equity: {
     title: 'What is equity?',
     text: 'Cash plus positions marked at the current prices, for each paper account in the chosen scenario. Every account starts with the same bankroll. P3 naive is the control (it buys incomplete sets too); hide it when its drawdown squashes the other lines. No real money exists anywhere in this project.',
-  },
-  awaiting: {
-    title: 'What is awaiting resolution?',
-    text: 'Positions that only pay when the event resolves: bought YES baskets, and YES tokens returned by a NO conversion. They are marked but not cashable until the event ends. The grey id after the event names the market (the outcome) held; the full id is in its tooltip.',
-  },
-  ledger: {
-    title: 'What is the ledger?',
-    text: 'Every paper cash movement of the chosen account: buys, conversions, settlements and marks, in order. Cash, fees and realized profit add up exactly; nothing is rounded on the way. The once-a-minute marks are hidden unless you tick show minute marks.',
   },
   paper: {
     title: 'What is paper trading?',
