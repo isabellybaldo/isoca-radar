@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { sweetFixture, sweetRow } from '../test/fixtures';
 import type { SweetSeries } from '../api/types';
-import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, footnote, grid, headline, interval, nothingPays, ONE_LINE_CAVEAT, recomputingText, rowName, rowsFor } from './sweet';
+import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, footnote, grid, headline, interval, nothingPays, recomputingText, rowName, rowsFor } from './sweet';
 
 const series = (rows = [sweetRow()], o: Partial<SweetSeries> = {}): SweetSeries => ({
   rows, m: rows.filter((r) => r.label !== 'thin' && r.label !== 'not_tested').length, z: '2.576',
