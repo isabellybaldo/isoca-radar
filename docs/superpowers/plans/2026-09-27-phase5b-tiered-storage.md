@@ -4,31 +4,31 @@
 
 **Goal:** Keep the scanner's data on the VPS: about 24 h of raw capture (tier 1), and every closed raw hour reduced by a new `compact` service into daily Parquet tables (`tokens`, `tob`, `depth`, `l2`, `gaps` + `manifest.json`) kept for months under a 55 GB budget (tier 2), with a scanner delete guard so raw is never deleted before it is reduced (except at the hard cap, recorded as lost), a dashboard heart, and `compact verify`.
 
-**Architecture:** A new pure crate `crates/tape` becomes the one home of the raw capture format: capture lines (`Line`, `Ctl`), Polymarket frame parsing (moved out of `pm-api`, which re-exports it), the capture file layout, and `tape::feed::FeedBooks`, the scanner engine's book rules without detection or trading, pinned to the engine line by line by an agreement test. A new binary `bins/compact` (0.25 CPU, 256 MB, role `compact_rw`, no network client) reads each closed raw hour through `tape`, turns it into rows (top-of-book changes, 5-minute depth, l2 around net-positive arbitrage episodes, gaps), writes hourly Parquet parts atomically, checkpoints its books, records `compact_hours` in Postgres, merges whole UTC days and enforces the budget. The scanner deletes a raw hour by age only once it is `done`/`lost`, deletes at the 15 GB cap whatever the status (marking it `lost`), writes a universe record only when it changed, and falls back to today's rule when Postgres is unreachable.
+**Architecture:** A new pure crate `crates/tape` becomes the one home of the raw capture format: capture lines (`Line`, `Ctl`), Polymarket frame parsing (moved out of `pm-api`, which re-exports it), the capture file layout, and `tape::feed::FeedBooks`, the scanner engine's book rules without detection or trading, pinned to the engine line by line by two agreement tests (books, and the `tob` rows built on them). A new binary `bins/compact` (0.25 CPU, 256 MB, role `compact_rw`, no network client) reads each closed raw hour through `tape`, turns it into rows (top-of-book changes, 5-minute depth, l2 around net-positive arbitrage episodes, gaps), writes hourly Parquet parts atomically, checkpoints its books, records `compact_hours` in Postgres, merges whole UTC days and enforces the budget. The scanner deletes a raw hour by age only once it is `done`/`lost`, deletes at the 15 GB cap whatever the status (marking it `lost`), writes a universe record only when it changed (and names only records the capture thread acknowledged), and falls back to today's rule when Postgres is unreachable or the compactor has been silent for 6 h (the rollback rule).
 
 **Tech Stack:** Rust 1.98.1 (edition 2024), tokio, sqlx 0.8 (inside `store` only), rust_decimal 1.41+, serde_json, zstd 0.13, sha2, clap 4, `parquet` + `arrow` (Apache Arrow Rust, one exact pinned version, compact only); axum 0.8 (api); React 19, Vite 8, TypeScript 5.9, Vitest 4 + Testing Library; Postgres 17.
 
 **Spec:** `docs/superpowers/specs/2026-09-27-phase5b-tiered-storage-design.md` (parent `docs/superpowers/specs/2026-09-22-arb-scanner-design.md` §7, §9.3, §10, §19; builds on Phase 5a `2026-09-26-phase5a-cards-design.md` and 5d `2026-09-27-phase5d-sweet-spots-design.md`). The spec is the authority; the rulings below settle its §11 open items and are recorded again in **Rulings** at the end.
 
-This is ONE plan with 15 sequential tasks:
-- Tasks 1–2: `crates/tape` (the shared capture format, frame parsing, and the engine's book rules with the agreement test).
-- Task 3: store (migration 0008, `compact_rw`, the compact reads/writes).
-- Tasks 4–5: the scanner (the delete guard and 24 h / 15 GB; universe records only on change).
-- Tasks 6–12: `bins/compact` (skeleton and Parquet I/O, the reducer, l2 windows, hour files and checkpoints, the daily merge and budget, `verify`, the service).
-- Task 13: api and web (health fields, the heart, the Archive box).
-- Task 14: Docker, compose, `.env.example`, roles script.
-- Task 15: the deploy runbook.
+This is ONE plan with 21 sequential tasks:
+- Tasks 1–4: `crates/tape` (the shared capture format and frame parsing; the universe view and `server_top`; `FeedBooks`; the agreement test against the engine).
+- Task 5: store (migration 0008, `compact_rw`, the compact reads/writes).
+- Tasks 6–7: the scanner (the delete guard, 24 h / 15 GB and the rollback rule; universe records only on change, acknowledged).
+- Tasks 8–18: `bins/compact` (skeleton and pins; config and rows; Parquet I/O; the reducer; the `tob` agreement against the engine; l2 windows; hour files; checkpoints; the daily merge and budget; `verify`; the service).
+- Task 19: api and web (health fields, the heart, the Archive box).
+- Task 20: Docker, compose, `.env.example`, roles script.
+- Task 21: the deploy runbook.
 
-Tasks 1–12 and 14 never touch `web/`; Task 13 touches `web/` and `bins/api` only.
+Tasks 1–18 and 20 never touch `web/`; Task 19 touches `web/` and `bins/api` only.
 
 ## Global Constraints
 
 - **Paper only (parent §16):** no order placement, wallets, keys, signing or exchange clients anywhere. `compact` refuses to start if an exchange/wallet credential variable is set (the same denylist as `bins/scanner/src/guard.rs`, kept in step by `bins/scanner/tests/arch.rs`).
 - **`compact` has no network client:** the arch test bans `reqwest`, `pm-api`, `tokio-tungstenite` and `sqlx` from `compact`; it reaches Postgres only through `store`. `crates/tape` stays pure: no `tokio`, `reqwest`, `tokio-tungstenite`, `sqlx`, `pm-api`, `store` (files and parsing only).
 - **Only `store` uses sqlx** (`deny.toml`: `{ name = "sqlx", wrappers = ["store"] }`).
-- **New crates (owner-approved 2026-09-27): `parquet` and `arrow` only**, pinned to one exact version (`=X.Y.Z`, found with `cargo search` in Task 6) in `[workspace.dependencies]`, used only by `bins/compact`: `deny.toml` gets `{ name = "parquet", wrappers = ["compact"] }` and `{ name = "arrow", wrappers = ["compact"] }`, and the arch test fails if any other workspace crate depends on them. No other new crates.io crate; new Rust dependencies come from `[workspace.dependencies]` only. **No new web dependency.**
-- **Roles after migration 0008 (spec §9):** `compact_rw` (created NOLOGIN, activated by the runbook with `COMPACT_RW_DB_PASSWORD`): SELECT on `episodes`, `runs`; SELECT, INSERT, UPDATE on `compact_hours`, `compact_status` (SELECT is needed by `INSERT … ON CONFLICT DO UPDATE` and by the lost-hour read; ruling R7); statement timeout 10 s. `scanner_rw`: SELECT, INSERT on `compact_hours`. `analyze_ro` (the api): SELECT on `compact_status`. `compact` refuses to start if its role can write any table other than `compact_hours`, `compact_status`. `analyze_rw`'s write set is unchanged.
-- **Premise areas are untouched.** Do not edit any file listed in `crates/arb-core/src/premises.rs` `PREMISES` (`crates/arb-core/src/{episode,fill,detect,fee}.rs`, `crates/sim/src/*.rs`); `crates/arb-core/tests/premises_lock.rs` and `bins/scanner/tests/premises.rs` must stay green without a version bump. None of the new config values (`config/compact.toml`, `retention_hours`, `max_capture_gb`) is a premise input (spec §7); Task 4 runs both checks.
+- **New crates (owner-approved 2026-09-27): `parquet` and `arrow` only**, pinned to one exact version (`=X.Y.Z`, found with `cargo search` in Task 8; `60.0.0` at planning time) in `[workspace.dependencies]`, used only by `bins/compact`: `deny.toml` gets `{ name = "parquet", wrappers = ["compact"] }` and `{ name = "arrow", wrappers = ["compact"] }`, and the arch test fails if any other workspace crate depends on them. No other new crates.io crate; new Rust dependencies come from `[workspace.dependencies]` only. **No new web dependency.**
+- **Roles after migration 0008 (spec §9):** `compact_rw` (created NOLOGIN, activated by the runbook with `COMPACT_RW_DB_PASSWORD`): SELECT on `episodes`, `runs`; SELECT, INSERT, UPDATE on `compact_hours`, `compact_status` (SELECT is needed by `INSERT … ON CONFLICT DO UPDATE` and by the lost-hour read; ruling R7); statement timeout 10 s. `scanner_rw`: SELECT, INSERT on `compact_hours`, SELECT on `compact_status` (the rollback rule). `analyze_ro` (the api): SELECT on `compact_status`, `compact_hours`. `compact` refuses to start if its role can write any table other than `compact_hours`, `compact_status`. `analyze_rw`'s write set is unchanged.
+- **Premise areas are untouched.** Do not edit any file listed in `crates/arb-core/src/premises.rs` `PREMISES` (`crates/arb-core/src/{episode,fill,detect,fee}.rs`, `crates/sim/src/*.rs`); `crates/arb-core/tests/premises_lock.rs` and `bins/scanner/tests/premises.rs` must stay green without a version bump. None of the new config values (`config/compact.toml`, `retention_hours`, `max_capture_gb`) is a premise input (spec §7); Task 6 runs both checks.
 - **No floats in Rust:** clippy denies `float_arithmetic`, `unwrap_used`, `expect_used` (tests may unwrap: `clippy.toml`; integration test files start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`). Prices and sizes in the archive are **micro-units** (`i64`, value × 10⁶, exact because Polymarket values have at most 6 decimals: `arb_core::money::MAX_DP`).
 - **Time** is integer ms since epoch, days and hours in UTC: `tape::time::hour_of(ms) = ms.div_euclid(3_600_000) * 3_600_000`. `tob.ts_ms` is the book's server timestamp, `recv_ms` our receive time; rows are ordered by `recv_ms` inside an hour (ruling R4).
 - **Configuration (spec §7), exact defaults:** `config/compact.toml`: `raw_dir = "/data/capture"`, `archive_dir = "/archive"`, `depth_every_secs = 300`, `depth_levels = 10`, `l2_before_secs = 300`, `l2_after_secs = 300`, `l2_max_window_secs = 1800`, `archive_budget_gb = 55`, `lag_alarm_hours = 3`. `config/scanner.toml`: `retention_hours = 24`, `max_capture_gb = 15`. Parquet: zstd level 3, row groups of **262,144 rows**, write batches of 65,536 rows (ruling R2).
@@ -39,7 +39,7 @@ Tasks 1–12 and 14 never touch `web/`; Task 13 touches `web/` and `bins/api` on
   - hearts: `compactor behind: raw at risk` (`compact_lag_hours > 3`) and `compactor status older than 2 h` (`compact_age_ms > 7_200_000`); one heart at most between the two.
 - **Web look:** the existing theme; the new Archive box has a (?) whose copy lives in `web/src/help.ts`; no horizontal page scroll at 360 px; byte sizes use integer math.
 - **No fresh `npm install` in `web/`** (npm 10.9.2 crashes): reuse the existing `web/node_modules`.
-- **Debug builds only** on the dev machine (no `--release`, no `cargo install`). Docker builds happen only in Task 15's runbook, run by the owner (the release benchmark runs there, inside the image, with `--cpus 0.25 --memory 256m`).
+- **Debug builds only** on the dev machine (no `--release`, no `cargo install`). Docker builds happen only in Task 21's runbook, run by the owner (the release benchmark runs there, inside the image, with `--cpus 0.25 --memory 256m`).
 - **Disk budgets:** 30 GB on the PC (`sh scripts/disk-budget.sh`), 75 GB for this project on the VPS (spec §1). Run `cargo clean` if `target/` passes 8 GB (it is ~15 GB at plan time: Task 1 Step 0).
 - **Commits:** stage only the files the task touched (`git add <paths>`, never `-A` or `.`); never stage `PROJECT.md` or `README.md` (untracked, the owner's). Commit messages have **no** `Co-Authored-By` or any other attribution trailer.
 - **Shell prefix for every command:** `cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH" &&`.
@@ -49,11 +49,11 @@ Tasks 1–12 and 14 never touch `web/`; Task 13 touches `web/` and `bins/api` on
 
 ## Review Focus
 
-1. **A truncated raw hour** (the scanner was killed mid-write, then restarted and appended a new zstd frame after a broken one): compaction must not stall on it forever. The lines before the break become rows, the rest of the hour becomes a `raw_hour_lost` gap, every book is untrusted until the feed sends a new snapshot, and the hour is still recorded `done`. Pinned by `a_truncated_hour_keeps_its_rows_and_gaps_the_rest` (Task 9).
-2. **An hour deleted at the hard cap, or marked lost, around compaction:** `mark_hours_lost` must never turn a `done` hour into `lost`, and the compactor passing over a `lost` hour must write one `raw_hour_lost` gap for the whole hour and never carry a stale book across it. Pinned by `mark_hours_lost_never_downgrades_a_done_hour` (Task 3), `a_lost_hour_becomes_a_raw_hour_lost_gap_and_untrusts_every_book` (Task 7) and `a_missing_hour_marked_lost_is_compacted_as_lost` (Task 12).
-3. **Frames captured out of receive order across shards:** the capture file is in engine order, not `recv_ms` order. Rows must come out sorted by `recv_ms` inside the reorder window, a row later than the window is kept (appended and counted in `late_rows`), never dropped. Pinned by `reorder_sorts_within_the_window_and_counts_late_rows` (Task 9).
-4. **A universe refresh that drops a group's connection, and an unchanged refresh pointing at an old record:** a reset book must produce no rows until the feed sends a new snapshot, and retention must keep the universe record still in force for the oldest remaining hour even when it is older than that hour. Pinned by `a_group_losing_its_connection_stops_rows_until_a_new_snapshot` (Task 7) and `retention_keeps_the_universe_record_in_force_at_the_oldest_hour` (Task 5).
-5. **Midnight UTC:** the token dictionary restarts at 00:00, an l2 window spanning midnight restarts with snapshot rows in the new day so `verify` passes on both days, and the day merges only when all 24 hours are `done` or `lost`. Pinned by `a_window_across_midnight_restarts_with_snapshots_in_the_new_day` (Task 8) and `a_day_missing_an_hour_is_not_merged` (Task 10).
+1. **A truncated raw hour** (the scanner was killed mid-write, then restarted and appended a new zstd frame after a broken one): compaction must not stall on it forever. The lines before the break become rows, the rest of the hour becomes a `raw_hour_lost` gap, every book is untrusted until the feed sends a new snapshot, and the hour is still recorded `done`. Pinned by `a_truncated_hour_keeps_its_rows_and_gaps_the_rest` (Task 14).
+2. **An hour deleted at the hard cap around compaction:** the loss must stay visible whichever side acts first. `mark_hours_lost` never turns a `done` hour into `lost`; the scanner inserts its mark the moment it deletes; a compactor that saw the file and finds it gone records `lost` itself, and waits 5 minutes before calling a never-seen, unmarked hour `scanner_stopped`; passing a `lost` hour writes one `raw_hour_lost` gap and never carries a stale book across it. Pinned by `mark_hours_lost_never_downgrades_a_done_hour` (Task 5), `housekeeping_marks_hours_lost_at_the_cap` (Task 6), `a_lost_hour_becomes_a_raw_hour_lost_gap_and_untrusts_every_book` (Task 11), `a_file_deleted_before_its_lost_mark_is_compacted_as_lost` and `a_missing_hour_nobody_marked_is_scanner_stopped_and_done` (Task 18).
+3. **Frames captured out of receive order across shards:** the capture file is in engine order, not `recv_ms` order. Rows must come out sorted by `recv_ms` inside the reorder window, a row later than the window is kept (appended and counted in `late_rows`), never dropped. Pinned by `reorder_sorts_within_the_window_and_counts_late_rows` (Task 14).
+4. **A universe refresh that drops a group's connection, and an unchanged refresh naming an old record:** a reset book must produce no rows until the feed sends a new snapshot; a record capture never wrote must never be named; and retention must keep the record still in force for the oldest remaining hour even when it is older than that hour. Pinned by `a_group_losing_its_connection_stops_rows_until_a_new_snapshot` (Task 11), `a_record_capture_never_wrote_is_written_again_once_capture_resumes` and `retention_keeps_the_universe_record_in_force_at_the_oldest_hour` (Task 7).
+5. **Midnight UTC:** the token dictionary restarts at 00:00, an l2 window spanning midnight restarts with snapshot rows in the new day so `verify` passes on both days, and the day merges only when all 24 hours are `done` or `lost`. Pinned by `a_window_across_midnight_restarts_with_snapshots_in_the_new_day` (Task 13) and `a_day_missing_an_hour_is_not_merged` (Task 16).
 
 ## File Structure
 
@@ -67,14 +67,18 @@ crates/tape/                                      NEW: pure crate
   src/files.rs                                    capture layout, listing, line reading, zstd JSON helpers
   src/universe_view.rs                            RecordView (read-only projection of UniverseRecord), canary_key
   src/feed.rs                                     FeedBooks: the engine's book rules; FeedState (checkpoints)
-  tests/{frame,files,feed}.rs
+  tests/{frame,files,server_top,feed}.rs
 crates/pm-api/src/{ws,error}.rs, Cargo.toml       MODIFY: re-export tape's MarketEvent, wrap parse_frame
-bins/scanner/src/capture.rs                       MODIFY: use tape; retention via retention::plan; UniverseDedup; universe mtime rule
+bins/scanner/src/capture.rs                       MODIFY: use tape; housekeeping via retention::housekeep; UniverseDedup + deliver (acks); universe mtime rule
 bins/scanner/src/replay.rs                        MODIFY: apply_line + ReplayState (per-line driver), tape line reading
-bins/scanner/src/retention.rs                     NEW: retention plan, GuardView, guard_task
+bins/scanner/src/retention.rs                     NEW: retention plan, housekeep, compactor_alive, GuardView, guard_task
+bins/scanner/src/metrics.rs                       MODIFY: universe_acked_seq
 bins/scanner/src/{lib,run,shards,engine}.rs       MODIFY: wiring; canary_key from tape; engine uses tape::feed::server_top
-bins/scanner/Cargo.toml                           MODIFY: + tape
+bins/scanner/Cargo.toml                           MODIFY: + tape; dev-dependency compact (Task 12)
+bins/scanner/tests/agreement/mod.rs               NEW: the shared fixture hour and engine/FeedBooks driver
 bins/scanner/tests/tape_agreement.rs              NEW: FeedBooks == Engine after every line
+bins/scanner/tests/tob_agreement.rs               NEW: every compactor tob row == the engine's top at its line
+bins/scanner/tests/record_view.rs                 NEW: tape's RecordView reads the scanner's record
 bins/scanner/tests/retention.rs                   NEW
 bins/scanner/tests/universe_dedup.rs              NEW
 bins/scanner/tests/replay.rs                      MODIFY: the universe retention test (mtime rule)
@@ -85,12 +89,13 @@ crates/store/migrations/0008_compact.sql          NEW
 crates/store/src/compact_io.rs, src/lib.rs        NEW/MODIFY
 crates/store/tests/compact_io.rs                  NEW;  crates/store/tests/migrate.rs MODIFY (table list)
 bins/compact/                                     NEW: Cargo.toml, src/{lib,main,config,guard,rows,pq,reduce,windows,hour,state,archive,verify,run,bench}.rs
-bins/compact/tests/                               NEW: fixture/mod.rs, common/mod.rs, config.rs, pq.rs, reduce.rs, l2.rs, hour.rs, archive.rs, verify.rs, service.rs, bench.rs
+bins/compact/tests/                               NEW: fixture/mod.rs, common/mod.rs, config.rs, rows.rs, pq.rs, reduce.rs, l2.rs, hour.rs, checkpoint.rs, archive.rs, verify.rs, service.rs, bench.rs
 bins/api/src/health.rs, bins/api/tests/health.rs  MODIFY
 web/src/api/types.ts, web/src/test/fixtures.ts    MODIFY
 web/src/components/Hearts.tsx, Hearts.test.tsx    MODIFY
 web/src/pages/Health.tsx, Health.test.tsx         MODIFY
 web/src/help.ts                                   MODIFY: archive entry
+web/src/lib/bytes.ts, bytes.test.ts               NEW: fmtGb
 docker/rust.Dockerfile, compose.yml, .env.example, docker/postgres/init/01-roles.sh   MODIFY
 docs/superpowers/runbooks/phase5b-storage-vps.md  NEW
 ```
@@ -99,7 +104,7 @@ docs/superpowers/runbooks/phase5b-storage-vps.md  NEW
 
 ### Task 1: `crates/tape`: the capture format and frame parsing in one pure crate
 
-Spec §2 requires the compactor to reuse the scanner's line parsing, frame parsing and `Book`, and bans `pm-api` from `compact`. So the pure pieces move into a new crate that both use (ruling R1): `Line`/`Ctl`/`book_ctl`/`ctl_book` and the time/path helpers leave `bins/scanner/src/capture.rs`, `MarketEvent`/`parse_frame` leave `crates/pm-api/src/ws.rs`. Both old modules re-export them, so every existing import keeps compiling. Replay gains a per-line driver (`apply_line`) that Task 2's agreement test uses.
+Spec §2 requires the compactor to reuse the scanner's line parsing, frame parsing and `Book`, and bans `pm-api` from `compact`. So the pure pieces move into a new crate that both use (ruling R1): `Line`/`Ctl`/`book_ctl`/`ctl_book` and the time/path helpers leave `bins/scanner/src/capture.rs`, `MarketEvent`/`parse_frame` leave `crates/pm-api/src/ws.rs`. Both old modules re-export them, so every existing import keeps compiling. Replay gains a per-line driver (`apply_line`) that Task 4's agreement test uses.
 
 **Files:**
 - Create: `crates/tape/Cargo.toml`, `crates/tape/src/{lib,time,line,frame,files}.rs`, `crates/tape/tests/{frame,files}.rs`
@@ -277,7 +282,7 @@ workspace = true
 ```rust
 //! tape: the raw capture as both the scanner and the compactor read it (spec 5b §2, "reuse, not a
 //! second implementation"): capture and control lines, Polymarket frame parsing, the capture file
-//! layout, and the scanner engine's book rules (`feed`, Task 2).
+//! layout, and the scanner engine's book rules (`feed`, Tasks 2–3).
 #![forbid(unsafe_code)]
 
 pub mod files;
@@ -828,19 +833,232 @@ git commit -m "tape: one pure home for capture lines, frame parsing and the capt
 ```
 
 ---
-### Task 2: `tape::feed`: the scanner engine's book rules, pinned to the engine line by line
+### Task 2: `tape`: the universe record view and the shared `server_top`
 
-The compactor must rebuild books exactly as the scanner did (spec §2, §8 "agreement with the scanner"). The engine keeps its books inside `arb_core::detect::Group` (a premise file), so its book code can't be lifted out without touching premise areas. Ruling R1: the book *rules* (which tokens hold a book, snapshot, delta, the deferred server-top trim, REST snapshots, what a universe change carries or resets) are written in `tape::feed::FeedBooks` on top of the same `Book`, the same frame parser and the same line type; the one expression both must share byte for byte (`server_top`) is called by both; and a test drives the engine and `FeedBooks` side by side over a capture and asserts identical books after every line.
+The compactor must rebuild books exactly as the scanner did (spec §2, §8 "agreement with the scanner"). The engine keeps its books inside `arb_core::detect::Group` (a premise file), so its book code can't be lifted out without touching premise areas. Ruling R1 (**needs the owner's sign-off**, see Rulings): the book *rules* are re-expressed in `tape::feed::FeedBooks` (Task 3) on the same `Book`, frame parser and line type, pinned to the engine line by line (Task 4, and Task 12 for the rows). This task lays the two shared pieces: a read-only view of the scanner's universe record, and `server_top`, the one expression the engine and `FeedBooks` must agree on byte for byte, which the engine now calls from `tape`.
 
 **Files:**
-- Create: `crates/tape/src/universe_view.rs`, `crates/tape/src/feed.rs`, `crates/tape/tests/feed.rs`, `bins/scanner/tests/tape_agreement.rs`
+- Create: `crates/tape/src/universe_view.rs`, `crates/tape/src/feed.rs` (`server_top` only; Task 3 fills it), `crates/tape/tests/server_top.rs`, `bins/scanner/tests/record_view.rs`
 - Modify: `crates/tape/src/lib.rs`, `bins/scanner/src/engine.rs` (one expression), `bins/scanner/src/shards.rs` (`canary_key` from tape)
 
 **Interfaces:**
-- Consumes: Task 1 (`tape::line`, `tape::frame`, `tape::files`, `scanner::replay::{apply_line, ReplayState}`).
+- Consumes: Task 1 (`tape::files`).
 - Produces:
-  - `tape::universe_view`: `LegView { market_id, yes_token, no_token, status: String }`, `GroupView { event_id, neg_risk_market_id: Option<String>, legs }`, `CanaryView { market_id, event_id, yes_token, no_token }`, `UniverseView { taken_ms, groups, canary }`, `RecordView { universe, conn_of: BTreeMap<String, usize>, file }` (all `Serialize + Deserialize + Clone`), `load_record(dir, taken_ms, file) -> anyhow::Result<RecordView>`, `canary_key(market_id) -> String`.
-  - `tape::feed`: `server_top(Option<Price>, Option<Price>) -> (Option<Price>, Option<Price>)`, `TokenMeta { market_id, event_id, outcome, neg_risk }`, `Levels { bids, asks }` (`Levels::of(&Book)`), `UniverseChange { appeared, reset, gone }`, `LineEvent { None, Frame, BadLine, Down(usize), Universe(UniverseChange), UniverseMissing(String), Shutdown }`, `Applied { touched, snapshotted, before: Vec<(String, Levels)>, event }` + `Applied::before_of(&str) -> Option<&Levels>`, and `FeedBooks` with `new()`, `apply(&mut self, &Line, &mut dyn FnMut(i64, &str) -> anyhow::Result<RecordView>, &dyn Fn(&str) -> bool) -> Applied`, `book(&str) -> Option<&Book>`, `meta(&str) -> Option<&TokenMeta>`, `conn(&str) -> Option<usize>`, `visible_tokens() -> Vec<String>`, `tokens_on(usize) -> Vec<String>`, `event_tokens(&str) -> Vec<String>`, `to_state() -> FeedState`, `from_state(&FeedState) -> anyhow::Result<FeedBooks>`; `FeedState` (`Serialize + Deserialize + Default + PartialEq`).
+  - `tape::universe_view`: `LegView { market_id, yes_token, no_token, status: String }`, `GroupView { event_id, neg_risk_market_id: Option<String>, legs }`, `CanaryView { market_id, event_id, yes_token, no_token }`, `UniverseView { taken_ms, groups, canary }`, `RecordView { universe, conn_of: BTreeMap<String, usize>, file }` (all `Serialize + Deserialize + Clone + PartialEq`), `load_record(dir, taken_ms, file) -> anyhow::Result<RecordView>`, `canary_key(market_id) -> String`.
+  - `tape::feed::server_top(Option<Price>, Option<Price>) -> (Option<Price>, Option<Price>)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`crates/tape/tests/server_top.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use arb_core::money::Price;
+use tape::feed::server_top;
+
+#[test]
+fn the_empty_side_markers_are_not_levels() {
+    let p = |s: &str| Price::parse(s).unwrap();
+    assert_eq!(server_top(Some(p("0")), Some(p("1"))), (None, None));
+    assert_eq!(server_top(Some(p("0.4")), Some(p("0.6"))), (Some(p("0.4")), Some(p("0.6"))));
+    assert_eq!(server_top(None, None), (None, None));
+}
+```
+`bins/scanner/tests/record_view.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! The compactor reads universe records through tape's view; it must read what the scanner writes.
+use rust_decimal::Decimal;
+use scanner::capture::{UniverseRecord, universe_file_name};
+use scanner::universe::{CanaryPair, ConnMap, GroupMeta, LegMeta, Status, Universe};
+use tape::universe_view::RecordView;
+
+const T0: i64 = 1_790_121_600_000;
+
+fn leg(t: &str, status: Status) -> LegMeta {
+    LegMeta {
+        market_id: format!("m-{t}"),
+        yes_token: t.into(),
+        no_token: format!("n-{t}"),
+        status,
+        fee_rate: Decimal::ZERO,
+        fee_exponent: 1,
+        tick: None,
+        min_size: None,
+        seconds_delay: None,
+        end_date: None,
+    }
+}
+
+#[test]
+fn the_record_view_reads_what_the_scanner_writes() {
+    let u = Universe {
+        taken_ms: T0,
+        groups: vec![GroupMeta {
+            event_id: "e1".into(),
+            slug: None,
+            title: None,
+            neg_risk_market_id: Some("nr-e1".into()),
+            augmented: false,
+            legs: vec![leg("a1", Status::Live), leg("a3", Status::Halted)],
+            tags: Some(vec!["politics".into()]),
+        }],
+        canary: vec![CanaryPair { market_id: "m9".into(), event_id: "e9".into(), yes_token: "cy".into(), no_token: "cn".into() }],
+    };
+    let rec = UniverseRecord {
+        universe: u,
+        conn_of: [("e1".to_string(), 0), ("canary:m9".to_string(), 1)].into_iter().collect::<ConnMap>(),
+        file: universe_file_name(T0, 3),
+    };
+    let v: RecordView = serde_json::from_slice(&serde_json::to_vec(&rec).unwrap()).unwrap();
+    assert_eq!(v.file, rec.file);
+    assert_eq!(v.universe.taken_ms, T0);
+    assert_eq!(v.conn_of.get("canary:m9"), Some(&1));
+    assert_eq!(v.universe.groups[0].neg_risk_market_id.as_deref(), Some("nr-e1"));
+    let legs: Vec<(String, String)> = v.universe.groups[0].legs.iter().map(|l| (l.yes_token.clone(), l.status.clone())).collect();
+    assert_eq!(legs, vec![("a1".into(), "live".into()), ("a3".into(), "halted".into())]);
+    assert_eq!(v.universe.canary[0].no_token, "cn");
+    assert_eq!(scanner::shards::canary_key("m9"), "canary:m9");
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test -p tape --test server_top; cargo test -p scanner --test record_view`
+Expected: FAIL (no `tape::feed`, no `tape::universe_view`).
+
+- [ ] **Step 3: The universe projection**
+
+`crates/tape/src/universe_view.rs`:
+```rust
+//! A read-only projection of the scanner's universe record (bins/scanner/src/capture.rs
+//! `UniverseRecord`): only the fields the compactor needs. serde ignores the rest, so the scanner
+//! can add fields freely; bins/scanner/tests/tape_agreement.rs parses a real record with it.
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegView {
+    pub market_id: String,
+    pub yes_token: String,
+    pub no_token: String,
+    /// The scanner's `Status` in snake_case: "live", "halted", "closed_no", …
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupView {
+    pub event_id: String,
+    #[serde(default)]
+    pub neg_risk_market_id: Option<String>,
+    pub legs: Vec<LegView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanaryView {
+    pub market_id: String,
+    pub event_id: String,
+    pub yes_token: String,
+    pub no_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniverseView {
+    pub taken_ms: i64,
+    pub groups: Vec<GroupView>,
+    pub canary: Vec<CanaryView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordView {
+    pub universe: UniverseView,
+    /// Unit key → connection: an event id for a group, `canary_key(market_id)` for a canary pair.
+    pub conn_of: BTreeMap<String, usize>,
+    pub file: String,
+}
+
+/// The shard-plan unit key of a canary pair (bins/scanner/src/shards.rs re-exports this one).
+pub fn canary_key(market_id: &str) -> String {
+    format!("canary:{market_id}")
+}
+
+pub fn load_record(dir: &Path, taken_ms: i64, file: &str) -> anyhow::Result<RecordView> {
+    crate::files::read_zst_json(&crate::files::universe_path(dir, taken_ms, file))
+}
+```
+In `bins/scanner/src/shards.rs` replace
+```rust
+pub fn canary_key(market_id: &str) -> String {
+    format!("canary:{market_id}")
+}
+```
+with `pub use tape::universe_view::canary_key;`.
+
+- [ ] **Step 4: `server_top` in `tape::feed`**
+
+`crates/tape/src/feed.rs` (Task 3 replaces this file with the full module, which keeps this function unchanged):
+```rust
+//! The scanner engine's book rules (Task 3). For now: the one expression the engine shares.
+use arb_core::money::Price;
+use rust_decimal::Decimal;
+
+/// Polymarket reports an EMPTY bid side as best_bid "0" and an EMPTY ask side as best_ask "1"
+/// (live smoke test 2026-09-25): no real order rests at either, so neither is a level. The
+/// engine calls this too, so the two can never disagree about it.
+pub fn server_top(
+    best_bid: Option<Price>,
+    best_ask: Option<Price>,
+) -> (Option<Price>, Option<Price>) {
+    (
+        best_bid.filter(|x| x.get() != Decimal::ZERO),
+        best_ask.filter(|x| x.get() != Decimal::ONE),
+    )
+}
+```
+`crates/tape/src/lib.rs`: add `pub mod feed;` and `pub mod universe_view;` (alphabetical with the others).
+
+- [ ] **Step 5: The engine calls the shared `server_top`**
+
+In `bins/scanner/src/engine.rs` `on_frame`, the `MarketEvent::Delta` arm, replace
+```rust
+                    let (ts, bb, ba) = (
+                        *server_ts_ms,
+                        best_bid.filter(|x| x.get() != Decimal::ZERO),
+                        best_ask.filter(|x| x.get() != Decimal::ONE),
+                    );
+```
+with
+```rust
+                    let (bb, ba) = tape::feed::server_top(*best_bid, *best_ask);
+                    let ts = *server_ts_ms;
+```
+keeping the two comment lines above it. `engine.rs` is not a premise file (`crates/arb-core/src/premises.rs`), so `premises_lock` is unaffected.
+
+- [ ] **Step 6: Run the tests**
+
+Run: `cargo test -p tape && cargo test -p scanner && cargo test -p arb-core --test premises_lock && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS (engine behaviour is unchanged: every scanner engine and replay test passes as before).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/tape/src/lib.rs crates/tape/src/feed.rs crates/tape/src/universe_view.rs crates/tape/tests/server_top.rs bins/scanner/src/engine.rs bins/scanner/src/shards.rs bins/scanner/tests/record_view.rs
+git commit -m "tape: universe record view and the server_top the engine now shares"
+```
+
+---
+
+### Task 3: `tape::feed::FeedBooks`: the engine's book rules
+
+Ruling R1 (needs the owner's sign-off): `FeedBooks` re-expresses only the engine's book rules — which tokens hold a book (live group legs and canary tokens), snapshots, deltas, the deferred server-top trim (engine `pending_tops` / `resolve_pending` / `check_book`), REST snapshots, disconnects, shutdown, and what a universe change carries (books by token) or resets (a group with no connection) — on the same `Book`, parser and line type. Unit tests here pin each rule; Task 4 pins the whole to the engine line by line.
+
+**Files:**
+- Modify: `crates/tape/src/feed.rs` (the full module; `server_top` unchanged)
+- Create: `crates/tape/tests/feed.rs`
+
+**Interfaces:**
+- Consumes: Task 1 (`tape::line`, `tape::frame`), Task 2 (`tape::universe_view`, `server_top`).
+- Produces (`tape::feed`): `TokenMeta { market_id, event_id, outcome, neg_risk }`, `Levels { bids, asks }` (`Levels::of(&Book)`), `UniverseChange { appeared, reset, gone }`, `LineEvent { None, Frame, BadLine, Down(usize), Universe(UniverseChange), UniverseMissing(String), Shutdown }`, `Applied { touched, snapshotted, before: Vec<(String, Levels)>, event }` + `Applied::before_of(&str) -> Option<&Levels>`, and `FeedBooks` with `new()`, `apply(&mut self, &Line, &mut dyn FnMut(i64, &str) -> anyhow::Result<RecordView>, &dyn Fn(&str) -> bool) -> Applied`, `book(&str) -> Option<&Book>`, `meta(&str) -> Option<&TokenMeta>`, `conn(&str) -> Option<usize>`, `visible_tokens() -> Vec<String>`, `tokens_on(usize) -> Vec<String>`, `event_tokens(&str) -> Vec<String>`, `to_state() -> FeedState`, `from_state(&FeedState) -> anyhow::Result<FeedBooks>`; `FeedState` (`Serialize + Deserialize + Default + PartialEq`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1039,344 +1257,15 @@ fn state_round_trips_and_behaves_the_same_afterwards() {
     assert_eq!(asks(&g, "a1"), Vec::<String>::new(), "the restored pending check still trims");
 }
 ```
-`bins/scanner/tests/tape_agreement.rs`:
-```rust
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Spec 5b §8 "agreement with the scanner": the compactor's books (tape::feed::FeedBooks) equal the
-//! engine's, which is what `scanner replay` reconstructs, after every capture line, token by token;
-//! so do the top-of-book change streams. A hand-built hour covers every book rule; the #[ignore]
-//! variant runs the same comparison over a real capture directory (TAPE_AGREEMENT_DIR).
-use arb_core::book::{Book, Top};
-use arb_core::money::{Price, Shares};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-use scanner::capture::{CaptureMsg, Ctl, Line, UniverseRecord, Writer, universe_file_name};
-use scanner::engine::{Engine, EngineCtx};
-use scanner::replay::{ReplayState, apply_line};
-use scanner::universe::{CanaryPair, ConnMap, GroupMeta, LegMeta, Status, Universe};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use tape::feed::FeedBooks;
-use tape::universe_view::{RecordView, load_record};
-
-const T0: i64 = 1_790_121_600_000;
-const TOKENS: [&str; 7] = ["a1", "a2", "a3", "b1", "b2", "cy", "cn"];
-
-fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tape-agree-{name}-{}-{}", std::process::id(), scanner::now_ms()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn ctx() -> EngineCtx {
-    EngineCtx {
-        run_id: 0,
-        source: "replay".into(),
-        scanner_version: "t".into(),
-        config_hash: "c".into(),
-        gap_ms: 30_000,
-        stale_lag_ms: 500,
-        suspect_window_ms: 60_000,
-        l1_suspect_window_ms: 3_600_000,
-        drift_settle_ms: 2_000,
-        issue_throttle_ms: 5_000,
-    }
-}
-
-fn leg(t: &str, status: Status) -> LegMeta {
-    LegMeta {
-        market_id: format!("m-{t}"),
-        yes_token: t.into(),
-        no_token: format!("n-{t}"),
-        status,
-        fee_rate: Decimal::ZERO,
-        fee_exponent: 1,
-        tick: Some(dec!(0.01)),
-        min_size: Some(dec!(5)),
-        seconds_delay: Some(0),
-        end_date: None,
-    }
-}
-
-fn group(e: &str, legs: Vec<LegMeta>) -> GroupMeta {
-    GroupMeta { event_id: e.into(), slug: None, title: None, neg_risk_market_id: Some(format!("nr-{e}")), augmented: false, legs, tags: None }
-}
-
-fn universe(taken_ms: i64, a3: Status, b2: Status) -> Universe {
-    Universe {
-        taken_ms,
-        groups: vec![
-            group("e1", vec![leg("a1", Status::Live), leg("a2", Status::Live), leg("a3", a3)]),
-            group("e2", vec![leg("b1", Status::Live), leg("b2", b2)]),
-        ],
-        canary: vec![CanaryPair { market_id: "m9".into(), event_id: "e9".into(), yes_token: "cy".into(), no_token: "cn".into() }],
-    }
-}
-
-fn line(t: i64, shard: usize, raw: String) -> CaptureMsg {
-    CaptureMsg::Line(Line { recv_ts_us: t * 1000, shard, raw: Some(raw), ctl: None })
-}
-
-fn ctl(t: i64, shard: usize, c: Ctl) -> CaptureMsg {
-    CaptureMsg::Line(Line { recv_ts_us: t * 1000, shard, raw: None, ctl: Some(c) })
-}
-
-type Side<'a> = &'a [(&'a str, &'a str)];
-
-fn books(items: &[(&str, i64, Side, Side)]) -> String {
-    let lv = |v: Side| v.iter().map(|(p, s)| format!(r#"{{"price":"{p}","size":"{s}"}}"#)).collect::<Vec<_>>().join(",");
-    let one: Vec<String> = items
-        .iter()
-        .map(|(t, ts, b, a)| format!(r#"{{"event_type":"book","asset_id":"{t}","market":"0x","timestamp":"{ts}","hash":"h","bids":[{}],"asks":[{}]}}"#, lv(b), lv(a)))
-        .collect();
-    format!("[{}]", one.join(","))
-}
-
-/// One price_change message: (token, BUY|SELL, price, size, best_bid, best_ask).
-fn change(ts: i64, items: &[(&str, &str, &str, &str, Option<&str>, Option<&str>)]) -> String {
-    let one: Vec<String> = items
-        .iter()
-        .map(|(t, side, p, s, bb, ba)| {
-            let mut x = format!(r#"{{"asset_id":"{t}","side":"{side}","price":"{p}","size":"{s}""#);
-            if let Some(b) = bb {
-                x.push_str(&format!(r#","best_bid":"{b}""#));
-            }
-            if let Some(a) = ba {
-                x.push_str(&format!(r#","best_ask":"{a}""#));
-            }
-            x.push('}');
-            x
-        })
-        .collect();
-    format!(r#"{{"event_type":"price_change","market":"0x","timestamp":"{ts}","price_changes":[{}]}}"#, one.join(","))
-}
-
-fn record(u: &Universe, conn: &[(&str, usize)], seq: u64) -> UniverseRecord {
-    UniverseRecord {
-        universe: u.clone(),
-        conn_of: conn.iter().map(|(k, v)| (k.to_string(), *v)).collect::<ConnMap>(),
-        file: universe_file_name(u.taken_ms, seq),
-    }
-}
-
-/// A deterministic hour: every book rule, then 1,500 random deltas with often-wrong server tops.
-fn fixture(dir: &Path) {
-    let u1 = universe(T0, Status::Halted, Status::Live);
-    let r1 = record(&u1, &[("e1", 0), ("e2", 1), ("canary:m9", 1)], 1);
-    let u2 = universe(T0 + 600_000, Status::Live, Status::Halted);
-    let r2 = record(&u2, &[("e2", 1), ("canary:m9", 1)], 2); // e1 loses its connection
-    let mut m = vec![
-        CaptureMsg::Universe(Box::new(r1.clone())),
-        ctl(T0 + 1_000, 0, Ctl::Universe { taken_ms: T0, file: r1.file.clone() }),
-        line(T0 + 2_000, 0, books(&[("a1", T0 + 1_990, &[("0.40", "10"), ("0.39", "5")], &[("0.45", "10")]), ("a2", T0 + 1_990, &[("0.20", "3")], &[("0.30", "7")])])),
-        line(T0 + 2_100, 1, books(&[("b1", T0 + 2_090, &[("0.50", "1")], &[("0.52", "2")]), ("b2", T0 + 2_090, &[], &[("0.60", "4")]), ("cy", T0 + 2_090, &[("0.10", "9")], &[("0.12", "9")]), ("cn", T0 + 2_090, &[("0.88", "9")], &[("0.90", "9")])])),
-        line(T0 + 3_000, 0, change(T0 + 2_995, &[("a1", "BUY", "0.41", "2", Some("0.41"), Some("0.45"))])),
-        line(T0 + 3_100, 0, change(T0 + 3_095, &[("a1", "SELL", "0.44", "3", Some("0.41"), Some("0.46"))])),
-        line(T0 + 3_101, 0, change(T0 + 3_095, &[("a1", "SELL", "0.46", "1", Some("0.41"), Some("0.44"))])),
-        line(T0 + 5_000, 0, change(T0 + 4_995, &[("a2", "BUY", "0.21", "1", Some("0.21"), Some("0.30"))])),
-        line(T0 + 5_100, 1, format!(r#"{{"event_type":"last_trade_price","asset_id":"zz","timestamp":"{}"}}"#, T0 + 9_000)),
-        line(T0 + 5_200, 1, change(T0 + 5_195, &[("b1", "SELL", "0.51", "1", Some("0.50"), Some("0.55"))])),
-        ctl(T0 + 5_300, 0, Ctl::RestSnapshot { token: "b1".into(), server_ts_ms: T0 + 100, bids: vec![], asks: vec![("0.70".into(), "1".into())] }),
-        ctl(T0 + 5_400, 0, Ctl::RestSnapshot { token: "cy".into(), server_ts_ms: T0 + 5_390, bids: vec![("0.11".into(), "1".into())], asks: vec![] }),
-        ctl(T0 + 6_000, 1, Ctl::Down),
-        line(T0 + 9_000, 1, change(T0 + 8_995, &[("b1", "BUY", "0.49", "2", Some("0.50"), None)])),
-        CaptureMsg::Universe(Box::new(r2.clone())),
-        ctl(T0 + 600_000, 0, Ctl::Universe { taken_ms: T0 + 600_000, file: r2.file.clone() }),
-        line(T0 + 601_000, 0, change(T0 + 600_995, &[("a1", "BUY", "0.42", "1", Some("0.42"), Some("0.47")), ("a3", "SELL", "0.80", "2", Some("0"), Some("0.80"))])),
-        line(T0 + 603_000, 0, change(T0 + 602_995, &[("a1", "BUY", "0.43", "1", Some("0.43"), Some("0.48"))])),
-    ];
-    // 1,500 random deltas: an LCG picks token, side, price, size and whether the server top agrees.
-    let mut x: u64 = 0x5eed;
-    let mut next = |n: u64| {
-        x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
-        (x >> 33) % n
-    };
-    let pool = [("a1", 0usize), ("b1", 1), ("cy", 1), ("cn", 1)];
-    let mut t = T0 + 700_000;
-    let mut ts = t;
-    for _ in 0..1_500 {
-        t += i64::try_from(next(1_500)).unwrap();
-        if next(4) != 0 {
-            ts = t - 5; // else: same server ts as the previous message (a split update)
-        }
-        let (tok, conn) = pool[usize::try_from(next(4)).unwrap()];
-        let side = if next(2) == 0 { "BUY" } else { "SELL" };
-        let price = format!("0.{:02}", 1 + next(98));
-        let size = next(40).to_string();
-        let bb = match next(3) { 0 => None, 1 => Some("0".to_string()), _ => Some(format!("0.{:02}", 1 + next(98))) };
-        let ba = match next(3) { 0 => None, 1 => Some("1".to_string()), _ => Some(format!("0.{:02}", 1 + next(98))) };
-        m.push(line(t, conn, change(ts, &[(tok, side, &price, &size, bb.as_deref(), ba.as_deref())])));
-    }
-    m.push(ctl(t + 1, 0, Ctl::Shutdown));
-    let mut w = Writer::new(dir.to_path_buf());
-    for msg in &m {
-        w.write(msg).unwrap();
-    }
-    w.finish();
-}
-
-type Lv = (Vec<(Price, Shares)>, Vec<(Price, Shares)>);
-
-fn lv(b: Option<&Book>) -> Option<Lv> {
-    b.map(|b| (b.bids_best_first(), b.asks_best_first()))
-}
-
-/// Drive both over every hour file of `dir`, comparing `tokens` (None: the tokens each line
-/// touched, then every visible token at the end). Returns the number of lines compared.
-fn compare(dir: &Path, tokens: Option<&[&str]>) -> usize {
-    let mut engine = Engine::new(ctx());
-    let mut st = ReplayState::default();
-    let mut feed = FeedBooks::new();
-    let mut load = |taken: i64, file: &str| load_record(dir, taken, file);
-    let mut engine_tops: BTreeMap<String, Vec<(usize, Top)>> = BTreeMap::new();
-    let mut feed_tops: BTreeMap<String, Vec<(usize, Top)>> = BTreeMap::new();
-    let mut n = 0usize;
-    for h in tape::files::listing(dir).hours {
-        tape::files::for_each_line(&h.path, |l| {
-            apply_line(&mut engine, dir, &l, &mut st, &mut |_| {})?;
-            let ap = feed.apply(&l, &mut load, &|_| false);
-            let check: Vec<String> = match tokens {
-                Some(t) => t.iter().map(|s| s.to_string()).collect(),
-                None => ap.touched.clone(),
-            };
-            for t in &check {
-                assert_eq!(lv(engine.book_of(t)), lv(feed.book(t)), "line {n}: books differ for {t}");
-                for (tops, top) in [
-                    (&mut engine_tops, engine.book_of(t).map(|b| b.top())),
-                    (&mut feed_tops, feed.book(t).map(|b| b.top())),
-                ] {
-                    let s = tops.entry(t.clone()).or_default();
-                    if let Some(top) = top
-                        && s.last().map(|(_, x)| *x) != Some(top)
-                    {
-                        s.push((n, top));
-                    }
-                }
-            }
-            n += 1;
-            Ok(())
-        })
-        .unwrap();
-    }
-    for t in feed.visible_tokens() {
-        assert_eq!(lv(engine.book_of(&t)), lv(feed.book(&t)), "end: books differ for {t}");
-    }
-    assert_eq!(engine_tops, feed_tops, "top-of-book change streams differ");
-    n
-}
-
-#[test]
-fn feed_books_equal_the_engines_after_every_line() {
-    let dir = tmp("fixture");
-    fixture(&dir);
-    let n = compare(&dir, Some(&TOKENS));
-    assert!(n > 1_500, "{n} lines compared");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn the_record_view_reads_what_the_scanner_writes() {
-    let u = universe(T0, Status::Halted, Status::Live);
-    let rec = record(&u, &[("e1", 0), ("canary:m9", 1)], 3);
-    let v: RecordView = serde_json::from_slice(&serde_json::to_vec(&rec).unwrap()).unwrap();
-    assert_eq!(v.file, rec.file);
-    assert_eq!(v.universe.taken_ms, T0);
-    assert_eq!(v.conn_of.get("canary:m9"), Some(&1));
-    assert_eq!(v.universe.groups[0].neg_risk_market_id.as_deref(), Some("nr-e1"));
-    let legs: Vec<(String, String)> = v.universe.groups[0].legs.iter().map(|l| (l.yes_token.clone(), l.status.clone())).collect();
-    assert_eq!(legs, vec![("a1".into(), "live".into()), ("a2".into(), "live".into()), ("a3".into(), "halted".into())]);
-    assert_eq!(v.universe.canary[0].no_token, "cn");
-    assert_eq!(scanner::shards::canary_key("m9"), "canary:m9");
-}
-
-#[test]
-#[ignore]
-fn feed_books_equal_the_engines_on_a_real_capture() {
-    let Ok(dir) = std::env::var("TAPE_AGREEMENT_DIR") else {
-        eprintln!("SKIPPED: TAPE_AGREEMENT_DIR not set");
-        return;
-    };
-    let n = compare(Path::new(&dir), None);
-    eprintln!("tape agreement: {n} lines, books equal after every one");
-}
-```
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `cargo test -p tape --test feed; cargo test -p scanner --test tape_agreement`
-Expected: FAIL (no `tape::feed`, no `tape::universe_view`).
+Run: `cargo test -p tape --test feed`
+Expected: FAIL (no `FeedBooks`).
 
-- [ ] **Step 3: The universe projection**
+- [ ] **Step 3: The book rules**
 
-`crates/tape/src/universe_view.rs`:
-```rust
-//! A read-only projection of the scanner's universe record (bins/scanner/src/capture.rs
-//! `UniverseRecord`): only the fields the compactor needs. serde ignores the rest, so the scanner
-//! can add fields freely; bins/scanner/tests/tape_agreement.rs parses a real record with it.
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::Path;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegView {
-    pub market_id: String,
-    pub yes_token: String,
-    pub no_token: String,
-    /// The scanner's `Status` in snake_case: "live", "halted", "closed_no", …
-    pub status: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupView {
-    pub event_id: String,
-    #[serde(default)]
-    pub neg_risk_market_id: Option<String>,
-    pub legs: Vec<LegView>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CanaryView {
-    pub market_id: String,
-    pub event_id: String,
-    pub yes_token: String,
-    pub no_token: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UniverseView {
-    pub taken_ms: i64,
-    pub groups: Vec<GroupView>,
-    pub canary: Vec<CanaryView>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordView {
-    pub universe: UniverseView,
-    /// Unit key → connection: an event id for a group, `canary_key(market_id)` for a canary pair.
-    pub conn_of: BTreeMap<String, usize>,
-    pub file: String,
-}
-
-/// The shard-plan unit key of a canary pair (bins/scanner/src/shards.rs re-exports this one).
-pub fn canary_key(market_id: &str) -> String {
-    format!("canary:{market_id}")
-}
-
-pub fn load_record(dir: &Path, taken_ms: i64, file: &str) -> anyhow::Result<RecordView> {
-    crate::files::read_zst_json(&crate::files::universe_path(dir, taken_ms, file))
-}
-```
-In `bins/scanner/src/shards.rs` replace
-```rust
-pub fn canary_key(market_id: &str) -> String {
-    format!("canary:{market_id}")
-}
-```
-with `pub use tape::universe_view::canary_key;`.
-
-- [ ] **Step 4: The book rules**
-
-`crates/tape/src/feed.rs`:
+Replace `crates/tape/src/feed.rs` with:
 ```rust
 //! The scanner engine's book rules (bins/scanner/src/engine.rs) without detection, integrity rows
 //! or the paper trader: which tokens hold a book (live group legs and canary tokens), snapshots,
@@ -2006,40 +1895,325 @@ pub struct PendingState {
     pub ask: Option<String>,
 }
 ```
-`crates/tape/src/lib.rs`: add `pub mod feed;` and `pub mod universe_view;` (alphabetical with the others).
 
-- [ ] **Step 5: The engine calls the shared `server_top`**
+- [ ] **Step 4: Run the tests**
 
-In `bins/scanner/src/engine.rs` `on_frame`, the `MarketEvent::Delta` arm, replace
-```rust
-                    let (ts, bb, ba) = (
-                        *server_ts_ms,
-                        best_bid.filter(|x| x.get() != Decimal::ZERO),
-                        best_ask.filter(|x| x.get() != Decimal::ONE),
-                    );
-```
-with
-```rust
-                    let (bb, ba) = tape::feed::server_top(*best_bid, *best_ask);
-                    let ts = *server_ts_ms;
-```
-keeping the two comment lines above it. `engine.rs` is not a premise file (`crates/arb-core/src/premises.rs`), so `premises_lock` is unaffected.
+Run: `cargo test -p tape && cargo clippy -p tape --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS: the seven feed tests and the Task 1–2 tape tests.
 
-- [ ] **Step 6: Run the tests**
-
-Run: `cargo test -p tape && cargo test -p scanner && cargo test -p arb-core --test premises_lock && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: PASS, including `feed_books_equal_the_engines_after_every_line` (more than 1,500 lines compared) and `the_record_view_reads_what_the_scanner_writes`. If the agreement test fails, the difference is in `FeedBooks`, never in the engine: fix `feed.rs` to match `engine.rs` (this task must not change engine behaviour).
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tape/src/lib.rs crates/tape/src/feed.rs crates/tape/src/universe_view.rs crates/tape/tests/feed.rs bins/scanner/src/engine.rs bins/scanner/src/shards.rs bins/scanner/tests/tape_agreement.rs
-git commit -m "tape: FeedBooks, the engine's book rules, equal to the engine after every line"
+git add crates/tape/src/feed.rs crates/tape/tests/feed.rs
+git commit -m "tape: FeedBooks, the scanner engine's book rules"
 ```
 
 ---
 
-### Task 3: store: migration 0008 (`compact_hours`, `compact_status`, `compact_rw`) and the compact reads/writes
+### Task 4: the agreement test: `FeedBooks` equals the engine after every line
+
+Spec §8 "agreement with the scanner". A hand-built capture hour that exercises every book rule (and the control lines that must *not* move books: `Suspect`, `Resolved`), a token moving between groups, a group and a canary pair appearing mid-hour, a group losing its connection, then 1,500 random deltas with often-wrong server tops, is replayed through the engine (`scanner::replay::apply_line`) and `FeedBooks` side by side; their books and top-of-book change streams must be equal after every line. The fixture lives in a shared test module because Task 12 replays it through the compactor too. An `#[ignore]` variant runs on a real capture directory (runbook §3).
+
+**Files:**
+- Create: `bins/scanner/tests/agreement/mod.rs`, `bins/scanner/tests/tape_agreement.rs`
+
+**Interfaces:**
+- Consumes: Task 1 (`apply_line`, `ReplayState`, `for_each_line`, `listing`), Tasks 2–3 (`FeedBooks`, `load_record`).
+- Produces (test module `agreement`, used by Task 12): `T0`, `TOKENS`, `tmp(&str) -> PathBuf`, `ctx() -> EngineCtx`, `fixture(&Path)` (writes the hour and its universe records), `compare(&Path, Option<&[&str]>) -> usize`.
+
+- [ ] **Step 1: Write the test**
+
+`bins/scanner/tests/agreement/mod.rs`:
+```rust
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
+//! Spec 5b §8 "agreement with the scanner": a hand-built capture hour, and the driver that replays
+//! it through the engine (what `scanner replay` reconstructs) and tape::feed::FeedBooks side by side.
+use arb_core::book::{Book, Top};
+use arb_core::money::{Price, Shares};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use scanner::capture::{CaptureMsg, Ctl, Line, UniverseRecord, Writer, universe_file_name};
+use scanner::engine::{Engine, EngineCtx};
+use scanner::replay::{ReplayState, apply_line};
+use scanner::universe::{CanaryPair, ConnMap, GroupMeta, LegMeta, Status, Universe};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use tape::feed::FeedBooks;
+use tape::universe_view::load_record;
+
+pub const T0: i64 = 1_790_121_600_000;
+pub const TOKENS: [&str; 11] = ["a1", "a2", "a3", "b1", "b2", "cy", "cn", "d1", "d2", "c8y", "c8n"];
+
+pub fn tmp(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("tape-agree-{name}-{}-{}", std::process::id(), scanner::now_ms()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+pub fn ctx() -> EngineCtx {
+    EngineCtx {
+        run_id: 0,
+        source: "replay".into(),
+        scanner_version: "t".into(),
+        config_hash: "c".into(),
+        gap_ms: 30_000,
+        stale_lag_ms: 500,
+        suspect_window_ms: 60_000,
+        l1_suspect_window_ms: 3_600_000,
+        drift_settle_ms: 2_000,
+        issue_throttle_ms: 5_000,
+    }
+}
+
+fn leg(t: &str, status: Status) -> LegMeta {
+    LegMeta {
+        market_id: format!("m-{t}"),
+        yes_token: t.into(),
+        no_token: format!("n-{t}"),
+        status,
+        fee_rate: Decimal::ZERO,
+        fee_exponent: 1,
+        tick: Some(dec!(0.01)),
+        min_size: Some(dec!(5)),
+        seconds_delay: Some(0),
+        end_date: None,
+    }
+}
+
+fn group(e: &str, legs: Vec<LegMeta>) -> GroupMeta {
+    GroupMeta { event_id: e.into(), slug: None, title: None, neg_risk_market_id: Some(format!("nr-{e}")), augmented: false, legs, tags: None }
+}
+
+fn canary(m: &str, e: &str, y: &str, n: &str) -> CanaryPair {
+    CanaryPair { market_id: m.into(), event_id: e.into(), yes_token: y.into(), no_token: n.into() }
+}
+
+/// U1: e1 (a1, a2, a3 halted), e2 (b1, b2), canary m9.
+fn universe1() -> Universe {
+    Universe {
+        taken_ms: T0,
+        groups: vec![
+            group("e1", vec![leg("a1", Status::Live), leg("a2", Status::Live), leg("a3", Status::Halted)]),
+            group("e2", vec![leg("b1", Status::Live), leg("b2", Status::Live)]),
+        ],
+        canary: vec![canary("m9", "e9", "cy", "cn")],
+    }
+}
+
+/// U2: e1 loses its connection and a2 (a3 goes live); a2 moves to e2; b2 halts; a new group e3
+/// (d1, d2) and a new canary pair m8 appear. Groups stay sorted by event id (the engine searches them).
+fn universe2() -> Universe {
+    Universe {
+        taken_ms: T0 + 600_000,
+        groups: vec![
+            group("e1", vec![leg("a1", Status::Live), leg("a3", Status::Live)]),
+            group("e2", vec![leg("b1", Status::Live), leg("b2", Status::Halted), leg("a2", Status::Live)]),
+            group("e3", vec![leg("d1", Status::Live), leg("d2", Status::Live)]),
+        ],
+        canary: vec![canary("m9", "e9", "cy", "cn"), canary("m8", "e8", "c8y", "c8n")],
+    }
+}
+
+fn line(t: i64, shard: usize, raw: String) -> CaptureMsg {
+    CaptureMsg::Line(Line { recv_ts_us: t * 1000, shard, raw: Some(raw), ctl: None })
+}
+
+fn ctl(t: i64, shard: usize, c: Ctl) -> CaptureMsg {
+    CaptureMsg::Line(Line { recv_ts_us: t * 1000, shard, raw: None, ctl: Some(c) })
+}
+
+type Side<'a> = &'a [(&'a str, &'a str)];
+
+fn books(items: &[(&str, i64, Side, Side)]) -> String {
+    let lv = |v: Side| v.iter().map(|(p, s)| format!(r#"{{"price":"{p}","size":"{s}"}}"#)).collect::<Vec<_>>().join(",");
+    let one: Vec<String> = items
+        .iter()
+        .map(|(t, ts, b, a)| format!(r#"{{"event_type":"book","asset_id":"{t}","market":"0x","timestamp":"{ts}","hash":"h","bids":[{}],"asks":[{}]}}"#, lv(b), lv(a)))
+        .collect();
+    format!("[{}]", one.join(","))
+}
+
+/// One price_change message: (token, BUY|SELL, price, size, best_bid, best_ask).
+fn change(ts: i64, items: &[(&str, &str, &str, &str, Option<&str>, Option<&str>)]) -> String {
+    let one: Vec<String> = items
+        .iter()
+        .map(|(t, side, p, s, bb, ba)| {
+            let mut x = format!(r#"{{"asset_id":"{t}","side":"{side}","price":"{p}","size":"{s}""#);
+            if let Some(b) = bb {
+                x.push_str(&format!(r#","best_bid":"{b}""#));
+            }
+            if let Some(a) = ba {
+                x.push_str(&format!(r#","best_ask":"{a}""#));
+            }
+            x.push('}');
+            x
+        })
+        .collect();
+    format!(r#"{{"event_type":"price_change","market":"0x","timestamp":"{ts}","price_changes":[{}]}}"#, one.join(","))
+}
+
+fn record(u: &Universe, conn: &[(&str, usize)], seq: u64) -> UniverseRecord {
+    UniverseRecord {
+        universe: u.clone(),
+        conn_of: conn.iter().map(|(k, v)| (k.to_string(), *v)).collect::<ConnMap>(),
+        file: universe_file_name(u.taken_ms, seq),
+    }
+}
+
+/// Write the hour (and its two universe records) into `dir`.
+pub fn fixture(dir: &Path) {
+    let r1 = record(&universe1(), &[("e1", 0), ("e2", 1), ("canary:m9", 1)], 1);
+    let r2 = record(&universe2(), &[("e2", 1), ("e3", 2), ("canary:m9", 1), ("canary:m8", 2)], 2);
+    let mut m = vec![
+        CaptureMsg::Universe(Box::new(r1.clone())),
+        ctl(T0 + 1_000, 0, Ctl::Universe { taken_ms: T0, file: r1.file.clone() }),
+        line(T0 + 2_000, 0, books(&[("a1", T0 + 1_990, &[("0.40", "10"), ("0.39", "5")], &[("0.45", "10")]), ("a2", T0 + 1_990, &[("0.20", "3")], &[("0.30", "7")])])),
+        line(T0 + 2_100, 1, books(&[("b1", T0 + 2_090, &[("0.50", "1")], &[("0.52", "2")]), ("b2", T0 + 2_090, &[], &[("0.60", "4")]), ("cy", T0 + 2_090, &[("0.10", "9")], &[("0.12", "9")]), ("cn", T0 + 2_090, &[("0.88", "9")], &[("0.90", "9")])])),
+        line(T0 + 3_000, 0, change(T0 + 2_995, &[("a1", "BUY", "0.41", "2", Some("0.41"), Some("0.45"))])),
+        line(T0 + 3_100, 0, change(T0 + 3_095, &[("a1", "SELL", "0.44", "3", Some("0.41"), Some("0.46"))])),
+        line(T0 + 3_101, 0, change(T0 + 3_095, &[("a1", "SELL", "0.46", "1", Some("0.41"), Some("0.44"))])),
+        line(T0 + 5_000, 0, change(T0 + 4_995, &[("a2", "BUY", "0.21", "1", Some("0.21"), Some("0.30"))])),
+        line(T0 + 5_100, 1, format!(r#"{{"event_type":"last_trade_price","asset_id":"zz","timestamp":"{}"}}"#, T0 + 9_000)),
+        line(T0 + 5_200, 1, change(T0 + 5_195, &[("b1", "SELL", "0.51", "1", Some("0.50"), Some("0.55"))])),
+        ctl(T0 + 5_300, 0, Ctl::RestSnapshot { token: "b1".into(), server_ts_ms: T0 + 100, bids: vec![], asks: vec![("0.70".into(), "1".into())] }),
+        ctl(T0 + 5_400, 0, Ctl::RestSnapshot { token: "cy".into(), server_ts_ms: T0 + 5_390, bids: vec![("0.11".into(), "1".into())], asks: vec![] }),
+        ctl(T0 + 6_000, 1, Ctl::Down),
+        ctl(T0 + 7_000, 0, Ctl::Suspect { event_id: "e2".into(), until_ms: T0 + 67_000 }),
+        ctl(T0 + 8_000, 0, Ctl::Resolved { market_id: "m-b2".into(), payout_yes: "1".into(), payout_no: "0".into() }),
+        line(T0 + 9_000, 1, change(T0 + 8_995, &[("b1", "BUY", "0.49", "2", Some("0.50"), None)])),
+        CaptureMsg::Universe(Box::new(r2.clone())),
+        ctl(T0 + 600_000, 0, Ctl::Universe { taken_ms: T0 + 600_000, file: r2.file.clone() }),
+        line(T0 + 601_000, 0, change(T0 + 600_995, &[("a1", "BUY", "0.42", "1", Some("0.42"), Some("0.47")), ("a3", "SELL", "0.80", "2", Some("0"), Some("0.80"))])),
+        line(T0 + 603_000, 0, change(T0 + 602_995, &[("a1", "BUY", "0.43", "1", Some("0.43"), Some("0.48"))])),
+        line(T0 + 604_000, 2, books(&[("d1", T0 + 603_990, &[("0.33", "4")], &[("0.35", "4")]), ("d2", T0 + 603_990, &[("0.60", "1")], &[]), ("c8y", T0 + 603_990, &[("0.05", "2")], &[("0.07", "2")]), ("c8n", T0 + 603_990, &[("0.93", "2")], &[("0.95", "2")])])),
+        line(T0 + 605_000, 1, change(T0 + 604_995, &[("a2", "BUY", "0.22", "1", Some("0.22"), Some("0.31"))])), // a2 now in e2, book carried
+        line(T0 + 606_000, 2, change(T0 + 605_995, &[("d1", "SELL", "0.34", "1", Some("0.33"), Some("0.36"))])),
+    ];
+    // 1,500 random deltas: an LCG picks token, side, price, size and whether the server top agrees.
+    let mut x: u64 = 0x5eed;
+    let mut next = |n: u64| {
+        x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (x >> 33) % n
+    };
+    let pool = [("a1", 0usize), ("a2", 1), ("b1", 1), ("cy", 1), ("cn", 1), ("d1", 2), ("c8y", 2)];
+    let mut t = T0 + 700_000;
+    let mut ts = t;
+    for _ in 0..1_500 {
+        t += i64::try_from(next(1_500)).unwrap();
+        if next(4) != 0 {
+            ts = t - 5; // else: same server ts as the previous message (a split update)
+        }
+        let (tok, conn) = pool[usize::try_from(next(7)).unwrap()];
+        let side = if next(2) == 0 { "BUY" } else { "SELL" };
+        let price = format!("0.{:02}", 1 + next(98));
+        let size = next(40).to_string();
+        let bb = match next(3) { 0 => None, 1 => Some("0".to_string()), _ => Some(format!("0.{:02}", 1 + next(98))) };
+        let ba = match next(3) { 0 => None, 1 => Some("1".to_string()), _ => Some(format!("0.{:02}", 1 + next(98))) };
+        m.push(line(t, conn, change(ts, &[(tok, side, &price, &size, bb.as_deref(), ba.as_deref())])));
+    }
+    m.push(ctl(t + 1, 0, Ctl::Shutdown));
+    let mut w = Writer::new(dir.to_path_buf());
+    for msg in &m {
+        w.write(msg).unwrap();
+    }
+    w.finish();
+}
+
+type Lv = (Vec<(Price, Shares)>, Vec<(Price, Shares)>);
+
+fn lv(b: Option<&Book>) -> Option<Lv> {
+    b.map(|b| (b.bids_best_first(), b.asks_best_first()))
+}
+
+/// Drive the engine and FeedBooks over every hour file of `dir`, comparing `tokens` after every
+/// line (None: the tokens each line touched, then every visible token at the end), and the
+/// top-of-book change streams. Returns the number of lines compared.
+pub fn compare(dir: &Path, tokens: Option<&[&str]>) -> usize {
+    let mut engine = Engine::new(ctx());
+    let mut st = ReplayState::default();
+    let mut feed = FeedBooks::new();
+    let mut load = |taken: i64, file: &str| load_record(dir, taken, file);
+    let mut engine_tops: BTreeMap<String, Vec<(usize, Top)>> = BTreeMap::new();
+    let mut feed_tops: BTreeMap<String, Vec<(usize, Top)>> = BTreeMap::new();
+    let mut n = 0usize;
+    for h in tape::files::listing(dir).hours {
+        tape::files::for_each_line(&h.path, |l| {
+            apply_line(&mut engine, dir, &l, &mut st, &mut |_| {})?;
+            let ap = feed.apply(&l, &mut load, &|_| false);
+            let check: Vec<String> = match tokens {
+                Some(t) => t.iter().map(|s| s.to_string()).collect(),
+                None => ap.touched.clone(),
+            };
+            for t in &check {
+                assert_eq!(lv(engine.book_of(t)), lv(feed.book(t)), "line {n}: books differ for {t}");
+                for (tops, top) in [
+                    (&mut engine_tops, engine.book_of(t).map(|b| b.top())),
+                    (&mut feed_tops, feed.book(t).map(|b| b.top())),
+                ] {
+                    let s = tops.entry(t.clone()).or_default();
+                    if let Some(top) = top
+                        && s.last().map(|(_, x)| *x) != Some(top)
+                    {
+                        s.push((n, top));
+                    }
+                }
+            }
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+    }
+    for t in feed.visible_tokens() {
+        assert_eq!(lv(engine.book_of(&t)), lv(feed.book(&t)), "end: books differ for {t}");
+    }
+    assert_eq!(engine_tops, feed_tops, "top-of-book change streams differ");
+    n
+}
+```
+`bins/scanner/tests/tape_agreement.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Spec 5b §8 "agreement with the scanner": FeedBooks' books equal the engine's after every line.
+mod agreement;
+use agreement::*;
+use std::path::Path;
+
+#[test]
+fn feed_books_equal_the_engines_after_every_line() {
+    let dir = tmp("fixture");
+    fixture(&dir);
+    let n = compare(&dir, Some(&TOKENS));
+    assert!(n > 1_500, "{n} lines compared");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore]
+fn feed_books_equal_the_engines_on_a_real_capture() {
+    let Ok(dir) = std::env::var("TAPE_AGREEMENT_DIR") else {
+        eprintln!("SKIPPED: TAPE_AGREEMENT_DIR not set");
+        return;
+    };
+    let n = compare(Path::new(&dir), None);
+    eprintln!("tape agreement: {n} lines, books equal after every one");
+}
+```
+
+- [ ] **Step 2: Run it**
+
+Run: `cargo test -p scanner --test tape_agreement && cargo clippy -p scanner --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS (more than 1,500 lines compared). A failure is a difference in `FeedBooks`, never in the engine: fix `crates/tape/src/feed.rs` to match `bins/scanner/src/engine.rs` (this plan never changes engine behaviour), and add the case that failed to `crates/tape/tests/feed.rs`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add bins/scanner/tests/agreement/mod.rs bins/scanner/tests/tape_agreement.rs
+git commit -m "scanner: agreement test, FeedBooks equal to the engine after every line"
+```
+
+---
+
+### Task 5: store: migration 0008 (`compact_hours`, `compact_status`, `compact_rw`) and the compact reads/writes
 
 **Files:**
 - Create: `crates/store/migrations/0008_compact.sql`, `crates/store/src/compact_io.rs`, `crates/store/tests/compact_io.rs`
@@ -2057,7 +2231,7 @@ git commit -m "tape: FeedBooks, the engine's book rules, equal to the engine aft
   - `Store::compact_hour_statuses(&self, from_ms: i64, to_ms: i64) -> Result<Vec<(i64, String)>, StoreError>`.
   - `Store::compact_hour_put(&self, &CompactHourRow) -> Result<(), StoreError>` (upsert: the compactor's word is final).
   - `Store::mark_hours_lost(&self, hours: &[i64], now_ms: i64) -> Result<u64, StoreError>` (`ON CONFLICT DO NOTHING`).
-  - `Store::compact_status_put(&self, &CompactStatusRow) -> Result<(), StoreError>`, `Store::compact_status(&self) -> Result<Option<CompactStatusRow>, StoreError>`.
+  - `Store::compact_status_put(&self, &CompactStatusRow) -> Result<(), StoreError>`, `Store::compact_status(&self) -> Result<Option<CompactStatusRow>, StoreError>` (the api; the scanner's rollback rule, Task 6), `Store::compact_first_done_ms(&self) -> Result<Option<i64>, StoreError>` (when the first hour was recorded; the dashboard's "never reported" heart, Task 19).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2163,8 +2337,10 @@ async fn migration_0008_gives_each_role_exactly_its_compact_rights() {
     assert_eq!(scanner.mark_hours_lost(&[T0 + H], T0).await.unwrap(), 1);
     let upd = scanner.compact_hour_put(&done(T0 + H)).await.unwrap_err();
     assert!(upd.to_string().contains("permission denied"), "scanner_rw cannot update compact_hours: {upd}");
+    assert_eq!(scanner.compact_status().await.unwrap(), None, "scanner_rw reads compact_status (rollback rule)");
     let api = db.role("analyze_ro").await;
     assert_eq!(api.compact_status().await.unwrap(), None, "analyze_ro reads compact_status");
+    assert_eq!(api.compact_first_done_ms().await.unwrap(), Some(T0), "analyze_ro reads compact_hours");
     let analyze = Store::connect_analyze(db.opts.clone(), 2, 10_000, Some("analyze_rw")).await.unwrap();
     assert_eq!(analyze.role_writes_outside_cards().await.unwrap(), Vec::<String>::new(), "analyze_rw unchanged");
     assert!(owner.role_writes_outside_compact().await.unwrap().contains(&"episodes".to_string()));
@@ -2180,6 +2356,7 @@ async fn mark_hours_lost_never_downgrades_a_done_hour() {
     let c = compact(&db).await;
     c.compact_hour_put(&done(T0)).await.unwrap();
     assert_eq!(owner.mark_hours_lost(&[T0, T0 + H], T0 + 3 * H).await.unwrap(), 1, "only the unknown hour is inserted");
+    assert_eq!(owner.compact_first_done_ms().await.unwrap(), Some(T0 + 2 * H), "the earliest done_ms");
     assert_eq!(
         owner.compact_hour_statuses(T0, T0 + 5 * H).await.unwrap(),
         vec![(T0, "done".to_string()), (T0 + H, "lost".to_string())]
@@ -2230,6 +2407,7 @@ async fn compact_episodes_are_live_net_positive_baskets_opened_in_range() {
 async fn compact_status_is_one_row_that_round_trips() {
     let Some((owner, db)) = common::fresh().await else { return };
     let c = compact(&db).await;
+    assert_eq!(owner.compact_first_done_ms().await.unwrap(), None, "no hour recorded yet");
     let s = CompactStatusRow { updated_ms: T0, archive_bytes: 12_345, oldest_day: Some("2026-09-23".into()), lag_hours: 1, last_error: None };
     c.compact_status_put(&s).await.unwrap();
     let s2 = CompactStatusRow { updated_ms: T0 + H, archive_bytes: 99, oldest_day: None, lag_hours: 4, last_error: Some("read episodes: timeout".into()) };
@@ -2291,12 +2469,14 @@ GRANT SELECT ON episodes, runs TO compact_rw;
 -- which hours are lost (plan ruling R7).
 GRANT SELECT, INSERT, UPDATE ON compact_hours, compact_status TO compact_rw;
 
--- 4. The scanner's delete guard reads statuses and inserts 'lost' at the hard cap (never UPDATE).
+-- 4. The scanner's delete guard reads statuses and inserts 'lost' at the hard cap (never UPDATE),
+--    and reads compact_status to wait only for a compactor that is alive (rollback, spec §9.5).
 GRANT SELECT, INSERT ON compact_hours TO scanner_rw;
+GRANT SELECT ON compact_status TO scanner_rw;
 
--- 5. The dashboard api reads the status row. 0001's default privileges already give analyze_ro
---    SELECT on every new table; spelled out for the one it uses.
-GRANT SELECT ON compact_status TO analyze_ro;
+-- 5. The dashboard api reads the status row and when the first hour was recorded. 0001's default
+--    privileges already give analyze_ro SELECT on every new table; spelled out for the two it uses.
+GRANT SELECT ON compact_status, compact_hours TO analyze_ro;
 ```
 
 - [ ] **Step 4: Write the store functions**
@@ -2499,6 +2679,15 @@ impl Store {
             },
         ))
     }
+
+    /// When the first hour was recorded (done or lost), if any.
+    pub async fn compact_first_done_ms(&self) -> Result<Option<i64>, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT min(done_ms) FROM compact_hours")
+                .fetch_one(self.pool())
+                .await?,
+        )
+    }
 }
 ```
 In `crates/store/src/lib.rs`: add `mod compact_io;` (alphabetical, after `mod card_io;`) and
@@ -2524,17 +2713,17 @@ git commit -m "store: migration 0008 (compact_hours, compact_status, compact_rw)
 
 ---
 
-### Task 4: scanner: the delete guard, 24 h retention, 15 GB cap
+### Task 6: scanner: the delete guard, 24 h retention, 15 GB cap, and the rollback rule
 
-Spec §4.3. The capture thread (a plain thread) can't await the database, so a small tokio task keeps a fresh view of `compact_hours` in a shared `GuardView` and inserts `lost` marks the thread sends it; the thread plans deletions with a pure function. A view older than 2 minutes, or never read, means the database is unreachable: retention falls back to today's rule (age plus cap) and says so once.
+Spec §4.3, §9.5. The capture thread (a plain thread) can't await the database, so a small tokio task (`guard_task`) keeps a view of `compact_hours` in a shared `GuardView` and inserts the `lost` marks the thread sends it. It inserts each mark **as soon as it arrives** (the 30 s tick only retries failures), so the compactor never sees a deleted hour before its mark (Review Focus 2; Task 18 closes the other side). The thread runs one pure-planned, testable housekeeping pass (`housekeep`). The guard only waits for a compactor that is alive (ruling R10, owner-approved rollback): with no `compact_status` row, or one older than 6 h, the view is cleared and retention is today's rule (age plus cap) with the new numbers; a view older than 2 minutes (the database unreachable) does the same.
 
 **Files:**
 - Create: `bins/scanner/src/retention.rs`, `bins/scanner/tests/retention.rs`
 - Modify: `bins/scanner/src/lib.rs`, `bins/scanner/src/capture.rs` (`spawn`), `bins/scanner/src/run.rs` (wiring), `config/scanner.toml`
 
 **Interfaces:**
-- Consumes: Task 1 (`tape::files::{listing, HourFile}`, `tape::time::{HOUR_MS, hour_label}`), Task 3 (`Store::compact_hour_statuses`, `Store::mark_hours_lost`).
-- Produces (`scanner::retention`): `VIEW_FRESH_MS = 120_000`, `REFRESH_MS = 30_000`, `LOOKBACK_MS`, `Deletion { path, hour_ms, by_cap: bool, uncompacted: bool }`, `plan(hours: &[HourFile], universe_bytes: u64, now_ms: i64, retention_hours: i64, max_bytes: u64, keep: Option<&Path>, compacted: Option<&BTreeSet<i64>>) -> Vec<Deletion>`, `GuardView` (`Default`; `set(fetched_ms, BTreeSet<i64>)`, `get(now_ms) -> Option<BTreeSet<i64>>`), `guard_task(Store, Arc<GuardView>, UnboundedReceiver<i64>)`. `capture::spawn(cfg, rx, metrics, guard: Arc<GuardView>, lost: UnboundedSender<i64>)`.
+- Consumes: Task 1 (`tape::files::{listing, hour_path, HourFile}`, `tape::time::{HOUR_MS, hour_label}`), Task 5 (`Store::compact_hour_statuses`, `Store::mark_hours_lost`, `Store::compact_status`).
+- Produces (`scanner::retention`): `VIEW_FRESH_MS = 120_000`, `REFRESH_MS = 30_000`, `LOOKBACK_MS`, `COMPACTOR_STALE_MS = 6 h`, `Deletion { path, hour_ms, by_cap: bool, uncompacted: bool }`, `plan(hours: &[HourFile], universe_bytes: u64, now_ms: i64, retention_hours: i64, max_bytes: u64, keep: Option<&Path>, compacted: Option<&BTreeSet<i64>>) -> Vec<Deletion>`, `compactor_alive(updated_ms: Option<i64>, now_ms: i64) -> bool`, `housekeep(dir: &Path, now_ms: i64, cfg: &CaptureCfg, view: Option<&BTreeSet<i64>>, lost: &UnboundedSender<i64>, keep: Option<&Path>) -> u64`, `GuardView` (`Default`; `set(fetched_ms, BTreeSet<i64>)`, `clear()`, `get(now_ms) -> Option<BTreeSet<i64>>`), `guard_task(Store, Arc<GuardView>, UnboundedReceiver<i64>)`. `capture::spawn(cfg, rx, metrics, guard: Arc<GuardView>, lost: UnboundedSender<i64>)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2543,7 +2732,8 @@ Spec §4.3. The capture thread (a plain thread) can't await the database, so a s
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Spec 5b §4.3: the scanner deletes a raw hour by age only once it is compacted (done or lost),
 //! deletes the oldest hour at the hard cap whatever its status (and marks it lost), and falls back
-//! to age + cap when it can't read compact_hours.
+//! to age + cap when it can't read compact_hours or the compactor is silent (rollback, §9.5).
+use scanner::config::CaptureCfg;
 use scanner::retention::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -2584,7 +2774,7 @@ fn the_cap_deletes_the_oldest_whatever_its_status_and_flags_the_uncompacted_ones
 }
 
 #[test]
-fn without_a_fresh_view_retention_falls_back_to_age_and_cap_and_reports_every_deletion() {
+fn without_a_view_retention_falls_back_to_age_and_cap_and_reports_every_deletion() {
     let now = T0 + 30 * H;
     let d = plan(&hours(30, 1), 0, now, 24, u64::MAX, None, None);
     assert_eq!(deleted(&d), vec![0, 1, 2, 3, 4, 5]);
@@ -2600,12 +2790,82 @@ fn the_hour_being_written_is_never_deleted() {
 }
 
 #[test]
-fn the_guard_view_is_fresh_for_two_minutes_only() {
+fn the_guard_view_is_fresh_for_two_minutes_only_and_can_be_cleared() {
     let v = GuardView::default();
     assert_eq!(v.get(T0), None, "never read: fall back");
     v.set(T0, [T0].into_iter().collect());
     assert_eq!(v.get(T0 + VIEW_FRESH_MS), Some([T0].into_iter().collect()));
     assert_eq!(v.get(T0 + VIEW_FRESH_MS + 1), None, "stale: fall back");
+    v.set(T0, [T0].into_iter().collect());
+    v.clear();
+    assert_eq!(v.get(T0), None, "cleared (compactor silent): fall back");
+}
+
+#[test]
+fn the_guard_waits_only_for_a_compactor_that_reported_within_six_hours() {
+    assert_eq!(COMPACTOR_STALE_MS, 6 * H);
+    assert!(!compactor_alive(None, T0), "no status row: not deployed yet, today's rule");
+    assert!(compactor_alive(Some(T0), T0 + COMPACTOR_STALE_MS));
+    assert!(!compactor_alive(Some(T0), T0 + COMPACTOR_STALE_MS + 1), "stopped (rollback): today's rule");
+}
+
+fn capture_dir(name: &str, n: i64) -> (PathBuf, CaptureCfg) {
+    let dir = std::env::temp_dir().join(format!("scanner-hk-{name}-{}-{}", std::process::id(), scanner::now_ms()));
+    for i in 0..n {
+        let p = tape::files::hour_path(&dir, T0 + i * H);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, vec![0u8; 10]).unwrap();
+    }
+    let cfg = CaptureCfg { dir: dir.to_string_lossy().to_string(), pause_below_gb: 10, resume_above_gb: 15, retention_hours: 24, max_capture_gb: 15 };
+    (dir, cfg)
+}
+
+fn marks(rx: &mut tokio::sync::mpsc::UnboundedReceiver<i64>) -> Vec<i64> {
+    let mut v = Vec::new();
+    while let Ok(h) = rx.try_recv() {
+        v.push((h - T0) / H);
+    }
+    v
+}
+
+fn left(dir: &Path) -> usize {
+    tape::files::listing(dir).hours.len()
+}
+
+#[test]
+fn housekeeping_marks_hours_lost_at_the_cap() {
+    let (dir, mut cfg) = capture_dir("cap", 3);
+    cfg.max_capture_gb = 0; // everything over the cap
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let keep = tape::files::hour_path(&dir, T0 + 2 * H);
+    let view: BTreeSet<i64> = [T0].into_iter().collect(); // hour 0 is done
+    let n = housekeep(&dir, T0 + 3 * H, &cfg, Some(&view), &tx, Some(&keep));
+    assert_eq!(n, 2);
+    assert_eq!(marks(&mut rx), vec![1], "only the uncompacted hour gets a lost mark");
+    assert_eq!(left(&dir), 1, "the hour being written stays");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn housekeeping_keeps_uncompacted_old_hours_while_the_compactor_is_alive() {
+    let (dir, cfg) = capture_dir("wait", 3);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let view: BTreeSet<i64> = [T0 + H].into_iter().collect();
+    let n = housekeep(&dir, T0 + 40 * H, &cfg, Some(&view), &tx, None);
+    assert_eq!(n, 1, "only hour 1 is done");
+    assert!(marks(&mut rx).is_empty());
+    assert_eq!(left(&dir), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn housekeeping_without_a_view_is_todays_rule_and_marks_every_deletion() {
+    let (dir, cfg) = capture_dir("fallback", 3);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let n = housekeep(&dir, T0 + 40 * H, &cfg, None, &tx, None);
+    assert_eq!(n, 3);
+    assert_eq!(marks(&mut rx), vec![0, 1, 2]);
+    std::fs::remove_dir_all(&dir).ok();
 }
 ```
 
@@ -2618,11 +2878,13 @@ Expected: FAIL (no `scanner::retention`).
 
 `bins/scanner/src/retention.rs`:
 ```rust
-//! Raw-hour retention with the compaction guard (spec 5b §4.3). `plan` is pure; `guard_task`
-//! keeps the capture thread's view of compact_hours fresh and records the hours it deleted before
-//! they were compacted. Capture must never stall on the database: a stale or missing view falls
-//! back to today's rule (age plus cap), and every deletion made blind is marked lost (a no-op for
-//! hours already done: ON CONFLICT DO NOTHING).
+//! Raw-hour retention with the compaction guard (spec 5b §4.3, §9.5). `plan` is pure, `housekeep`
+//! applies it to the capture folder, and `guard_task` keeps the capture thread's view of
+//! compact_hours fresh and records the hours deleted before they were compacted. Capture never
+//! stalls on the database or on a stopped compactor: with no fresh view, retention is today's rule
+//! (age plus cap), and every deletion made blind is marked lost (a no-op for hours already done:
+//! ON CONFLICT DO NOTHING).
+use crate::config::CaptureCfg;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -2630,14 +2892,16 @@ use std::time::Duration;
 use store::Store;
 use tape::files::HourFile;
 use tape::time::HOUR_MS;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// The guard's view is trusted for this long after a successful read.
 pub const VIEW_FRESH_MS: i64 = 120_000;
-/// How often `guard_task` re-reads compact_hours and retries lost marks.
+/// How often `guard_task` re-reads compact_hours (and retries lost marks that failed).
 pub const REFRESH_MS: u64 = 30_000;
 /// How far back `guard_task` reads (24 h retention and a 15 GB cap keep far less on disk).
 pub const LOOKBACK_MS: i64 = 14 * 24 * HOUR_MS;
+/// A compactor silent this long is treated as stopped: retention returns to today's rule (§9.5).
+pub const COMPACTOR_STALE_MS: i64 = 6 * HOUR_MS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deletion {
@@ -2705,6 +2969,58 @@ pub fn plan(
     out
 }
 
+/// The rollback rule (spec §9.5, owner ruling): wait for compaction only while the compactor has
+/// reported within `COMPACTOR_STALE_MS`. No status row (compact not deployed yet) or a stale one
+/// means today's rule.
+pub fn compactor_alive(updated_ms: Option<i64>, now_ms: i64) -> bool {
+    updated_ms.is_some_and(|u| now_ms.saturating_sub(u) <= COMPACTOR_STALE_MS)
+}
+
+/// One housekeeping pass over the capture folder: apply `plan`, send a lost mark for every hour
+/// deleted before it was known compacted (logging the ones the cap forced), then delete universe
+/// records no remaining hour can name. Returns the number of files deleted.
+pub fn housekeep(
+    dir: &Path,
+    now_ms: i64,
+    cfg: &CaptureCfg,
+    view: Option<&BTreeSet<i64>>,
+    lost: &UnboundedSender<i64>,
+    keep: Option<&Path>,
+) -> u64 {
+    let listing = tape::files::listing(dir);
+    let universe_bytes: u64 = listing.universes.iter().map(|u| u.bytes).sum();
+    let budget = cfg.max_capture_gb.saturating_mul(1_000_000_000);
+    let mut n = 0u64;
+    for d in plan(
+        &listing.hours,
+        universe_bytes,
+        now_ms,
+        cfg.retention_hours,
+        budget,
+        keep,
+        view,
+    ) {
+        if std::fs::remove_file(&d.path).is_ok() {
+            n += 1;
+            if d.uncompacted {
+                let _ = lost.send(d.hour_ms);
+                if d.by_cap {
+                    eprintln!(
+                        "capture: hour {} deleted before compaction (disk cap)",
+                        tape::time::hour_label(d.hour_ms)
+                    );
+                }
+            }
+        }
+    }
+    for p in crate::capture::stale_universe_files(dir) {
+        if std::fs::remove_file(p).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// The capture thread's view of compact_hours (done or lost hours) and when it was read.
 #[derive(Debug, Default)]
 pub struct GuardView {
@@ -2718,7 +3034,14 @@ impl GuardView {
         }
     }
 
-    /// The compacted hours, or None (fall back) when never read or read over 2 minutes ago.
+    /// Forget the view: retention falls back to today's rule until the next `set`.
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = None;
+        }
+    }
+
+    /// The compacted hours, or None (fall back) when never read, cleared, or read over 2 min ago.
     pub fn get(&self, now_ms: i64) -> Option<BTreeSet<i64>> {
         let g = self.inner.lock().ok()?;
         let (t, s) = g.as_ref()?;
@@ -2726,43 +3049,67 @@ impl GuardView {
     }
 }
 
-/// Every 30 s: record the lost hours the capture thread reported, then refresh the view. Ends when
-/// the capture thread drops its sender.
+async fn flush_lost(store: &Store, pending: &mut BTreeSet<i64>) {
+    if pending.is_empty() {
+        return;
+    }
+    let hours: Vec<i64> = pending.iter().copied().collect();
+    if store.mark_hours_lost(&hours, crate::now_ms()).await.is_ok() {
+        pending.clear();
+    }
+}
+
+/// Records lost hours the moment the capture thread reports them (so the compactor can't pass an
+/// hour before its mark, spec §4.3 / D5), and every 30 s retries failed marks and refreshes the
+/// view: set while the compactor is alive, cleared (today's rule) while it is silent. Ends when the
+/// capture thread drops its sender.
 pub async fn guard_task(store: Store, view: Arc<GuardView>, mut lost: UnboundedReceiver<i64>) {
     let mut every = tokio::time::interval(Duration::from_millis(REFRESH_MS));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pending: BTreeSet<i64> = BTreeSet::new();
-    let mut failing = false;
+    let (mut failing, mut silent) = (false, false);
     loop {
         tokio::select! {
             _ = every.tick() => {}
             h = lost.recv() => match h {
                 Some(h) => {
                     pending.insert(h);
+                    while let Ok(more) = lost.try_recv() {
+                        pending.insert(more);
+                    }
+                    flush_lost(&store, &mut pending).await;
                     continue;
                 }
                 None => return,
             },
         }
-        if !pending.is_empty() {
-            let hours: Vec<i64> = pending.iter().copied().collect();
-            if store.mark_hours_lost(&hours, crate::now_ms()).await.is_ok() {
-                pending.clear();
-            }
-        }
+        flush_lost(&store, &mut pending).await;
         let now = crate::now_ms();
-        match store
+        let status = store.compact_status().await;
+        let hours = store
             .compact_hour_statuses(now.saturating_sub(LOOKBACK_MS), now.saturating_add(HOUR_MS))
-            .await
-        {
-            Ok(rows) => {
-                view.set(now, rows.into_iter().map(|(h, _)| h).collect());
+            .await;
+        match (status, hours) {
+            (Ok(status), Ok(rows)) => {
                 if failing {
-                    eprintln!("capture: compact_hours readable again; raw hours wait for compaction");
+                    eprintln!("capture: compact_hours readable again");
                     failing = false;
                 }
+                if compactor_alive(status.map(|s| s.updated_ms), now) {
+                    view.set(now, rows.into_iter().map(|(h, _)| h).collect());
+                    if silent {
+                        eprintln!("capture: compactor reporting; raw hours wait for compaction");
+                        silent = false;
+                    }
+                } else {
+                    view.clear();
+                    if !silent {
+                        eprintln!("capture: compactor silent (no compact_status within 6 h); retention falls back to age + cap");
+                        silent = true;
+                    }
+                }
             }
-            Err(e) => {
+            (Err(e), _) | (_, Err(e)) => {
                 if !failing {
                     eprintln!("capture: compact_hours unreadable ({e}); retention falls back to age + cap");
                     failing = true;
@@ -2774,7 +3121,7 @@ pub async fn guard_task(store: Store, view: Arc<GuardView>, mut lost: UnboundedR
 ```
 `bins/scanner/src/lib.rs`: add `pub mod retention;` (alphabetical, after `pub mod replay;`).
 
-- [ ] **Step 4: The capture thread uses the plan**
+- [ ] **Step 4: The capture thread uses it**
 
 `bins/scanner/src/capture.rs` `spawn`: change the signature to
 ```rust
@@ -2786,36 +3133,20 @@ pub fn spawn(
     lost: tokio::sync::mpsc::UnboundedSender<i64>,
 ) -> std::thread::JoinHandle<()> {
 ```
-and replace the two deletion loops (the `for p in expired_hours(…)` loop and the `let budget = …; for p in over_budget_hours(…)` loop) with:
+and replace the three deletion loops (the `for p in expired_hours(…)` loop, the `let budget = …; for p in over_budget_hours(…)` loop and the `for p in stale_universe_files(&dir)` loop) with:
 ```rust
-                let listing = tape::files::listing(&dir);
-                let universe_bytes: u64 = listing.universes.iter().map(|u| u.bytes).sum();
-                let budget = cfg.max_capture_gb.saturating_mul(1_000_000_000);
                 let view = guard.get(now);
-                for d in crate::retention::plan(
-                    &listing.hours,
-                    universe_bytes,
+                let n = crate::retention::housekeep(
+                    &dir,
                     now,
-                    cfg.retention_hours,
-                    budget,
-                    writer.current_path(),
+                    &cfg,
                     view.as_ref(),
-                ) {
-                    if std::fs::remove_file(&d.path).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                        if d.uncompacted {
-                            let _ = lost.send(d.hour_ms);
-                            if d.by_cap {
-                                eprintln!(
-                                    "capture: hour {} deleted before compaction (disk cap)",
-                                    tape::time::hour_label(d.hour_ms)
-                                );
-                            }
-                        }
-                    }
-                }
+                    &lost,
+                    writer.current_path(),
+                );
+                metrics.capture_deletes.fetch_add(n, Ordering::Relaxed);
 ```
-(`stale_universe_files` stays after it; `expired_hours` and `over_budget_hours` stay as public helpers, still covered by `bins/scanner/tests/replay.rs`.) Update the module doc's last sentence to: `Capture never blocks the scanner: it pauses on low disk (hysteresis), deletes hour files past the retention window once compacted (retention.rs), always deletes the oldest at the byte cap, and deletes universe records no remaining hour can reference.`
+(`expired_hours` and `over_budget_hours` stay as public helpers, still covered by `bins/scanner/tests/replay.rs`.) Update the module doc's last sentence to: `Capture never blocks the scanner: it pauses on low disk (hysteresis), deletes hour files past the retention window once compacted (retention.rs), always deletes the oldest at the byte cap, and deletes universe records no remaining hour can reference.`
 
 - [ ] **Step 5: Wire the guard in `run_live`**
 
@@ -2850,27 +3181,30 @@ max_capture_gb = 15             # hard cap: deletes the oldest hour whatever its
 - [ ] **Step 7: Run the tests and the premise checks**
 
 Run: `cargo test -p scanner && cargo test -p arb-core --test premises_lock && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: PASS, including the five retention tests, `bins/scanner/tests/premises.rs` (the `[capture]` section is not a premise section, spec §7) and `premises_lock` with no version bump.
+Expected: PASS, including the nine retention tests, `bins/scanner/tests/premises.rs` (the `[capture]` section is not a premise section, spec §7) and `premises_lock` with no version bump.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add bins/scanner/src/retention.rs bins/scanner/src/lib.rs bins/scanner/src/capture.rs bins/scanner/src/run.rs bins/scanner/tests/retention.rs config/scanner.toml
-git commit -m "scanner: raw hours wait for the compactor (delete guard), 24 h retention, 15 GB cap"
+git commit -m "scanner: raw hours wait for a live compactor (delete guard), lost marks at once, 24 h / 15 GB"
 ```
 
 ---
 
-### Task 5: scanner: universe records only when changed; retention keeps the record in force
+### Task 7: scanner: universe records only when changed (and acknowledged); retention keeps the record in force
 
 Spec §4.5. A refresh whose content (groups, canary pairs, connection map; not `taken_ms`, which changes every time) hashes the same as the last record written writes no new record; its `Ctl::Universe` line names the last written record (its `taken_ms` and file), so replay loads the same content. Retention then must keep the record in force at the oldest remaining hour even when it is older than that hour: ruling R8 uses the record files' write time (mtime) — every record written at or after the oldest hour's start, plus the newest one written before it, is kept.
 
+A record handed to the capture thread may still never reach disk (capture paused on low disk, a write error). Naming it from later refreshes would break replay for hours, so the capture thread **acknowledges** every record it wrote (its sequence number in `Metrics::universe_acked_seq`), and the dedup reuses a record only when it was acknowledged, capture is not paused, and no capture message was dropped since it was written; otherwise the refresh writes a new record (ruling R16).
+
 **Files:**
 - Create: `bins/scanner/tests/universe_dedup.rs`
-- Modify: `bins/scanner/src/capture.rs` (`UniverseDedup`, `UniversePlan`, `universe_hash`, `stale_universe_files`), `bins/scanner/src/run.rs` (the `apply` closure), `bins/scanner/tests/replay.rs` (the old universe-retention test)
+- Modify: `bins/scanner/src/capture.rs` (`UniverseDedup`, `UniversePlan`, `CaptureState`, `universe_hash`, `deliver`, `stale_universe_files`, the `spawn` write path), `bins/scanner/src/metrics.rs` (`universe_acked_seq`), `bins/scanner/src/run.rs` (the `apply` closure), `bins/scanner/tests/replay.rs` (the old universe-retention test)
 
 **Interfaces:**
-- Produces (`scanner::capture`): `UniversePlan { Write { hash: String }, Reuse { taken_ms: i64, file: String } }`, `UniverseDedup` (`Default`; `plan(&self, &Universe, &ConnMap) -> UniversePlan`, `written(&mut self, hash: String, taken_ms: i64, file: String)`), `universe_hash(&Universe, &ConnMap) -> anyhow::Result<String>`; `stale_universe_files(dir) -> Vec<PathBuf>` with the mtime rule.
+- Consumes: Task 6 (`housekeep` calls `stale_universe_files`).
+- Produces (`scanner::capture`): `UniversePlan { Write { hash: String }, Reuse { taken_ms: i64, file: String } }`, `CaptureState { acked_seq: u64, paused: bool, drops: u64 }` (`CaptureState::of(&Metrics)`), `UniverseDedup` (`Default`; `plan(&self, &Universe, &ConnMap, CaptureState) -> UniversePlan`, `written(&mut self, hash: String, taken_ms: i64, file: String, seq: u64, drops: u64)`), `universe_hash(&Universe, &ConnMap) -> anyhow::Result<String>`, `deliver(&mut Writer, &CaptureMsg, &Metrics) -> bool`; `stale_universe_files(dir) -> Vec<PathBuf>` with the mtime rule; `Metrics::universe_acked_seq: AtomicU64`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2884,9 +3218,11 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use scanner::capture::*;
 use scanner::engine::EngineCtx;
+use scanner::metrics::Metrics;
 use scanner::replay::replay_dir;
 use scanner::universe::{ConnMap, GroupMeta, LegMeta, Status, Universe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, UNIX_EPOCH};
 
 const T0: i64 = 1_790_121_600_000;
@@ -2939,18 +3275,63 @@ fn conn(c: usize) -> ConnMap {
     [("e1".to_string(), c)].into_iter().collect()
 }
 
+/// Capture is running and has written everything up to record `acked_seq`.
+fn ok(acked_seq: u64) -> CaptureState {
+    CaptureState { acked_seq, paused: false, drops: 0 }
+}
+
 #[test]
 fn an_unchanged_refresh_writes_no_record_but_names_the_last_one() {
     let mut d = UniverseDedup::default();
     let u1 = universe(T0, Status::Live);
-    let UniversePlan::Write { hash } = d.plan(&u1, &conn(0)) else { panic!("first refresh writes") };
-    d.written(hash, T0, universe_file_name(T0, 1));
+    let UniversePlan::Write { hash } = d.plan(&u1, &conn(0), ok(0)) else { panic!("first refresh writes") };
+    d.written(hash, T0, universe_file_name(T0, 1), 1, 0);
     let u2 = universe(T0 + 300_000, Status::Live); // same content, new taken_ms
-    assert_eq!(d.plan(&u2, &conn(0)), UniversePlan::Reuse { taken_ms: T0, file: universe_file_name(T0, 1) });
-    assert!(matches!(d.plan(&universe(T0 + 600_000, Status::Halted), &conn(0)), UniversePlan::Write { .. }), "content changed");
-    assert!(matches!(d.plan(&u2, &conn(1)), UniversePlan::Write { .. }), "connection map changed");
+    assert_eq!(d.plan(&u2, &conn(0), ok(1)), UniversePlan::Reuse { taken_ms: T0, file: universe_file_name(T0, 1) });
+    assert!(matches!(d.plan(&universe(T0 + 600_000, Status::Halted), &conn(0), ok(1)), UniversePlan::Write { .. }), "content changed");
+    assert!(matches!(d.plan(&u2, &conn(1), ok(1)), UniversePlan::Write { .. }), "connection map changed");
     assert_ne!(universe_hash(&u1, &conn(0)).unwrap(), universe_hash(&u1, &conn(1)).unwrap());
     assert_eq!(universe_hash(&u1, &conn(0)).unwrap(), universe_hash(&u2, &conn(0)).unwrap());
+}
+
+#[test]
+fn a_record_capture_never_wrote_is_written_again_once_capture_resumes() {
+    let mut d = UniverseDedup::default();
+    let (u1, u2, u3) = (universe(T0, Status::Live), universe(T0 + 300_000, Status::Live), universe(T0 + 600_000, Status::Live));
+    let UniversePlan::Write { hash } = d.plan(&u1, &conn(0), ok(0)) else { panic!("first refresh writes") };
+    d.written(hash, T0, universe_file_name(T0, 7), 7, 0);
+    // capture paused on low disk: record 7 was dropped and never acknowledged
+    let paused = CaptureState { acked_seq: 0, paused: true, drops: 1 };
+    assert!(matches!(d.plan(&u2, &conn(0), paused), UniversePlan::Write { .. }), "never name a record while paused");
+    // resumed, but record 7 never reached disk: write a new one
+    let resumed = CaptureState { acked_seq: 0, paused: false, drops: 1 };
+    let UniversePlan::Write { hash } = d.plan(&u2, &conn(0), resumed) else { panic!("unacknowledged: write again") };
+    d.written(hash, T0 + 300_000, universe_file_name(T0 + 300_000, 8), 8, 1);
+    // record 8 acknowledged: the next unchanged refresh names it
+    let acked = CaptureState { acked_seq: 8, paused: false, drops: 1 };
+    assert_eq!(d.plan(&u3, &conn(0), acked), UniversePlan::Reuse { taken_ms: T0 + 300_000, file: universe_file_name(T0 + 300_000, 8) });
+    // a message dropped since record 8 was written: write again (the drop may have been its line)
+    let dropped = CaptureState { acked_seq: 8, paused: false, drops: 2 };
+    assert!(matches!(d.plan(&u3, &conn(0), dropped), UniversePlan::Write { .. }));
+}
+
+#[test]
+fn deliver_acknowledges_only_records_that_reach_disk() {
+    let dir = tmp("deliver");
+    let m = Metrics::default();
+    let mut w = Writer::new(dir.clone());
+    let file = universe_file_name(T0, 42);
+    let rec = CaptureMsg::Universe(Box::new(UniverseRecord { universe: universe(T0, Status::Live), conn_of: conn(0), file: file.clone() }));
+    m.capture_paused.store(true, Ordering::SeqCst);
+    assert!(!deliver(&mut w, &rec, &m));
+    assert_eq!((m.universe_acked_seq.load(Ordering::SeqCst), m.capture_drops.load(Ordering::SeqCst)), (0, 1));
+    assert!(!universe_path(&dir, T0, &file).exists());
+    m.capture_paused.store(false, Ordering::SeqCst);
+    assert!(deliver(&mut w, &rec, &m));
+    assert_eq!(m.universe_acked_seq.load(Ordering::SeqCst), 42);
+    assert!(universe_path(&dir, T0, &file).exists());
+    assert_eq!(CaptureState::of(&m), CaptureState { acked_seq: 42, paused: false, drops: 1 });
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 fn book_frame(ts: i64, ask: &str) -> String {
@@ -3056,20 +3437,55 @@ pub fn universe_hash(u: &Universe, conn_of: &ConnMap) -> anyhow::Result<String> 
         .collect())
 }
 
-/// The last universe record handed to the capture thread: (hash, taken_ms, file).
+/// What the dedup needs to know about the capture thread (spec 5b §4.5, ruling R16).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureState {
+    /// Seq of the newest universe record the capture thread wrote to disk.
+    pub acked_seq: u64,
+    pub paused: bool,
+    /// Capture messages dropped so far.
+    pub drops: u64,
+}
+
+impl CaptureState {
+    pub fn of(m: &Metrics) -> CaptureState {
+        CaptureState {
+            acked_seq: m.universe_acked_seq.load(Ordering::Acquire),
+            paused: m.capture_paused.load(Ordering::Relaxed),
+            drops: m.capture_drops.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LastRecord {
+    hash: String,
+    taken_ms: i64,
+    file: String,
+    seq: u64,
+    drops: u64,
+}
+
+/// The last universe record handed to the capture thread.
 #[derive(Debug, Clone, Default)]
 pub struct UniverseDedup {
-    last: Option<(String, i64, String)>,
+    last: Option<LastRecord>,
 }
 
 impl UniverseDedup {
-    pub fn plan(&self, u: &Universe, conn_of: &ConnMap) -> UniversePlan {
+    /// Reuse the last record only when its content is the same AND capture really wrote it
+    /// (acknowledged), is not paused, and dropped nothing since; otherwise write a new record.
+    pub fn plan(&self, u: &Universe, conn_of: &ConnMap, st: CaptureState) -> UniversePlan {
         match universe_hash(u, conn_of) {
             Ok(h) => match &self.last {
-                Some((last, taken_ms, file)) if *last == h => UniversePlan::Reuse {
-                    taken_ms: *taken_ms,
-                    file: file.clone(),
-                },
+                Some(l)
+                    if l.hash == h && st.acked_seq >= l.seq && !st.paused && st.drops == l.drops =>
+                {
+                    UniversePlan::Reuse {
+                        taken_ms: l.taken_ms,
+                        file: l.file.clone(),
+                    }
+                }
                 _ => UniversePlan::Write { hash: h },
             },
             // Can't hash it: always write (an empty hash is never remembered).
@@ -3079,21 +3495,68 @@ impl UniverseDedup {
         }
     }
 
-    /// Call only once the record was handed to the capture thread.
-    pub fn written(&mut self, hash: String, taken_ms: i64, file: String) {
-        self.last = (!hash.is_empty()).then_some((hash, taken_ms, file));
+    /// Call once record `seq` was handed to the capture thread (`drops`: the drop count then).
+    pub fn written(&mut self, hash: String, taken_ms: i64, file: String, seq: u64, drops: u64) {
+        self.last = (!hash.is_empty()).then_some(LastRecord {
+            hash,
+            taken_ms,
+            file,
+            seq,
+            drops,
+        });
     }
 }
+
+/// `<seq>` of a `universe-<taken_ms>-<seq>.json.zst` file name.
+fn universe_seq(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("universe-")?.strip_suffix(".json.zst")?;
+    rest.rsplit_once('-')?.1.parse().ok()
+}
+
+/// Write one capture message unless capture is paused. A universe record that reaches disk is
+/// acknowledged (`metrics.universe_acked_seq`), so the dedup never names a record that was
+/// dropped. Returns whether it was written.
+pub fn deliver(writer: &mut Writer, msg: &CaptureMsg, metrics: &Metrics) -> bool {
+    if metrics.capture_paused.load(Ordering::Relaxed) {
+        metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    match writer.write(msg) {
+        Ok(()) => {
+            if let CaptureMsg::Universe(rec) = msg
+                && let Some(seq) = universe_seq(&rec.file)
+            {
+                metrics.universe_acked_seq.fetch_max(seq, Ordering::Release);
+            }
+            true
+        }
+        Err(e) => {
+            metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+            eprintln!("capture: write failed: {e}");
+            false
+        }
+    }
+}
+```
+In `spawn`, replace the write path at the end of the loop (the `if metrics.capture_paused.load(…) { …; continue; }` block and the `if let Err(e) = writer.write(&msg) { … }` block) with `deliver(&mut writer, &msg, &metrics);`.
+
+`bins/scanner/src/metrics.rs`, in `Metrics` after `capture_paused`:
+```rust
+    /// Seq of the newest universe record the capture thread wrote to disk (spec 5b §4.5): the
+    /// universe dedup names only acknowledged records.
+    pub universe_acked_seq: AtomicU64,
 ```
 In `bins/scanner/src/run.rs` `run_live`, replace the whole `let mut apply = |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| { … };` closure with:
 ```rust
     // Spec 5b §4.5: a new record only when the content changed; an unchanged refresh still
-    // captures its control line, naming the last record written, so replay sees the same inputs.
+    // captures its control line, naming the last record capture acknowledged, so replay sees the
+    // same inputs (ruling R16).
     let mut dedup = capture::UniverseDedup::default();
     let mut apply =
         |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| {
             let conn_map: ConnMap = conn_of.iter().map(|(k, v)| (k.clone(), *v)).collect();
-            let ctl = match dedup.plan(&u, &conn_map) {
+            let st = capture::CaptureState::of(&io.metrics);
+            let ctl = match dedup.plan(&u, &conn_map, st) {
                 capture::UniversePlan::Reuse { taken_ms, file } => Ctl::Universe { taken_ms, file },
                 capture::UniversePlan::Write { hash } => {
                     universe_seq += 1;
@@ -3110,7 +3573,7 @@ In `bins/scanner/src/run.rs` `run_live`, replace the whole `let mut apply = |eng
                     {
                         io.metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
                     } else {
-                        dedup.written(hash, u.taken_ms, file.clone());
+                        dedup.written(hash, u.taken_ms, file.clone(), universe_seq, st.drops);
                     }
                     Ctl::Universe {
                         taken_ms: u.taken_ms,
@@ -3155,36 +3618,32 @@ pub fn stale_universe_files(dir: &Path) -> Vec<PathBuf> {
 - [ ] **Step 5: Run the scanner tests**
 
 Run: `cargo test -p scanner && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: PASS: the three dedup tests and every replay test.
+Expected: PASS: the five dedup tests and every replay test.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add bins/scanner/src/capture.rs bins/scanner/src/run.rs bins/scanner/tests/universe_dedup.rs bins/scanner/tests/replay.rs
-git commit -m "scanner: universe records only when changed; retention keeps the record in force"
+git add bins/scanner/src/capture.rs bins/scanner/src/metrics.rs bins/scanner/src/run.rs bins/scanner/tests/universe_dedup.rs bins/scanner/tests/replay.rs
+git commit -m "scanner: universe records only when changed and acknowledged; retention keeps the record in force"
 ```
 
 ---
 
-### Task 6: `bins/compact` skeleton: pinned `parquet`/`arrow`, config, rows, Parquet I/O, guard, arch rules
+### Task 8: `bins/compact` skeleton: pinned `parquet`/`arrow`, deny rules, guard, arch rules
 
 **Files:**
-- Create: `bins/compact/Cargo.toml`, `bins/compact/src/{lib,config,guard,rows,pq}.rs`, `config/compact.toml`, `bins/compact/tests/{config,pq}.rs`
+- Create: `bins/compact/Cargo.toml`, `bins/compact/src/{lib,guard}.rs`
 - Modify: `Cargo.toml` (members, `[workspace.dependencies]`), `deny.toml`, `bins/scanner/tests/arch.rs`
 
 **Interfaces:**
-- Produces (crate `compact`):
-  - `compact::version() -> &'static str`, `compact::now_ms() -> i64`, `compact::refuse_other_writes(&[String]) -> anyhow::Result<()>`.
-  - `compact::config::Config { raw_dir, archive_dir, depth_every_secs: i64, depth_levels: usize, l2_before_secs: i64, l2_after_secs: i64, l2_max_window_secs: i64, archive_budget_gb: u64, lag_alarm_hours: i64 }` (`Serialize + Deserialize + Clone + PartialEq`), `Config::parse(&str) -> anyhow::Result<(Config, String /* sha256 hex */)>`, `Config::load(&Path)`, `Config::budget_bytes() -> u64`, `sha256_hex(&[u8]) -> String`.
-  - `compact::rows`: `MICRO`, `SIDE_BID = 0`, `SIDE_ASK = 1`, `reason::{DOWN, RAW_HOUR_LOST, NO_BOOK_YET, SCANNER_STOPPED}`, `micros(Decimal) -> anyhow::Result<i64>`, `TokenRow`, `TobRow`, `DepthRow`, `L2Row`, `GapRow` (fields as spec §3), `trait Sink { tob, depth, l2, gap }` (each `-> anyhow::Result<()>`), `VecSink { tob, depth, l2, gaps }`.
-  - `compact::pq`: `ROW_GROUP_ROWS = 262_144`, `BATCH_ROWS = 65_536`, `ZSTD_LEVEL = 3`, `props() -> anyhow::Result<WriterProperties>`, `trait Table { const NAME; fn schema() -> SchemaRef; fn batch(&[Self]) -> anyhow::Result<RecordBatch>; fn rows(&RecordBatch) -> anyhow::Result<Vec<Self>> }` for all five row types, `tmp_of(&Path) -> PathBuf`, `write_atomic(&Path, &[u8]) -> std::io::Result<()>`, `PartWriter<R: Table>` (`create(PathBuf)`, `push(R)`, `close() -> anyhow::Result<Staged>`), `Staged { tmp, fin, rows }` + `Staged::publish()`, `num_rows(&Path) -> anyhow::Result<u64>`, `num_row_groups(&Path) -> anyhow::Result<usize>`, `for_each_batch(&Path, FnMut(&RecordBatch) -> anyhow::Result<()>)`, `read_all::<R>(&Path) -> anyhow::Result<Vec<R>>`.
+- Produces (crate `compact`): `compact::version() -> &'static str`, `compact::now_ms() -> i64`, `compact::refuse_other_writes(&[String]) -> anyhow::Result<()>`, `compact::guard::{forbidden, check_env}` (the shared denylist).
 
 - [ ] **Step 1: Pin the two approved crates**
 
 ```bash
 cargo search parquet --limit 1 && cargo search arrow --limit 1
 ```
-Both print the same `X.Y.Z` (Apache Arrow Rust releases `arrow` and `parquet` in lockstep; `60.0.0` on 2026-09-27). If the two versions differ, stop and ask the owner. In the root `Cargo.toml` `[workspace.dependencies]` add, with that exact version:
+`60.0.0` was the current version of both when this plan was written (2026-09-27); re-check with the command above and pin exactly what it prints. Apache Arrow Rust releases `arrow` and `parquet` in lockstep, so both must print the same version: **if they differ, stop and ask the owner.** In the root `Cargo.toml` `[workspace.dependencies]` add (with the version the command printed in place of `60.0.0` if it moved):
 ```toml
 # Phase 5b, owner-approved 2026-09-27: the compactor's Parquet archive. compact only (deny.toml wrappers, arch test).
 parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd"] }
@@ -3196,143 +3655,42 @@ and add `"bins/compact"` to `members` (after `"bins/analyze"`). In `deny.toml` `
   { name = "arrow", wrappers = ["compact"] },
 ```
 
-Then check who depends on them directly (the `deny.toml` wrappers must list every direct dependent):
-```bash
-cargo tree -i parquet --edges normal --depth 1 && cargo tree -i arrow --edges normal --depth 1
-```
-(Run it after Step 4, once `bins/compact` exists.) Expect `compact` as the only dependent of each. If `parquet` itself depends on `arrow` (not just the `arrow-*` sub-crates), make that ban `{ name = "arrow", wrappers = ["compact", "parquet"] }`; CI runs `cargo deny check bans` (not installed on the PC).
+- [ ] **Step 2: Write the failing arch rules**
 
-- [ ] **Step 2: Write the failing tests**
-
-`bins/compact/tests/config.rs`:
+In `bins/scanner/tests/arch.rs` `crate_graph_matches_spec_9_2`, after the `analyze` loop:
 ```rust
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-use compact::config::Config;
-
-const REPO: &str = include_str!("../../../config/compact.toml");
-
-#[test]
-fn the_repo_config_has_the_spec_defaults() {
-    let (c, sha) = Config::parse(REPO).unwrap();
-    assert_eq!((c.raw_dir.as_str(), c.archive_dir.as_str()), ("/data/capture", "/archive"));
-    assert_eq!((c.depth_every_secs, c.depth_levels), (300, 10));
-    assert_eq!((c.l2_before_secs, c.l2_after_secs, c.l2_max_window_secs), (300, 300, 1800));
-    assert_eq!((c.archive_budget_gb, c.lag_alarm_hours), (55, 3));
-    assert_eq!(c.budget_bytes(), 55_000_000_000);
-    assert_eq!(sha.len(), 64);
-    assert!(!REPO.contains('\r'), "config/compact.toml must be LF (.gitattributes)");
-}
-
-#[test]
-fn bad_values_are_refused_at_startup() {
-    for (from, to) in [
-        ("depth_every_secs = 300", "depth_every_secs = 7"),
-        ("depth_every_secs = 300", "depth_every_secs = 420"),
-        ("depth_levels = 10", "depth_levels = 0"),
-        ("l2_before_secs = 300", "l2_before_secs = 3601"),
-        ("l2_max_window_secs = 1800", "l2_max_window_secs = 30"),
-        ("archive_budget_gb = 55", "archive_budget_gb = 71"),
-        ("lag_alarm_hours = 3", "lag_alarm_hours = 0"),
-    ] {
-        assert!(REPO.contains(from), "{from}");
-        assert!(Config::parse(&REPO.replace(from, to)).is_err(), "{to} must be refused");
+    for bad in ["reqwest", "tokio-tungstenite", "sqlx", "pm-api"] {
+        assert!(
+            !d["compact"].contains(bad),
+            "compact reads Postgres only via store and has no network client ({bad})"
+        );
     }
-    assert!(Config::parse(&format!("{REPO}\nsurprise = 1\n")).is_err(), "unknown keys refused");
-    let (_, a) = Config::parse(REPO).unwrap();
-    let (_, b) = Config::parse(&REPO.replace("lag_alarm_hours = 3", "lag_alarm_hours = 4")).unwrap();
-    assert_ne!(a, b, "the manifest's config sha changes with the file");
-}
+    for (name, ds) in &d {
+        for c in ["parquet", "arrow"] {
+            assert!(
+                name == "compact" || !ds.contains(c),
+                "{c} is compact-only (owner approval 2026-09-27), but {name} depends on it"
+            );
+        }
+    }
 ```
-`bins/compact/tests/pq.rs`:
+and in `scanner_and_api_guard_denylists_are_identical`, after the `analyze` comparison:
 ```rust
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-use compact::pq::*;
-use compact::rows::*;
-use rust_decimal_macros::dec;
-use std::path::PathBuf;
-
-fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("compact-pq-{name}-{}-{}", std::process::id(), compact::now_ms()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn write<R: Table>(p: PathBuf, rows: &[R]) -> Staged
-where
-    R: Clone,
-{
-    let mut w = PartWriter::<R>::create(p).unwrap();
-    for r in rows {
-        w.push(r.clone()).unwrap();
-    }
-    w.close().unwrap()
-}
-
-#[test]
-fn micro_units_are_exact_or_refused() {
-    assert_eq!(micros(dec!(0.123456)).unwrap(), 123_456);
-    assert_eq!(micros(dec!(100)).unwrap(), 100_000_000);
-    assert_eq!(micros(dec!(0)).unwrap(), 0);
-    assert!(micros(dec!(0.1234567)).is_err());
-}
-
-#[test]
-fn every_table_round_trips_with_nulls_and_is_invisible_until_published() {
-    let d = tmp("rt");
-    let tob = vec![
-        TobRow { ts_ms: 1, recv_ms: 2, token_idx: 0, bid: Some(400_000), bid_sz: Some(1), ask: None, ask_sz: None },
-        TobRow { ts_ms: 3, recv_ms: 4, token_idx: 7, bid: None, bid_sz: None, ask: Some(420_000), ask_sz: Some(9) },
-    ];
-    let s = write(d.join("00.tob.parquet"), &tob);
-    assert!(s.tmp.exists() && !s.fin.exists(), "written under a temporary name");
-    s.publish().unwrap();
-    assert!(!s.tmp.exists() && s.fin.exists());
-    assert_eq!(read_all::<TobRow>(&s.fin).unwrap(), tob);
-    let depth = vec![DepthRow { ts_ms: 5, token_idx: 1, side: SIDE_ASK, level: 9, price: 1, size: 2 }];
-    let l2 = vec![L2Row { ts_ms: 6, recv_ms: 7, token_idx: 2, side: SIDE_BID, price: 3, new_size: 0, snapshot: true, episode_id: "live-1-01".into() }];
-    let gaps = vec![
-        GapRow { start_ms: 1, end_ms: 2, shard: None, reason: reason::RAW_HOUR_LOST.into() },
-        GapRow { start_ms: 3, end_ms: 4, shard: Some(12), reason: reason::DOWN.into() },
-    ];
-    let tokens = vec![TokenRow { token_idx: 0, token_id: "123".into(), market_id: "m".into(), event_id: "e".into(), outcome: "yes".into(), neg_risk: true }];
-    for (s, n) in [
-        (write(d.join("depth.parquet"), &depth), 1),
-        (write(d.join("l2.parquet"), &l2), 1),
-        (write(d.join("gaps.parquet"), &gaps), 2),
-        (write(d.join("tokens.parquet"), &tokens), 1),
-    ] {
-        assert_eq!(s.rows, n);
-        s.publish().unwrap();
-        assert_eq!(num_rows(&s.fin).unwrap(), n);
-    }
-    assert_eq!(read_all::<DepthRow>(&d.join("depth.parquet")).unwrap(), depth);
-    assert_eq!(read_all::<L2Row>(&d.join("l2.parquet")).unwrap(), l2);
-    assert_eq!(read_all::<GapRow>(&d.join("gaps.parquet")).unwrap(), gaps);
-    assert_eq!(read_all::<TokenRow>(&d.join("tokens.parquet")).unwrap(), tokens);
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn row_groups_hold_262144_rows_so_memory_stays_bounded() {
-    let d = tmp("rg");
-    let rows: Vec<TobRow> = (0..600_000)
-        .map(|i| TobRow { ts_ms: i, recv_ms: i, token_idx: u32::try_from(i % 4_000).unwrap(), bid: Some(i), bid_sz: Some(1), ask: None, ask_sz: None })
-        .collect();
-    let s = write(d.join("tob.parquet"), &rows);
-    s.publish().unwrap();
-    assert_eq!(ROW_GROUP_ROWS, 262_144);
-    assert_eq!(num_row_groups(&s.fin).unwrap(), 3, "600,000 rows = 262,144 + 262,144 + 75,712");
-    assert_eq!(num_rows(&s.fin).unwrap(), 600_000);
-    std::fs::remove_dir_all(&d).ok();
-}
+    let compact_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../compact/src/guard.rs"
+    ))
+    .expect("compact guard.rs");
+    assert_eq!(scanner_contains, denylist(&compact_src, "CONTAINS"), "CONTAINS drifted in compact");
+    assert_eq!(scanner_prefixes, denylist(&compact_src, "PREFIXES"), "PREFIXES drifted in compact");
 ```
 
 - [ ] **Step 3: Run them to see them fail**
 
-Run: `cargo test -p compact`
-Expected: FAIL (`package(s) compact not found`).
+Run: `cargo test -p scanner --test arch`
+Expected: FAIL (`compact` is not a workspace package yet: indexing `d["compact"]` panics, and `compact/src/guard.rs` can't be read).
 
-- [ ] **Step 4: The crate, the config, the rows**
+- [ ] **Step 4: The crate and its guard**
 
 `bins/compact/Cargo.toml`:
 ```toml
@@ -3374,10 +3732,7 @@ workspace = true
 //! only compact_hours and compact_status.
 #![forbid(unsafe_code)]
 
-pub mod config;
 pub mod guard;
-pub mod pq;
-pub mod rows;
 
 /// git sha baked in at image build time (the image's SCANNER_VERSION build arg), "dev" otherwise.
 pub fn version() -> &'static str {
@@ -3407,6 +3762,100 @@ pub fn refuse_other_writes(bad: &[String]) -> anyhow::Result<()> {
 cp bins/analyze/src/guard.rs bins/compact/src/guard.rs
 ```
 then edit that doc line.
+
+- [ ] **Step 5: Check the direct dependents and run the tests**
+
+```bash
+cargo tree -i parquet --edges normal --depth 1 && cargo tree -i arrow --edges normal --depth 1
+```
+Expect `compact` as the only dependent of each. If `parquet` itself depends on `arrow` (not just the `arrow-*` sub-crates), make that ban `{ name = "arrow", wrappers = ["compact", "parquet"] }`; CI runs `cargo deny check bans` (not installed on the PC).
+
+Run: `cargo test -p scanner --test arch && cargo test -p compact && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check && sh scripts/disk-budget.sh`
+Expected: PASS; the budget script passes (parquet adds build artifacts; run `cargo clean` first if `target/` is over 8 GB).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add Cargo.toml Cargo.lock deny.toml bins/compact/Cargo.toml bins/compact/src/lib.rs bins/compact/src/guard.rs bins/scanner/tests/arch.rs
+git commit -m "compact: skeleton with pinned parquet/arrow (compact-only), guard and arch rules"
+```
+
+---
+
+### Task 9: `compact`: config and rows
+
+**Files:**
+- Create: `bins/compact/src/config.rs`, `bins/compact/src/rows.rs`, `config/compact.toml`, `bins/compact/tests/config.rs`, `bins/compact/tests/rows.rs`
+- Modify: `bins/compact/src/lib.rs`
+
+**Interfaces:**
+- Consumes: Task 8 (the crate).
+- Produces:
+  - `compact::config::Config { raw_dir, archive_dir, depth_every_secs: i64, depth_levels: usize, l2_before_secs: i64, l2_after_secs: i64, l2_max_window_secs: i64, archive_budget_gb: u64, lag_alarm_hours: i64 }` (`Serialize + Deserialize + Clone + PartialEq`), `Config::parse(&str) -> anyhow::Result<(Config, String /* sha256 hex */)>`, `Config::load(&Path)`, `Config::budget_bytes() -> u64`, `sha256_hex(&[u8]) -> String`.
+  - `compact::rows`: `MICRO`, `SIDE_BID = 0`, `SIDE_ASK = 1`, `reason::{DOWN, RAW_HOUR_LOST, NO_BOOK_YET, SCANNER_STOPPED}`, `micros(Decimal) -> anyhow::Result<i64>`, `TokenRow`, `TobRow`, `DepthRow`, `L2Row`, `GapRow` (fields as spec §3), `trait Sink { tob, depth, l2, gap }` (each `-> anyhow::Result<()>`), `VecSink { tob, depth, l2, gaps }`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`bins/compact/tests/config.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use compact::config::Config;
+
+const REPO: &str = include_str!("../../../config/compact.toml");
+
+#[test]
+fn the_repo_config_has_the_spec_defaults() {
+    let (c, sha) = Config::parse(REPO).unwrap();
+    assert_eq!((c.raw_dir.as_str(), c.archive_dir.as_str()), ("/data/capture", "/archive"));
+    assert_eq!((c.depth_every_secs, c.depth_levels), (300, 10));
+    assert_eq!((c.l2_before_secs, c.l2_after_secs, c.l2_max_window_secs), (300, 300, 1800));
+    assert_eq!((c.archive_budget_gb, c.lag_alarm_hours), (55, 3));
+    assert_eq!(c.budget_bytes(), 55_000_000_000);
+    assert_eq!(sha.len(), 64);
+    assert!(!REPO.contains('\r'), "config/compact.toml must be LF (.gitattributes)");
+}
+
+#[test]
+fn bad_values_are_refused_at_startup() {
+    for (from, to) in [
+        ("depth_every_secs = 300", "depth_every_secs = 7"),
+        ("depth_every_secs = 300", "depth_every_secs = 420"),
+        ("depth_levels = 10", "depth_levels = 0"),
+        ("l2_before_secs = 300", "l2_before_secs = 3601"),
+        ("l2_max_window_secs = 1800", "l2_max_window_secs = 30"),
+        ("archive_budget_gb = 55", "archive_budget_gb = 71"),
+        ("lag_alarm_hours = 3", "lag_alarm_hours = 0"),
+    ] {
+        assert!(REPO.contains(from), "{from}");
+        assert!(Config::parse(&REPO.replace(from, to)).is_err(), "{to} must be refused");
+    }
+    assert!(Config::parse(&format!("{REPO}\nsurprise = 1\n")).is_err(), "unknown keys refused");
+    let (_, a) = Config::parse(REPO).unwrap();
+    let (_, b) = Config::parse(&REPO.replace("lag_alarm_hours = 3", "lag_alarm_hours = 4")).unwrap();
+    assert_ne!(a, b, "the manifest's config sha changes with the file");
+}
+```
+`bins/compact/tests/rows.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use compact::rows::*;
+use rust_decimal_macros::dec;
+
+#[test]
+fn micro_units_are_exact_or_refused() {
+    assert_eq!(micros(dec!(0.123456)).unwrap(), 123_456);
+    assert_eq!(micros(dec!(100)).unwrap(), 100_000_000);
+    assert_eq!(micros(dec!(0)).unwrap(), 0);
+    assert!(micros(dec!(0.1234567)).is_err());
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test -p compact --test config --test rows`
+Expected: FAIL (no `compact::config`, no `compact::rows`).
+
+- [ ] **Step 3: The config and the rows**
 
 `config/compact.toml` (LF, covered by `config/*.toml text eol=lf`):
 ```toml
@@ -3624,10 +4073,117 @@ impl Sink for VecSink {
     }
 }
 ```
+`bins/compact/src/lib.rs`: add `pub mod config;` and `pub mod rows;` (alphabetical with `guard`).
 
-- [ ] **Step 5: Parquet I/O**
+- [ ] **Step 4: Run the tests**
 
-Ruling R2 (spec §11): `ArrowWriter` keeps the row group being built in memory, encoded and compressed, until it reaches the row-group size, plus one buffered write batch. Row groups of 262,144 rows (a tob row is 7 columns of at most 8 bytes: ≤ 15 MB before encoding, a few MB after zstd) and batches of 65,536 rows keep one open part well under 50 MB, and an hour writes four parts at once. The benchmark in Task 15 measures peak RSS on a real hour against the 256 MB cap.
+Run: `cargo test -p compact && cargo clippy -p compact --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add bins/compact/src/config.rs bins/compact/src/rows.rs bins/compact/src/lib.rs config/compact.toml bins/compact/tests/config.rs bins/compact/tests/rows.rs
+git commit -m "compact: config (validated, sha256) and archive rows in micro-units"
+```
+
+---
+
+### Task 10: `compact`: Parquet I/O
+
+**Files:**
+- Create: `bins/compact/src/pq.rs`, `bins/compact/tests/pq.rs`
+- Modify: `bins/compact/src/lib.rs`
+
+**Interfaces:**
+- Consumes: Task 9 (`rows`).
+- Produces (`compact::pq`): `ROW_GROUP_ROWS = 262_144`, `BATCH_ROWS = 65_536`, `ZSTD_LEVEL = 3`, `props() -> anyhow::Result<WriterProperties>`, `trait Table { const NAME; fn schema() -> SchemaRef; fn batch(&[Self]) -> anyhow::Result<RecordBatch>; fn rows(&RecordBatch) -> anyhow::Result<Vec<Self>> }` for all five row types, `tmp_of(&Path) -> PathBuf`, `write_atomic(&Path, &[u8]) -> std::io::Result<()>`, `PartWriter<R: Table>` (`create(PathBuf)`, `push(R)`, `close() -> anyhow::Result<Staged>`), `Staged { tmp, fin, rows }` + `Staged::publish()`, `num_rows(&Path) -> anyhow::Result<u64>`, `num_row_groups(&Path) -> anyhow::Result<usize>`, `for_each_batch(&Path, FnMut(&RecordBatch) -> anyhow::Result<()>)`, `read_all::<R>(&Path) -> anyhow::Result<Vec<R>>`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`bins/compact/tests/pq.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use compact::pq::*;
+use compact::rows::*;
+use std::path::PathBuf;
+
+fn tmp(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("compact-pq-{name}-{}-{}", std::process::id(), compact::now_ms()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn write<R: Table>(p: PathBuf, rows: &[R]) -> Staged
+where
+    R: Clone,
+{
+    let mut w = PartWriter::<R>::create(p).unwrap();
+    for r in rows {
+        w.push(r.clone()).unwrap();
+    }
+    w.close().unwrap()
+}
+
+#[test]
+fn every_table_round_trips_with_nulls_and_is_invisible_until_published() {
+    let d = tmp("rt");
+    let tob = vec![
+        TobRow { ts_ms: 1, recv_ms: 2, token_idx: 0, bid: Some(400_000), bid_sz: Some(1), ask: None, ask_sz: None },
+        TobRow { ts_ms: 3, recv_ms: 4, token_idx: 7, bid: None, bid_sz: None, ask: Some(420_000), ask_sz: Some(9) },
+    ];
+    let s = write(d.join("00.tob.parquet"), &tob);
+    assert!(s.tmp.exists() && !s.fin.exists(), "written under a temporary name");
+    s.publish().unwrap();
+    assert!(!s.tmp.exists() && s.fin.exists());
+    assert_eq!(read_all::<TobRow>(&s.fin).unwrap(), tob);
+    let depth = vec![DepthRow { ts_ms: 5, token_idx: 1, side: SIDE_ASK, level: 9, price: 1, size: 2 }];
+    let l2 = vec![L2Row { ts_ms: 6, recv_ms: 7, token_idx: 2, side: SIDE_BID, price: 3, new_size: 0, snapshot: true, episode_id: "live-1-01".into() }];
+    let gaps = vec![
+        GapRow { start_ms: 1, end_ms: 2, shard: None, reason: reason::RAW_HOUR_LOST.into() },
+        GapRow { start_ms: 3, end_ms: 4, shard: Some(12), reason: reason::DOWN.into() },
+    ];
+    let tokens = vec![TokenRow { token_idx: 0, token_id: "123".into(), market_id: "m".into(), event_id: "e".into(), outcome: "yes".into(), neg_risk: true }];
+    for (s, n) in [
+        (write(d.join("depth.parquet"), &depth), 1),
+        (write(d.join("l2.parquet"), &l2), 1),
+        (write(d.join("gaps.parquet"), &gaps), 2),
+        (write(d.join("tokens.parquet"), &tokens), 1),
+    ] {
+        assert_eq!(s.rows, n);
+        s.publish().unwrap();
+        assert_eq!(num_rows(&s.fin).unwrap(), n);
+    }
+    assert_eq!(read_all::<DepthRow>(&d.join("depth.parquet")).unwrap(), depth);
+    assert_eq!(read_all::<L2Row>(&d.join("l2.parquet")).unwrap(), l2);
+    assert_eq!(read_all::<GapRow>(&d.join("gaps.parquet")).unwrap(), gaps);
+    assert_eq!(read_all::<TokenRow>(&d.join("tokens.parquet")).unwrap(), tokens);
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn row_groups_hold_262144_rows_so_memory_stays_bounded() {
+    let d = tmp("rg");
+    let rows: Vec<TobRow> = (0..600_000)
+        .map(|i| TobRow { ts_ms: i, recv_ms: i, token_idx: u32::try_from(i % 4_000).unwrap(), bid: Some(i), bid_sz: Some(1), ask: None, ask_sz: None })
+        .collect();
+    let s = write(d.join("tob.parquet"), &rows);
+    s.publish().unwrap();
+    assert_eq!(ROW_GROUP_ROWS, 262_144);
+    assert_eq!(num_row_groups(&s.fin).unwrap(), 3, "600,000 rows = 262,144 + 262,144 + 75,712");
+    assert_eq!(num_rows(&s.fin).unwrap(), 600_000);
+    std::fs::remove_dir_all(&d).ok();
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test -p compact --test pq`
+Expected: FAIL (no `compact::pq`).
+
+- [ ] **Step 3: Parquet I/O**
+
+Ruling R2 (spec §11): `ArrowWriter` keeps the row group being built in memory, encoded and compressed, until it reaches the row-group size, plus one buffered write batch. Row groups of 262,144 rows (a tob row is 7 columns of at most 8 bytes: ≤ 15 MB before encoding, a few MB after zstd) and batches of 65,536 rows keep one open part well under 50 MB, and an hour writes four parts at once. The benchmark in Task 21 (runbook §3) measures peak RSS on a real hour against the 256 MB cap.
 
 `bins/compact/src/pq.rs`:
 ```rust
@@ -4014,64 +4570,35 @@ pub fn read_all<R: Table>(path: &Path) -> anyhow::Result<Vec<R>> {
 }
 ```
 If the pinned version marks `set_max_row_group_size` deprecated (clippy `-D warnings` then fails), use the replacement its deprecation note names with the same 262,144-row limit, and say so in the commit message.
+`bins/compact/src/lib.rs`: add `pub mod pq;`.
 
-- [ ] **Step 6: Arch rules for compact and tape**
+- [ ] **Step 4: Run the tests**
 
-In `bins/scanner/tests/arch.rs` `crate_graph_matches_spec_9_2`, after the `analyze` loop:
-```rust
-    for bad in ["reqwest", "tokio-tungstenite", "sqlx", "pm-api"] {
-        assert!(
-            !d["compact"].contains(bad),
-            "compact reads Postgres only via store and has no network client ({bad})"
-        );
-    }
-    for (name, ds) in &d {
-        for c in ["parquet", "arrow"] {
-            assert!(
-                name == "compact" || !ds.contains(c),
-                "{c} is compact-only (owner approval 2026-09-27), but {name} depends on it"
-            );
-        }
-    }
-```
-and in `scanner_and_api_guard_denylists_are_identical`, after the `analyze` comparison:
-```rust
-    let compact_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../compact/src/guard.rs"
-    ))
-    .expect("compact guard.rs");
-    assert_eq!(scanner_contains, denylist(&compact_src, "CONTAINS"), "CONTAINS drifted in compact");
-    assert_eq!(scanner_prefixes, denylist(&compact_src, "PREFIXES"), "PREFIXES drifted in compact");
-```
+Run: `cargo test -p compact && cargo clippy -p compact --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS: both pq tests.
 
-- [ ] **Step 7: Run the tests**
-
-Run: `cargo test -p compact && cargo test -p scanner --test arch && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check && sh scripts/disk-budget.sh`
-Expected: PASS; the budget script passes (parquet adds build artifacts; run `cargo clean` first if `target/` is over 8 GB).
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock deny.toml bins/compact config/compact.toml bins/scanner/tests/arch.rs
-git commit -m "compact: skeleton with pinned parquet/arrow (compact-only), config, rows and Parquet I/O"
+git add bins/compact/src/pq.rs bins/compact/src/lib.rs bins/compact/tests/pq.rs
+git commit -m "compact: Parquet I/O (atomic parts, 262,144-row row groups, readers)"
 ```
 
 ---
 
-### Task 7: `compact`: the reducer (trust, top of book, depth, gaps)
+### Task 11: `compact`: the reducer (trust, top of book, depth, gaps)
 
 **Files:**
-- Create: `bins/compact/src/reduce.rs`, `bins/compact/src/windows.rs` (the `Window` type only; Task 8 adds its math), `bins/compact/tests/fixture/mod.rs`, `bins/compact/tests/reduce.rs`
+- Create: `bins/compact/src/reduce.rs`, `bins/compact/src/windows.rs` (the `Window` type only; Task 13 adds its math), `bins/compact/tests/fixture/mod.rs`, `bins/compact/tests/reduce.rs`
 - Modify: `bins/compact/src/lib.rs`, `bins/compact/src/config.rs` (`Config::reduce()`)
 
 **Interfaces:**
-- Consumes: Task 2 (`FeedBooks`, `Applied`, `LineEvent`, `FeedState`), Task 6 (`rows`, `Config`).
+- Consumes: Task 3 (`FeedBooks`, `Applied`, `LineEvent`, `FeedState`), Task 9 (`rows`, `Config`).
 - Produces:
   - `compact::windows::Window { episode_id: String, event_id: String, opened_ms: i64, start_ms: i64, end_ms: i64, truncated: bool }`.
   - `compact::reduce::ReduceCfg { depth_every_ms: i64, depth_levels: usize }`, `Config::reduce() -> ReduceCfg`.
   - `compact::reduce::{HourStats { lines, bad_lines, ts_clamped, universe_missing }, ReducerState, Reducer}`; `Reducer::new(ReduceCfg)`, `Reducer::from_state(ReduceCfg, ReducerState) -> anyhow::Result<Reducer>`, `state(&self) -> ReducerState`, `begin_hour(&mut self, hour_ms: i64, windows: Vec<Window>)`, `line(&mut self, &Line, &mut dyn FnMut(i64, &str) -> anyhow::Result<RecordView>, &mut dyn Sink) -> anyhow::Result<()>`, `count_bad_line(&mut self)`, `missing_hour(&mut self, reason: &str, &mut dyn Sink) -> anyhow::Result<()>`, `cut(&mut self, reason: &str, &mut dyn Sink) -> anyhow::Result<()>`, `end_hour(&mut self, &mut dyn Sink) -> anyhow::Result<HourStats>`, `tokens(&self) -> &[TokenRow]`, `clock_ms(&self) -> i64`.
-  - Test helpers in `bins/compact/tests/fixture/mod.rs` (used by Tasks 7–12): `T0`, `H`, `tmp`, `rec`, `uni`, `frame`, `down`, `shutdown`, `book`, `change`, `trade`, `m`, `rcfg`, `cfg`, `run`, `write_hour`, `write_record`.
+  - Test helpers in `bins/compact/tests/fixture/mod.rs` (used by Tasks 11–18): `T0`, `H`, `tmp`, `rec`, `uni`, `frame`, `down`, `shutdown`, `book`, `change`, `trade`, `m`, `rcfg`, `cfg`, `run`, `write_hour`, `write_record`.
 
 Rules this task implements (spec §3, §4.1; rulings R4, R5):
 - A book is **trusted** only after a full snapshot (ws `book` or an accepted REST snapshot). It becomes untrusted when its shard goes `Down`, when it first appears or is reset by a universe change, when a universe record is missing, at a `Shutdown`, and across a missing, lost or unreadable stretch. Untrusted books make no rows.
@@ -4420,7 +4947,7 @@ Expected: FAIL (no `compact::reduce`).
 
 `bins/compact/src/windows.rs`:
 ```rust
-//! l2 windows around net-positive arbitrage episodes (spec 5b §3). Task 8 adds the math.
+//! l2 windows around net-positive arbitrage episodes (spec 5b §3). Task 13 adds the math.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4932,7 +5459,7 @@ impl Reducer {
     }
 }
 ```
-(`windows` is stored but unused until Task 8; if clippy flags it as never read, add `#[allow(dead_code)]` on that one field with the comment `// used by l2 (Task 8)` and remove it in Task 8.)
+(`windows` is stored but unused until Task 13; if clippy flags it as never read, add `#[allow(dead_code)]` on that one field with the comment `// used by l2 (Task 13)` and remove it in Task 13.)
 
 - [ ] **Step 5: Run the tests**
 
@@ -4948,7 +5475,111 @@ git commit -m "compact: reducer (trusted books, top of book, depth, gaps)"
 
 ---
 
-### Task 8: `compact`: l2 windows around net-positive arbitrage episodes
+### Task 12: the `tob` agreement: every row the compactor emits equals the engine's top at that line
+
+Spec §8 "the `tob` stream equals the top of book that `scanner replay` reconstructs at every change". Task 4 proves the books equal; this proves the rows built on them: the Task 4 fixture hour is replayed through the engine and the compactor's `Reducer` side by side, and every `tob` row the reducer emits for a line must equal (price and size, both sides) the engine's top of that token after that very line. The `#[ignore]` variant runs on a real capture directory (runbook §3). The scanner gets `compact` as a **dev**-dependency only (the arch test and `deny.toml` look at normal dependencies; `compact` does not depend on the scanner, so there is no cycle).
+
+**Files:**
+- Create: `bins/scanner/tests/tob_agreement.rs`
+- Modify: `bins/scanner/Cargo.toml` (`[dev-dependencies]` += `compact = { path = "../compact" }`)
+
+**Interfaces:**
+- Consumes: Task 4 (the `agreement` test module: `fixture`, `tmp`, `ctx`), Task 11 (`Reducer`, `ReduceCfg`), Task 9 (`VecSink`, `micros`).
+
+- [ ] **Step 1: Write the test**
+
+`bins/scanner/tests/tob_agreement.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Spec 5b §8: every tob row the compactor emits equals the scanner engine's top of book for that
+//! token after that very line (the Task 4 fixture, and #[ignore] a real capture: TAPE_AGREEMENT_DIR).
+mod agreement;
+use agreement::*;
+use arb_core::money::{Price, Shares};
+use compact::reduce::{ReduceCfg, Reducer};
+use compact::rows::{VecSink, micros};
+use scanner::engine::Engine;
+use scanner::replay::{ReplayState, apply_line};
+use std::path::Path;
+use tape::universe_view::load_record;
+
+type Side = Option<(i64, i64)>;
+
+fn side(x: Option<(Price, Shares)>) -> Side {
+    x.map(|(p, s)| (micros(p.get()).unwrap(), micros(s.get()).unwrap()))
+}
+
+/// Returns the number of tob rows checked.
+fn check(dir: &Path) -> usize {
+    let mut engine = Engine::new(ctx());
+    let mut st = ReplayState::default();
+    let mut red = Reducer::new(ReduceCfg { depth_every_ms: 300_000, depth_levels: 10 });
+    let mut load = |taken: i64, file: &str| load_record(dir, taken, file);
+    let mut rows = 0usize;
+    for h in tape::files::listing(dir).hours {
+        red.begin_hour(h.start_ms, vec![]);
+        tape::files::for_each_line(&h.path, |l| {
+            apply_line(&mut engine, dir, &l, &mut st, &mut |_| {})?;
+            let mut sink = VecSink::default();
+            red.line(&l, &mut load, &mut sink)?;
+            for row in &sink.tob {
+                let tok = red.tokens()[usize::try_from(row.token_idx)?].token_id.clone();
+                let top = engine
+                    .book_of(&tok)
+                    .map(|b| b.top())
+                    .unwrap_or_else(|| panic!("the engine holds no book for {tok}"));
+                assert_eq!(
+                    (row.bid.zip(row.bid_sz), row.ask.zip(row.ask_sz)),
+                    (side(top.best_bid), side(top.best_ask)),
+                    "tob row for {tok} at recv_ms {} differs from the engine's top",
+                    row.recv_ms
+                );
+            }
+            rows += sink.tob.len();
+            Ok(())
+        })
+        .unwrap();
+        red.end_hour(&mut VecSink::default()).unwrap();
+    }
+    rows
+}
+
+#[test]
+fn every_tob_row_equals_the_engines_top_at_that_line() {
+    let dir = tmp("tob");
+    fixture(&dir);
+    let n = check(&dir);
+    assert!(n > 100, "{n} tob rows checked");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore]
+fn every_tob_row_equals_the_engines_top_on_a_real_capture() {
+    let Ok(dir) = std::env::var("TAPE_AGREEMENT_DIR") else {
+        eprintln!("SKIPPED: TAPE_AGREEMENT_DIR not set");
+        return;
+    };
+    eprintln!("tob agreement: {} rows equal the engine's top", check(Path::new(&dir)));
+}
+```
+and in `bins/scanner/Cargo.toml` `[dev-dependencies]` add `compact = { path = "../compact" }`.
+
+- [ ] **Step 2: Run it**
+
+Run: `cargo test -p scanner --test tob_agreement && cargo test -p scanner --test arch && cargo clippy -p scanner --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS (well over 100 rows checked; the arch test still passes: a dev-dependency is not a normal one). A difference is a reducer bug (Task 11): which books are trusted, or how the top is read; fix it there.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add bins/scanner/tests/tob_agreement.rs bins/scanner/Cargo.toml Cargo.lock
+git commit -m "scanner: tob agreement, every compactor tob row equals the engine's top at its line"
+```
+
+---
+
+### Task 13: `compact`: l2 windows around net-positive arbitrage episodes
 
 Spec §3: an episode's window runs from `l2_before_secs` before it opens to `l2_after_secs` after it closes, capped at `l2_max_window_secs` from its start (flagged truncated; a still-open episode is capped the same way, spec §4.2). Inside a window, each token of the episode's event starts with `snapshot = true` rows (one per level) and then gets its exact level changes; overlapping windows merge so a row belongs to its first episode (by open time, then id), and a token whose owner changes gets a fresh snapshot under the new owner. Ruling R5: every hour restarts each active window with snapshots (so each hour's part, and each day across midnight, stands alone), and an empty book is snapshotted by its first non-empty state.
 
@@ -4957,7 +5588,7 @@ Spec §3: an episode's window runs from `l2_before_secs` before it opens to `l2_
 - Create: `bins/compact/tests/l2.rs`
 
 **Interfaces:**
-- Consumes: Task 3 (`store::CompactEpisode`), Task 7 (`Reducer`, `Window`).
+- Consumes: Task 5 (`store::CompactEpisode`), Task 11 (`Reducer`, `Window`).
 - Produces: `compact::windows::{window_of(&CompactEpisode, before_ms: i64, after_ms: i64, max_ms: i64) -> Window, windows_for_hour(&[CompactEpisode], hour_ms: i64, &Config) -> Vec<Window>, query_range(hour_ms: i64, &Config) -> (i64, i64)}`; the reducer now emits `L2Row`s.
 
 - [ ] **Step 1: Write the failing tests**
@@ -5166,7 +5797,7 @@ pub fn windows_for_hour(eps: &[CompactEpisode], hour_ms: i64, cfg: &Config) -> V
 
 In `bins/compact/src/reduce.rs`:
 1. Add `use crate::rows::L2Row;` to the `rows` import, `use tape::feed::Levels;` to the `tape::feed` import.
-2. Add three fields to `Reducer` (after `windows`, removing any `#[allow(dead_code)]` from Task 7):
+2. Add three fields to `Reducer` (after `windows`, removing any `#[allow(dead_code)]` from Task 11):
 ```rust
     /// token → index in `windows` of the episode that owns its l2 rows now.
     owner: HashMap<String, usize>,
@@ -5324,7 +5955,7 @@ fn diff(before: &Levels, now: &Levels) -> Vec<(u8, Price, Option<Shares>)> {
 - [ ] **Step 5: Run the tests**
 
 Run: `cargo test -p compact && cargo clippy -p compact --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: PASS: the five l2 tests and every reducer test from Task 7 (they have no windows, so no l2 rows).
+Expected: PASS: the five l2 tests and every reducer test from Task 11 (they have no windows, so no l2 rows).
 
 - [ ] **Step 6: Commit**
 
@@ -5335,41 +5966,27 @@ git commit -m "compact: l2 windows around net-positive arbitrage episodes (snaps
 
 ---
 
-### Task 9: `compact`: one hour to Parquet parts, atomically, with checkpoints
+### Task 14: `compact`: one hour to Parquet parts, atomically
 
-Spec §4.1, §4.3, §11. Each hour writes `HH.tokens`, `HH.tob`, `HH.depth`, `HH.l2`, `HH.gaps` parts under temporary names, renames them only when all five are complete, and renames the sidecar `HH.hour.json` (the hour's manifest entry) last. Then the reducer's state goes to `_state/checkpoint-<hour_ms>.bin.zst` (zstd-compressed JSON; two kept). Ruling R4: `tob` and `l2` rows are written in `recv_ms` order through a 10 s reorder buffer (the capture file is in engine order, and shards interleave); a row later than the buffer is appended where it arrives and counted in `late_rows`, never dropped. A raw file that can't be read to the end keeps the rows before the break and turns the rest of the hour into a `raw_hour_lost` gap (Review Focus 1).
+Spec §4.1, §4.3, §11. Each hour writes `HH.tokens`, `HH.tob`, `HH.depth`, `HH.l2`, `HH.gaps` parts under temporary names, renames them only when all five are complete, and renames the sidecar `HH.hour.json` (the hour's manifest entry) last. Ruling R4: `tob` and `l2` rows are written in `recv_ms` order through a 10 s reorder buffer (the capture file is in engine order, and shards interleave); a row later than the buffer is appended where it arrives and counted in `late_rows`, never dropped. A raw file that can't be read to the end keeps the rows before the break and turns the rest of the hour into a `raw_hour_lost` gap (Review Focus 1).
 
 **Files:**
-- Create: `bins/compact/src/hour.rs`, `bins/compact/src/state.rs`, `bins/compact/src/archive.rs` (paths only; Task 10 adds the merge), `bins/compact/tests/hour.rs`
-- Modify: `bins/compact/src/lib.rs`
+- Create: `bins/compact/src/hour.rs`, `bins/compact/src/archive.rs` (paths only; Task 16 adds the merge), `bins/compact/tests/hour.rs`
+- Modify: `bins/compact/src/lib.rs`, `bins/compact/tests/fixture/mod.rs` (hour helpers)
 
 **Interfaces:**
-- Consumes: Tasks 6–8.
+- Consumes: Tasks 9–13.
 - Produces:
   - `compact::archive`: `MANIFEST = "manifest.json"`, `day_dir(&Path, ms) -> PathBuf`, `hour_number(ms) -> u32`, `part_path(day: &Path, hh: u32, table: &str) -> PathBuf` (`HH.<table>.parquet`), `sidecar_path(day, hh) -> PathBuf` (`HH.hour.json`), `daily_path(day, table) -> PathBuf` (`<table>.parquet`).
   - `compact::hour`: `REORDER_MS = 10_000`, `Reorder<R>` (`Default`; `push(recv_ms, R, &mut dyn FnMut(R) -> anyhow::Result<()>)`, `drain(…)`, `late() -> u64`), `RowCounts { tokens, tob, depth, l2, gaps }` (+ `total()`), `HourReport { hour_ms, status, source_file, source_bytes, source_sha256, rows: RowCounts, bytes: RowCounts, truncated_windows, stats: HourStats, late_rows, read_error }`, `Source { File(PathBuf), Lost, Stopped }`, `HourJob { hour_ms, raw_dir: PathBuf, archive_dir: PathBuf, source: Source, windows: Vec<Window>, stop_before_publish: bool }`, `process_hour(&mut Reducer, &HourJob) -> anyhow::Result<Option<HourReport>>` (None only when `stop_before_publish`).
-  - `compact::state`: `Checkpoint { hour_ms, report: HourReport, reducer: ReducerState }`, `save(archive: &Path, &Checkpoint) -> anyhow::Result<()>`, `list(archive) -> Vec<(i64, PathBuf)>`, `load_newest(archive) -> anyhow::Result<Option<Checkpoint>>`.
+  - Test helpers appended to `bins/compact/tests/fixture/mod.rs` (used by Tasks 14–15): `three_hours(raw) -> (RecordView, Vec<Vec<Line>>)`, `hour_windows(i) -> Vec<Window>`, `hour_job(raw, archive, i) -> HourJob`, `day_files(archive) -> Vec<(PathBuf, Vec<u8>)>`.
 
 - [ ] **Step 1: Write the failing tests**
 
-`bins/compact/tests/hour.rs`:
+Append to `bins/compact/tests/fixture/mod.rs`:
 ```rust
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-mod fixture;
-use compact::archive::{day_dir, part_path, sidecar_path};
-use compact::hour::*;
-use compact::pq::read_all;
-use compact::reduce::Reducer;
-use compact::rows::*;
-use compact::state;
-use compact::windows::Window;
-use fixture::*;
-use std::path::{Path, PathBuf};
-use tape::line::Line;
-use tape::universe_view::RecordView;
-
 /// Three raw hours that depend on each other (books, pending checks, a disconnect, a window).
-fn three_hours(raw: &Path) -> (RecordView, Vec<Vec<Line>>) {
+pub fn three_hours(raw: &Path) -> (RecordView, Vec<Vec<Line>>) {
     let r = rec("u1", T0, &[("e1", &["y1", "y2"])], &[("e1", 0)]);
     write_record(raw, &r);
     let h: Vec<Vec<Line>> = vec![
@@ -5397,28 +6014,29 @@ fn three_hours(raw: &Path) -> (RecordView, Vec<Vec<Line>>) {
     (r, h)
 }
 
-fn windows(i: i64) -> Vec<Window> {
+pub fn hour_windows(i: i64) -> Vec<compact::windows::Window> {
     if i == 1 {
-        vec![Window { episode_id: "ep".into(), event_id: "e1".into(), opened_ms: T0 + H + 500_000, start_ms: T0 + H + 200_000, end_ms: T0 + H + 800_000, truncated: true }]
+        vec![compact::windows::Window { episode_id: "ep".into(), event_id: "e1".into(), opened_ms: T0 + H + 500_000, start_ms: T0 + H + 200_000, end_ms: T0 + H + 800_000, truncated: true }]
     } else {
         vec![]
     }
 }
 
-fn job(raw: &Path, archive: &Path, i: i64) -> HourJob {
+pub fn hour_job(raw: &Path, archive: &Path, i: i64) -> compact::hour::HourJob {
     let hour_ms = T0 + i * H;
-    HourJob {
+    compact::hour::HourJob {
         hour_ms,
         raw_dir: raw.to_path_buf(),
         archive_dir: archive.to_path_buf(),
-        source: Source::File(tape::files::hour_path(raw, hour_ms)),
-        windows: windows(i),
+        source: compact::hour::Source::File(tape::files::hour_path(raw, hour_ms)),
+        windows: hour_windows(i),
         stop_before_publish: false,
     }
 }
 
-fn files(archive: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let day = day_dir(archive, T0);
+/// Every file of day T0's archive folder, sorted by name, with its bytes.
+pub fn day_files(archive: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let day = compact::archive::day_dir(archive, T0);
     let mut v: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(&day)
         .unwrap()
         .flatten()
@@ -5427,13 +6045,24 @@ fn files(archive: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     v.sort();
     v
 }
+```
+`bins/compact/tests/hour.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+mod fixture;
+use compact::archive::{day_dir, part_path, sidecar_path};
+use compact::hour::*;
+use compact::pq::read_all;
+use compact::reduce::Reducer;
+use compact::rows::*;
+use fixture::*;
 
 #[test]
 fn an_hour_writes_five_parts_and_a_sidecar_that_match_the_reducer() {
     let (raw, arch) = (tmp("hour-raw"), tmp("hour-arch"));
     let (r, h) = three_hours(&raw);
     let mut red = Reducer::new(rcfg());
-    let report = process_hour(&mut red, &job(&raw, &arch, 0)).unwrap().unwrap();
+    let report = process_hour(&mut red, &hour_job(&raw, &arch, 0)).unwrap().unwrap();
     let mut want = VecSink::default();
     let mut red2 = Reducer::new(rcfg());
     red2.begin_hour(T0, vec![]);
@@ -5458,48 +6087,19 @@ fn an_hour_writes_five_parts_and_a_sidecar_that_match_the_reducer() {
 }
 
 #[test]
-fn resume_from_a_checkpoint_after_hour_1_matches_a_straight_run_byte_for_byte() {
-    let raw = tmp("resume-raw");
-    three_hours(&raw);
-    let (a, b) = (tmp("resume-a"), tmp("resume-b"));
-    let mut straight = Reducer::new(rcfg());
-    for i in 0..3 {
-        process_hour(&mut straight, &job(&raw, &a, i)).unwrap().unwrap();
-    }
-    let mut first = Reducer::new(rcfg());
-    let rep = process_hour(&mut first, &job(&raw, &b, 0)).unwrap().unwrap();
-    state::save(&b, &state::Checkpoint { hour_ms: T0, report: rep, reducer: first.state() }).unwrap();
-    drop(first);
-    let cp = state::load_newest(&b).unwrap().unwrap();
-    assert_eq!(cp.hour_ms, T0);
-    let mut resumed = Reducer::from_state(rcfg(), cp.reducer).unwrap();
-    for i in 1..3 {
-        process_hour(&mut resumed, &job(&raw, &b, i)).unwrap().unwrap();
-    }
-    let (fa, fb) = (files(&a), files(&b));
-    assert_eq!(fa.len(), 18, "3 hours × (5 parts + sidecar)");
-    assert_eq!(fa, fb, "every part and sidecar identical, byte for byte");
-    let l2 = read_all::<L2Row>(&part_path(&day_dir(&a, T0), 1, "l2")).unwrap();
-    assert!(!l2.is_empty() && l2[0].snapshot, "hour 1 has the window, starting with snapshots");
-    for d in [&raw, &a, &b] {
-        std::fs::remove_dir_all(d).ok();
-    }
-}
-
-#[test]
 fn a_crash_before_the_rename_leaves_no_final_file_and_the_rerun_matches() {
     let raw = tmp("crash-raw");
     three_hours(&raw);
     let (a, b) = (tmp("crash-a"), tmp("crash-b"));
-    let mut j = job(&raw, &a, 0);
+    let mut j = hour_job(&raw, &a, 0);
     j.stop_before_publish = true;
     assert!(process_hour(&mut Reducer::new(rcfg()), &j).unwrap().is_none());
     let day = day_dir(&a, T0);
     assert!(!part_path(&day, 0, "tob").exists() && !sidecar_path(&day, 0).exists(), "nothing published");
     assert!(compact::pq::tmp_of(&part_path(&day, 0, "tob")).exists(), "only temporary files");
-    process_hour(&mut Reducer::new(rcfg()), &job(&raw, &a, 0)).unwrap().unwrap();
-    process_hour(&mut Reducer::new(rcfg()), &job(&raw, &b, 0)).unwrap().unwrap();
-    assert_eq!(files(&a), files(&b), "the re-run equals a clean run");
+    process_hour(&mut Reducer::new(rcfg()), &hour_job(&raw, &a, 0)).unwrap().unwrap();
+    process_hour(&mut Reducer::new(rcfg()), &hour_job(&raw, &b, 0)).unwrap().unwrap();
+    assert_eq!(day_files(&a), day_files(&b), "the re-run equals a clean run");
     for d in [&raw, &a, &b] {
         std::fs::remove_dir_all(d).ok();
     }
@@ -5520,7 +6120,7 @@ fn a_truncated_hour_keeps_its_rows_and_gaps_the_rest() {
     let z = zstd::encode_all(second.as_slice(), 3).unwrap();
     bytes.extend_from_slice(&z[..z.len() - 6]);
     std::fs::write(&p, &bytes).unwrap();
-    let report = process_hour(&mut Reducer::new(rcfg()), &job(&raw, &arch, 0)).unwrap().unwrap();
+    let report = process_hour(&mut Reducer::new(rcfg()), &hour_job(&raw, &arch, 0)).unwrap().unwrap();
     assert!(report.read_error.is_some(), "{report:?}");
     assert_eq!(report.status, "done", "the hour is recorded; compaction does not stall on it");
     let day = day_dir(&arch, T0);
@@ -5551,23 +6151,6 @@ fn reorder_sorts_within_the_window_and_counts_late_rows() {
     .unwrap();
     assert_eq!(out, vec!['b', 'c', 'a', 'e', 'd', 'f'], "b, c, a sorted; e arrived after 100 was written: kept, late");
     assert_eq!(r.late(), 1);
-}
-
-#[test]
-fn checkpoints_keep_the_newest_two_and_skip_a_corrupt_one() {
-    let (raw, arch) = (tmp("cp-raw"), tmp("cp-arch"));
-    three_hours(&raw);
-    let mut red = Reducer::new(rcfg());
-    for i in 0..3 {
-        let rep = process_hour(&mut red, &job(&raw, &arch, i)).unwrap().unwrap();
-        state::save(&arch, &state::Checkpoint { hour_ms: T0 + i * H, report: rep, reducer: red.state() }).unwrap();
-    }
-    let l = state::list(&arch);
-    assert_eq!(l.iter().map(|(h, _)| *h).collect::<Vec<_>>(), vec![T0 + H, T0 + 2 * H]);
-    std::fs::write(&l[1].1, b"not zstd").unwrap();
-    assert_eq!(state::load_newest(&arch).unwrap().unwrap().hour_ms, T0 + H, "a corrupt newest falls back to the older one");
-    std::fs::remove_dir_all(&raw).ok();
-    std::fs::remove_dir_all(&arch).ok();
 }
 ```
 
@@ -5961,7 +6544,101 @@ pub fn process_hour(red: &mut Reducer, job: &HourJob) -> anyhow::Result<Option<H
 }
 ```
 
-- [ ] **Step 5: Checkpoints**
+`bins/compact/src/lib.rs`: add `pub mod archive;` and `pub mod hour;`.
+
+- [ ] **Step 5: Run the tests**
+
+Run: `cargo test -p compact && cargo clippy -p compact --all-targets -- -D warnings && cargo fmt --all --check`
+Expected: PASS: the four hour tests and every earlier compact test.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add bins/compact/src/lib.rs bins/compact/src/archive.rs bins/compact/src/hour.rs bins/compact/tests/hour.rs bins/compact/tests/fixture/mod.rs
+git commit -m "compact: one hour to Parquet parts atomically, recv-ordered"
+```
+
+---
+
+### Task 15: `compact`: checkpoints and resume
+
+Spec §4.1, §8 (resume). After each hour the reducer's whole state goes to `_state/checkpoint-<hour_ms>.bin.zst` (zstd-compressed JSON, ruling R15; two kept); a restart resumes from the newest readable one, and three hours processed with a restart after hour 1 must equal three processed in one go, byte for byte.
+
+**Files:**
+- Create: `bins/compact/src/state.rs`, `bins/compact/tests/checkpoint.rs`
+- Modify: `bins/compact/src/lib.rs`
+
+**Interfaces:**
+- Consumes: Task 14 (`HourReport`, `process_hour`, the fixture helpers), Task 11 (`ReducerState`, `Reducer::from_state`).
+- Produces (`compact::state`): `Checkpoint { hour_ms, report: HourReport, reducer: ReducerState }`, `save(archive: &Path, &Checkpoint) -> anyhow::Result<()>`, `list(archive) -> Vec<(i64, PathBuf)>`, `load_newest(archive) -> anyhow::Result<Option<Checkpoint>>`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`bins/compact/tests/checkpoint.rs`:
+```rust
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+mod fixture;
+use compact::archive::{day_dir, part_path};
+use compact::hour::process_hour;
+use compact::pq::read_all;
+use compact::reduce::Reducer;
+use compact::rows::L2Row;
+use compact::state;
+use fixture::*;
+
+#[test]
+fn resume_from_a_checkpoint_after_hour_1_matches_a_straight_run_byte_for_byte() {
+    let raw = tmp("resume-raw");
+    three_hours(&raw);
+    let (a, b) = (tmp("resume-a"), tmp("resume-b"));
+    let mut straight = Reducer::new(rcfg());
+    for i in 0..3 {
+        process_hour(&mut straight, &hour_job(&raw, &a, i)).unwrap().unwrap();
+    }
+    let mut first = Reducer::new(rcfg());
+    let rep = process_hour(&mut first, &hour_job(&raw, &b, 0)).unwrap().unwrap();
+    state::save(&b, &state::Checkpoint { hour_ms: T0, report: rep, reducer: first.state() }).unwrap();
+    drop(first);
+    let cp = state::load_newest(&b).unwrap().unwrap();
+    assert_eq!(cp.hour_ms, T0);
+    let mut resumed = Reducer::from_state(rcfg(), cp.reducer).unwrap();
+    for i in 1..3 {
+        process_hour(&mut resumed, &hour_job(&raw, &b, i)).unwrap().unwrap();
+    }
+    let (fa, fb) = (day_files(&a), day_files(&b));
+    assert_eq!(fa.len(), 18, "3 hours × (5 parts + sidecar)");
+    assert_eq!(fa, fb, "every part and sidecar identical, byte for byte");
+    let l2 = read_all::<L2Row>(&part_path(&day_dir(&a, T0), 1, "l2")).unwrap();
+    assert!(!l2.is_empty() && l2[0].snapshot, "hour 1 has the window, starting with snapshots");
+    for d in [&raw, &a, &b] {
+        std::fs::remove_dir_all(d).ok();
+    }
+}
+
+#[test]
+fn checkpoints_keep_the_newest_two_and_skip_a_corrupt_one() {
+    let (raw, arch) = (tmp("cp-raw"), tmp("cp-arch"));
+    three_hours(&raw);
+    let mut red = Reducer::new(rcfg());
+    for i in 0..3 {
+        let rep = process_hour(&mut red, &hour_job(&raw, &arch, i)).unwrap().unwrap();
+        state::save(&arch, &state::Checkpoint { hour_ms: T0 + i * H, report: rep, reducer: red.state() }).unwrap();
+    }
+    let l = state::list(&arch);
+    assert_eq!(l.iter().map(|(h, _)| *h).collect::<Vec<_>>(), vec![T0 + H, T0 + 2 * H]);
+    std::fs::write(&l[1].1, b"not zstd").unwrap();
+    assert_eq!(state::load_newest(&arch).unwrap().unwrap().hour_ms, T0 + H, "a corrupt newest falls back to the older one");
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test -p compact --test checkpoint`
+Expected: FAIL (no `compact::state`).
+
+- [ ] **Step 3: Checkpoints**
 
 `bins/compact/src/state.rs`:
 ```rust
@@ -6046,23 +6723,23 @@ pub fn load_newest(archive: &Path) -> anyhow::Result<Option<Checkpoint>> {
     Ok(None)
 }
 ```
-`bins/compact/src/lib.rs`: add `pub mod archive;`, `pub mod hour;`, `pub mod state;`.
+`bins/compact/src/lib.rs`: add `pub mod state;`.
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 4: Run the tests**
 
 Run: `cargo test -p compact && cargo clippy -p compact --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: PASS: the six hour tests. If `resume…byte_for_byte` differs only in Parquet footer metadata (it carries no timestamp in the pinned version, but a future version might), compare `read_all` rows of each part plus the sidecars instead, and say so in the commit message (spec §8 allows "row for row").
+Expected: PASS: both checkpoint tests. If `resume…byte_for_byte` differs only in Parquet footer metadata (it carries no timestamp in the pinned version, but a future version might), compare `read_all` rows of each part plus the sidecars instead, and say so in the commit message (spec §8 allows "row for row").
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add bins/compact/src/lib.rs bins/compact/src/archive.rs bins/compact/src/hour.rs bins/compact/src/state.rs bins/compact/tests/hour.rs
-git commit -m "compact: hours to Parquet parts atomically, recv-ordered, with checkpoints"
+git add bins/compact/src/lib.rs bins/compact/src/state.rs bins/compact/tests/checkpoint.rs
+git commit -m "compact: checkpoints (two kept, corrupt falls back) and byte-for-byte resume"
 ```
 
 ---
 
-### Task 10: `compact`: the daily merge, the manifest and the 55 GB budget
+### Task 16: `compact`: the daily merge, the manifest and the 55 GB budget
 
 Spec §4.4: when all 24 hours of a UTC day have their sidecar (each hour is `done` or `lost`, the compactor writes one for every hour, file or not), the parts are merged into the daily files, `manifest.json` is written, the row counts are checked against the sidecars, and only then the hourly parts are deleted. After each merge, whole merged days are deleted oldest first while the archive is over its budget. A crash anywhere in a merge is finished by `recover` at the next start (the day is merged again from its parts, or its leftover parts are removed).
 
@@ -6071,8 +6748,8 @@ Spec §4.4: when all 24 hours of a UTC day have their sidecar (each hour is `don
 - Create: `bins/compact/tests/archive.rs`
 
 **Interfaces:**
-- Consumes: Task 9 (`process_hour`, `HourReport`, `RowCounts`, `archive` paths).
-- Produces (`compact::archive`): `Manifest { compact_version, day, config: Config, config_sha256, hours: Vec<HourReport>, truncated_windows, totals: RowCounts, bytes: RowCounts }`, `days(archive) -> Vec<(String, PathBuf)>` (oldest first), `merged(day: &Path) -> bool`, `complete(day: &Path) -> bool`, `merge_day(day: &Path, name: &str, &Config, cfg_sha: &str) -> anyhow::Result<Manifest>`, `merge_ready(archive, &Config, cfg_sha) -> anyhow::Result<Vec<Manifest>>`, `recover(archive, &Config, cfg_sha) -> anyhow::Result<Vec<Manifest>>`, `archive_bytes(archive) -> u64`, `oldest_day(archive) -> Option<String>`, `enforce_budget(archive, budget_bytes: u64) -> anyhow::Result<Vec<(String, u64)>>`. Fixture: `build_day(raw: &Path, archive: &Path, day_ms: i64, lost: &[u32]) -> Vec<HourReport>` (hour 0 from a real raw hour with an l2 window, the rest `Stopped`, `lost` hours `Lost`; no merge).
+- Consumes: Task 14 (`process_hour`, `HourReport`, `RowCounts`, `archive` paths).
+- Produces (`compact::archive`): `Manifest { compact_version, day, config: Config, config_sha256, hours: Vec<HourReport>, truncated_windows, totals: RowCounts, bytes: RowCounts, ts_clamped: u64, late_rows: u64 }`, `days(archive) -> Vec<(String, PathBuf)>` (oldest first), `merged(day: &Path) -> bool`, `complete(day: &Path) -> bool`, `merge_day(day: &Path, name: &str, &Config, cfg_sha: &str) -> anyhow::Result<Manifest>`, `merge_ready(archive, &Config, cfg_sha) -> anyhow::Result<Vec<Manifest>>`, `recover(archive, &Config, cfg_sha) -> anyhow::Result<Vec<Manifest>>`, `archive_bytes(archive) -> u64`, `oldest_day(archive) -> Option<String>`, `enforce_budget(archive, budget_bytes: u64) -> anyhow::Result<Vec<(String, u64)>>`. Fixture: `build_day(raw: &Path, archive: &Path, day_ms: i64, lost: &[u32]) -> Vec<HourReport>` (hour 0 from a real raw hour with an l2 window, the rest `Stopped`, `lost` hours `Lost`; no merge).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6155,6 +6832,8 @@ fn a_complete_day_merges_into_daily_files_with_a_manifest_and_drops_the_parts() 
     assert_eq!(m.hours, reports);
     assert_eq!(m.hours[5].status, "lost");
     assert_eq!(m.truncated_windows, vec![format!("live-1-{T0}")]);
+    assert_eq!(m.ts_clamped, reports.iter().map(|r| r.stats.ts_clamped).sum::<u64>(), "R4: clamps are counted per day");
+    assert_eq!(m.late_rows, reports.iter().map(|r| r.late_rows).sum::<u64>());
     assert_eq!(m.totals.tob, reports.iter().map(|r| r.rows.tob).sum::<u64>());
     assert_eq!(num_rows(&daily_path(&day, "tob")).unwrap(), m.totals.tob);
     assert_eq!(num_rows(&daily_path(&day, "tokens")).unwrap(), 2);
@@ -6234,7 +6913,7 @@ fn over_budget_the_oldest_merged_day_goes_first_and_oldest_day_moves() {
     std::fs::remove_dir_all(&arch).ok();
 }
 ```
-(The manifests in the budget test are placeholders: `enforce_budget` only checks that the file exists.)
+(In the budget test each `manifest.json` is an empty JSON object: `enforce_budget` only checks that the file exists.)
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -6267,6 +6946,10 @@ pub struct Manifest {
     pub truncated_windows: Vec<String>,
     pub totals: RowCounts,
     pub bytes: RowCounts,
+    /// tob rows whose server ts_ms was raised to the token's previous one (ruling R4), all hours.
+    pub ts_clamped: u64,
+    /// tob/l2 rows written after the reorder window (ruling R4), all hours.
+    pub late_rows: u64,
 }
 
 /// Day folders (YYYY-MM-DD names only; `_state` and strays are ignored), oldest first.
@@ -6384,6 +7067,8 @@ pub fn merge_day(day: &Path, name: &str, cfg: &Config, cfg_sha: &str) -> anyhow:
             l2: size(L2Row::NAME),
             gaps: size(GapRow::NAME),
         },
+        ts_clamped: hours.iter().map(|h| h.stats.ts_clamped).sum(),
+        late_rows: hours.iter().map(|h| h.late_rows).sum(),
         hours,
         truncated_windows: truncated,
     };
@@ -6464,7 +7149,7 @@ git commit -m "compact: daily merge with manifest and row-count check, crash rec
 
 ---
 
-### Task 11: `compact verify <YYYY-MM-DD>`
+### Task 17: `compact verify <YYYY-MM-DD>`
 
 Spec §6. Reads one merged day and reports every problem; the binary exits non-zero on any. Checks: each table's rows equal the manifest's totals (and the totals equal the sum of its hours); `tokens.token_idx` equals its row number; each `tob` row really is a change (never two identical tops in a row for a token); `ts_ms` never goes back per token (`tob`, `depth`); every `(episode_id, token_idx)` in `l2` starts with a `snapshot` row; no `tob`, `depth` or `l2` row falls inside a whole-feed gap (`shard` null). Ruling R6: shard gaps (`down`, `no_book_yet` with a shard) can't be checked against rows that carry no shard; the reducer tests pin that untrusted books make no rows.
 
@@ -6473,7 +7158,7 @@ Spec §6. Reads one merged day and reports every problem; the binary exits non-z
 - Modify: `bins/compact/src/lib.rs`
 
 **Interfaces:**
-- Consumes: Task 10 (`Manifest`, `daily_path`, `build_day`, `merge_ready`).
+- Consumes: Task 16 (`Manifest`, `daily_path`, `build_day`, `merge_ready`).
 - Produces: `compact::verify::{MAX_LISTED = 50, verify_day(archive: &Path, day: &str) -> anyhow::Result<Vec<String>>}` (empty = the day is good).
 
 - [ ] **Step 1: Write the failing tests**
@@ -6738,18 +7423,20 @@ git commit -m "compact: verify a day (counts, real changes, time order, l2 snaps
 
 ---
 
-### Task 12: `compact`: the service, the binary and the benchmark
+### Task 18: `compact`: the service, the binary and the benchmark
 
-Spec §4.2–§4.4, §5, §8 (benchmark). Hour H is ready once the scanner has started an hour file at or after H + 2 h (so H + 1 is closed and every episode whose l2 window can reach into H has its row). Hours go strictly in order. The order of writes per hour is: parts and sidecar (Task 9), checkpoint, then the `compact_hours` row; a missed database write is retried before the next hour and re-done from the checkpoint at startup. A database or file error sets `last_error`, and the next poll retries from the last checkpoint. `compact_status` is written every poll (60 s): an age over 2 h on the dashboard means the service is gone.
+Spec §4.2–§4.4, §5, §8 (benchmark). Hour H is ready once the scanner has started an hour file at or after H + 2 h (so H + 1 is closed and every episode whose l2 window can reach into H has its row). Hours go strictly in order. The order of writes per hour is: parts and sidecar (Task 14), checkpoint (Task 15), then the `compact_hours` row; a missed database write is retried before the next hour and re-done from the checkpoint at startup. A database or file error sets `last_error`, and the next poll retries from the last checkpoint. `compact_status` is written every poll (60 s): an age over 2 h on the dashboard means the service is gone.
+
+A missing raw hour (ruling R9, Review Focus 2): if a file for it was ever listed, only the scanner can have deleted it, so it is `lost` at once, whether or not the scanner's mark has arrived (a later mark is `ON CONFLICT DO NOTHING` against the compactor's `lost` row: nothing hidden). If no file was ever listed, it is `lost` when `compact_hours` says so, and otherwise `scanner_stopped` only once it has been ready for 5 minutes (`MISSING_GRACE_MS`), giving a just-deleted hour's mark time to land; until then the service waits.
 
 **Files:**
 - Create: `bins/compact/src/run.rs`, `bins/compact/src/bench.rs`, `bins/compact/src/main.rs`, `bins/compact/tests/common/mod.rs` (copy), `bins/compact/tests/service.rs`, `bins/compact/tests/bench.rs`
 - Modify: `bins/compact/src/lib.rs`
 
 **Interfaces:**
-- Consumes: Tasks 3, 6–11.
+- Consumes: Tasks 5, 8–17.
 - Produces:
-  - `compact::run`: `POLL_SECS = 60`, `STATEMENT_TIMEOUT_MS = 10_000`, `ready(next_hour: i64, hours: &[HourFile]) -> bool`, `row_of(&HourReport, now_ms) -> anyhow::Result<CompactHourRow>`, `Service::new(Config, cfg_sha: String)`, `Service::step(&mut self, &Store, now_ms) -> anyhow::Result<bool>` (true = one hour compacted), `Service::status(&mut self, now_ms) -> CompactStatusRow`, `Service::last_error: Option<String>` (pub field), `Service::next_hour() -> Option<i64>`.
+  - `compact::run`: `POLL_SECS = 60`, `STATEMENT_TIMEOUT_MS = 10_000`, `MISSING_GRACE_MS = 300_000`, `ready(next_hour: i64, hours: &[HourFile]) -> bool`, `row_of(&HourReport, now_ms) -> anyhow::Result<CompactHourRow>`, `Service::new(Config, cfg_sha: String)`, `Service::step(&mut self, &Store, now_ms) -> anyhow::Result<bool>` (true = one hour compacted), `Service::status(&mut self, now_ms) -> CompactStatusRow`, `Service::last_error: Option<String>` (pub field), `Service::next_hour() -> Option<i64>`.
   - `compact::bench::{bench(&Config, hour_file: &Path, out: &Path) -> anyhow::Result<String>, peak_rss_kb() -> Option<u64>}`.
   - The binary: `compact [--config PATH] run | verify <YYYY-MM-DD> [--archive DIR] | bench <HOUR_FILE> [--out DIR]` (default config `/etc/cute-trading/compact.toml`).
 
@@ -6873,11 +7560,36 @@ async fn a_missing_hour_nobody_marked_is_scanner_stopped_and_done() {
     raw_hours(&raw, &[0, 2, 3]);
     let c = compact_store(&db).await;
     let mut svc = service(&raw, &arch);
-    svc.step(&c, T0 + 4 * H).await.unwrap();
-    svc.step(&c, T0 + 4 * H).await.unwrap();
+    assert!(svc.step(&c, T0 + 4 * H).await.unwrap(), "hour 0");
+    assert!(!svc.step(&c, T0 + 4 * H).await.unwrap(), "hour 1 never listed, no mark: wait for a mark to land");
+    assert!(!svc.step(&c, T0 + 4 * H + 299_999).await.unwrap(), "still inside the 5-minute grace");
+    assert!(svc.step(&c, T0 + 4 * H + 300_000).await.unwrap(), "then: the scanner was not running");
     assert_eq!(owner.compact_hour_statuses(T0 + H, T0 + 2 * H).await.unwrap(), vec![(T0 + H, "done".to_string())]);
     let gaps = read_all::<GapRow>(&part_path(&day_dir(&arch, T0), 1, "gaps")).unwrap();
     assert_eq!(gaps[0].reason, reason::SCANNER_STOPPED);
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn a_file_deleted_before_its_lost_mark_is_compacted_as_lost() {
+    let Some((owner, db)) = common::fresh().await else { return };
+    let (raw, arch) = (tmp("race-raw"), tmp("race-arch"));
+    raw_hours(&raw, &[0, 1, 2, 3]);
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    assert!(svc.step(&c, T0 + 4 * H).await.unwrap(), "hour 0; hours 1–3 listed");
+    // the scanner deletes hour 1 at its cap; its lost mark has not reached the database yet
+    std::fs::remove_file(tape::files::hour_path(&raw, T0 + H)).unwrap();
+    assert!(svc.step(&c, T0 + 4 * H).await.unwrap(), "hour 1 at once: it was listed, so it was deleted");
+    assert_eq!(owner.compact_hour_statuses(T0 + H, T0 + 2 * H).await.unwrap(), vec![(T0 + H, "lost".to_string())]);
+    // the mark arrives afterwards: nothing changes, and the loss stays visible
+    assert_eq!(owner.mark_hours_lost(&[T0 + H], T0 + 4 * H).await.unwrap(), 0);
+    assert_eq!(owner.compact_hour_statuses(T0 + H, T0 + 2 * H).await.unwrap(), vec![(T0 + H, "lost".to_string())]);
+    let gaps = read_all::<GapRow>(&part_path(&day_dir(&arch, T0), 1, "gaps")).unwrap();
+    assert_eq!(gaps[0].reason, reason::RAW_HOUR_LOST);
     c.close().await;
     db.drop(owner).await;
     std::fs::remove_dir_all(&raw).ok();
@@ -7030,6 +7742,7 @@ use crate::reduce::Reducer;
 use crate::state::{self, Checkpoint};
 use crate::windows::{query_range, windows_for_hour};
 use anyhow::Context;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use store::{CompactHourRow, CompactStatusRow, Store};
 use tape::files::HourFile;
@@ -7037,6 +7750,9 @@ use tape::time::{HOUR_MS, hour_label};
 
 pub const POLL_SECS: u64 = 60;
 pub const STATEMENT_TIMEOUT_MS: u32 = 10_000;
+/// A ready hour with no file ever listed and no lost mark waits this long before it is taken as
+/// `scanner_stopped` (a just-deleted hour's mark needs time to land; ruling R9).
+pub const MISSING_GRACE_MS: i64 = 300_000;
 
 /// Hour H is ready once the scanner has started an hour ≥ H + 2 h: H + 1 is closed, so every
 /// l2 window that reaches into H has its episode row (spec §4.2).
@@ -7066,6 +7782,10 @@ pub struct Service {
     pending_row: Option<CompactHourRow>,
     pub last_error: Option<String>,
     lag_alarm: bool,
+    /// Hour files seen in any listing (≥ next_hour): a seen hour that is gone was deleted.
+    seen: BTreeSet<i64>,
+    /// (hour, when it was first seen ready with no file and no mark).
+    missing_since: Option<(i64, i64)>,
 }
 
 impl Service {
@@ -7080,6 +7800,8 @@ impl Service {
             pending_row: None,
             last_error: None,
             lag_alarm: false,
+            seen: BTreeSet::new(),
+            missing_since: None,
         }
     }
 
@@ -7130,8 +7852,16 @@ impl Service {
         let (from, to) = query_range(next, &self.cfg);
         let eps = store.compact_episodes(from, to).await.context("read episodes")?;
         let windows = windows_for_hour(&eps, next, &self.cfg);
+        for h in &listing.hours {
+            if h.start_ms >= next {
+                self.seen.insert(h.start_ms);
+            }
+        }
+        self.seen.retain(|h| *h >= next);
         let source = match listing.hours.iter().find(|h| h.start_ms == next) {
             Some(h) => Source::File(h.path.clone()),
+            // listed before, gone now: only the scanner deletes raw hours (its mark may be in flight)
+            None if self.seen.contains(&next) => Source::Lost,
             None => {
                 let st = store
                     .compact_hour_statuses(next, next + HOUR_MS)
@@ -7140,6 +7870,16 @@ impl Service {
                 if st.iter().any(|(_, s)| s == "lost") {
                     Source::Lost
                 } else {
+                    let since = match self.missing_since {
+                        Some((h, t)) if h == next => t,
+                        _ => {
+                            self.missing_since = Some((next, now_ms));
+                            now_ms
+                        }
+                    };
+                    if now_ms.saturating_sub(since) < MISSING_GRACE_MS {
+                        return Ok(false);
+                    }
                     Source::Stopped
                 }
             }
@@ -7483,7 +8223,7 @@ async fn shutdown() {
 - [ ] **Step 4: Run the tests**
 
 Run (Postgres prefix): `cargo test -p compact && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: PASS: the six service tests (none `SKIPPED`), the bench test, and every earlier compact test; `bench_one_real_hour` is ignored.
+Expected: PASS: the seven service tests (none `SKIPPED`), the bench test, and every earlier compact test; `bench_one_real_hour` is ignored.
 
 - [ ] **Step 5: The whole workspace**
 
@@ -7499,17 +8239,17 @@ git commit -m "compact: the service (ready hours in order, compact_hours, merge,
 
 ---
 
-### Task 13: api and web: the archive on Health, one heart for the compactor
+### Task 19: api and web: the archive on Health, one heart for the compactor
 
-Spec §5. `/api/health/now` gains `archive_bytes`, `archive_oldest_day`, `compact_lag_hours`, `compact_last_error` and `compact_age_ms` (now − `compact_status.updated_ms`), all null until the compactor first reports. Radar loses one heart when `compact_lag_hours > 3` (`compactor behind: raw at risk`) or, if not, when the status is more than 2 h old (`compactor status older than 2 h`). The Health page gets an **ARCHIVE** box.
+Spec §5. `/api/health/now` gains `archive_bytes`, `archive_oldest_day`, `compact_lag_hours`, `compact_last_error` and `compact_age_ms` (now − `compact_status.updated_ms`), all null until the compactor first reports. Radar loses one heart when `compact_lag_hours > 3` (`compactor behind: raw at risk`) or, if not, when the status is more than 2 h old (`compactor status older than 2 h`), or when no status row exists 2 h after the first `compact_hours` row (`compactor has never reported`, e.g. the scanner is marking hours lost with no compactor running). The Health page gets an **ARCHIVE** box.
 
 **Files:**
 - Modify: `bins/api/src/health.rs`, `bins/api/tests/health.rs`, `web/src/api/types.ts`, `web/src/test/fixtures.ts`, `web/src/components/Hearts.tsx`, `web/src/components/Hearts.test.tsx`, `web/src/pages/Health.tsx`, `web/src/pages/Health.test.tsx`, `web/src/help.ts`
 - Create: `web/src/lib/bytes.ts`, `web/src/lib/bytes.test.ts`
 
 **Interfaces:**
-- Consumes: Task 3 (`Store::compact_status`, `CompactStatusRow`).
-- Produces: `HealthNowDto` (and the web `HealthNow`) fields `archive_bytes: i64?`, `archive_oldest_day: String?`, `compact_lag_hours: i32?`, `compact_last_error: String?`, `compact_age_ms: i64?`; web `fmtGb(bytes: number): string`, `NO_ARCHIVE`.
+- Consumes: Task 5 (`Store::compact_status`, `Store::compact_first_done_ms`, `CompactStatusRow`).
+- Produces: `HealthNowDto` (and the web `HealthNow`) fields `archive_bytes: i64?`, `archive_oldest_day: String?`, `compact_lag_hours: i32?`, `compact_last_error: String?`, `compact_age_ms: i64?`, `compact_started_ms: i64?` (the first `compact_hours.done_ms`); web `fmtGb(bytes: number): string`, `NO_ARCHIVE`.
 
 - [ ] **Step 1: Write the failing api test**
 
@@ -7529,9 +8269,10 @@ async fn health_now_carries_the_archive_status_once_the_compactor_reports() {
         .unwrap();
     let (app, _st) = common::app(&db).await;
     let (_, v) = common::get(&app, "/api/health/now").await;
-    for k in ["archive_bytes", "archive_oldest_day", "compact_lag_hours", "compact_last_error", "compact_age_ms"] {
+    for k in ["archive_bytes", "archive_oldest_day", "compact_lag_hours", "compact_last_error", "compact_age_ms", "compact_started_ms"] {
         assert!(v["health"][k].is_null(), "{k} before any compact_status: {v}");
     }
+    owner.mark_hours_lost(&[t - 7_200_000], n - 10_800_000).await.unwrap();
     owner
         .compact_status_put(&CompactStatusRow {
             updated_ms: n - 600_000,
@@ -7551,6 +8292,7 @@ async fn health_now_carries_the_archive_status_once_the_compactor_reports() {
     assert_eq!(h["compact_last_error"], "read episodes: timeout");
     let age = h["compact_age_ms"].as_i64().unwrap();
     assert!((600_000..700_000).contains(&age), "{age}");
+    assert_eq!(h["compact_started_ms"], n - 10_800_000);
     db.drop(owner).await;
 }
 ```
@@ -7568,14 +8310,17 @@ Expected: FAIL (the fields are missing).
     pub compact_last_error: Option<String>,
     /// now − compact_status.updated_ms (server clock).
     pub compact_age_ms: Option<i64>,
+    /// When the first hour was recorded in compact_hours (done or lost), if any.
+    pub compact_started_ms: Option<i64>,
 ```
-change `fn new(h: HealthNow, now: i64) -> Self` to `fn new(h: HealthNow, now: i64, c: Option<CompactStatusRow>) -> Self` and add to its struct literal:
+change `fn new(h: HealthNow, now: i64) -> Self` to `fn new(h: HealthNow, now: i64, c: Option<CompactStatusRow>, started: Option<i64>) -> Self` and add to its struct literal:
 ```rust
             archive_bytes: c.as_ref().map(|c| c.archive_bytes),
             archive_oldest_day: c.as_ref().and_then(|c| c.oldest_day.clone()),
             compact_lag_hours: c.as_ref().map(|c| c.lag_hours),
             compact_last_error: c.as_ref().and_then(|c| c.last_error.clone()),
             compact_age_ms: c.as_ref().map(|c| now.saturating_sub(c.updated_ms).max(0)),
+            compact_started_ms: started,
 ```
 and in `now`:
 ```rust
@@ -7583,8 +8328,9 @@ pub async fn now(State(st): State<AppState>) -> Result<Json<HealthEnvelope>, Api
     let now = now_ms();
     let h = st.store.health_now(now).await?;
     let c = st.store.compact_status().await?;
+    let started = st.store.compact_first_done_ms().await?;
     Ok(Json(HealthEnvelope {
-        health: h.map(|h| HealthNowDto::new(h, now, c)),
+        health: h.map(|h| HealthNowDto::new(h, now, c, started)),
     }))
 }
 ```
@@ -7607,14 +8353,17 @@ describe('fmtGb', () => {
   });
 });
 ```
-Append to the `describe('Hearts', …)` block in `web/src/components/Hearts.test.tsx` (and add `archive_bytes: 12_400_000_000, archive_oldest_day: '2026-09-28', compact_lag_hours: 1, compact_last_error: null, compact_age_ms: 600_000,` to its `ok` literal):
+Append to the `describe('Hearts', …)` block in `web/src/components/Hearts.test.tsx` (and add `archive_bytes: 12_400_000_000, archive_oldest_day: '2026-09-28', compact_lag_hours: 1, compact_last_error: null, compact_age_ms: 600_000, compact_started_ms: -36_000_000,` to its `ok` literal):
 ```ts
   it('costs one heart when the compactor is behind or silent, never two', () => {
     expect(troubles({ ...ok, compact_lag_hours: 4 })).toEqual(['compactor behind: raw at risk']);
     expect(troubles({ ...ok, compact_age_ms: 7_200_001 })).toEqual(['compactor status older than 2 h']);
     expect(troubles({ ...ok, compact_lag_hours: 9, compact_age_ms: 9_000_000 })).toEqual(['compactor behind: raw at risk']);
     expect(troubles({ ...ok, compact_lag_hours: 3, compact_age_ms: 7_200_000 })).toEqual([]);
-    expect(troubles({ ...ok, compact_lag_hours: null, compact_age_ms: null })).toEqual([]);
+    expect(troubles({ ...ok, compact_lag_hours: null, compact_age_ms: null, compact_started_ms: null })).toEqual([]);
+    // no status row 2 h after the first compact_hours row (ok.now_ms is 0)
+    expect(troubles({ ...ok, compact_age_ms: null, compact_started_ms: -7_200_001 })).toEqual(['compactor has never reported']);
+    expect(troubles({ ...ok, compact_age_ms: null, compact_started_ms: -7_200_000 })).toEqual([]);
   });
 ```
 Append to the `describe('Health', …)` block in `web/src/pages/Health.test.tsx` (and import `NO_ARCHIVE` from `./Health`):
@@ -7637,7 +8386,7 @@ Append to the `describe('Health', …)` block in `web/src/pages/Health.test.tsx`
 
   it('says so when the compactor has not reported yet', async () => {
     mockApi({
-      '/api/health/now': { health: healthFixture({ archive_bytes: null, archive_oldest_day: null, compact_lag_hours: null, compact_last_error: null, compact_age_ms: null }) },
+      '/api/health/now': { health: healthFixture({ archive_bytes: null, archive_oldest_day: null, compact_lag_hours: null, compact_last_error: null, compact_age_ms: null, compact_started_ms: null }) },
       '/api/health/series': { from_ms: 0, to_ms: 1, points: [] },
       '/api/integrity/summary': integrity,
     });
@@ -7659,8 +8408,10 @@ Expected: FAIL (no `bytes.ts`, no new fields, no ARCHIVE box).
   compact_last_error: string | null;
   /** now − the compactor's last report, server clock. */
   compact_age_ms: number | null;
+  /** When the first hour was recorded in compact_hours (done or lost). */
+  compact_started_ms: number | null;
 ```
-`web/src/test/fixtures.ts` `healthFixture`: add `archive_bytes: 12_400_000_000, archive_oldest_day: '2026-09-28', compact_lag_hours: 1, compact_last_error: null, compact_age_ms: 600_000,` before `...o`.
+`web/src/test/fixtures.ts` `healthFixture`: add `archive_bytes: 12_400_000_000, archive_oldest_day: '2026-09-28', compact_lag_hours: 1, compact_last_error: null, compact_age_ms: 600_000, compact_started_ms: 1_789_964_000_000,` before `...o`.
 
 `web/src/lib/bytes.ts`:
 ```ts
@@ -7672,9 +8423,11 @@ export function fmtGb(bytes: number): string {
 ```
 `web/src/components/Hearts.tsx` `troubles`, after the `capture paused` line:
 ```ts
-  // spec 5b §5: one heart for the compactor, behind (3 mirrors lag_alarm_hours) or silent for 2 h
+  // spec 5b §5: one heart for the compactor: behind (3 mirrors lag_alarm_hours), silent for 2 h, or
+  // never reported although hours are being recorded
   if (h.compact_lag_hours !== null && h.compact_lag_hours > 3) t.push('compactor behind: raw at risk');
   else if (h.compact_age_ms !== null && h.compact_age_ms > 7_200_000) t.push('compactor status older than 2 h');
+  else if (h.compact_age_ms === null && h.compact_started_ms !== null && h.now_ms - h.compact_started_ms > 7_200_000) t.push('compactor has never reported');
 ```
 `web/src/help.ts`, after the `capture` entry:
 ```ts
@@ -7732,7 +8485,7 @@ git commit -m "api, web: the archive on Health and one heart for the compactor"
 
 ---
 
-### Task 14: Docker, compose, `.env.example`, roles script
+### Task 20: Docker, compose, `.env.example`, roles script
 
 Spec §2, §9. The `compact` service in the same Rust image: `core` profile, 0.25 CPU, 256 MB, read-only root filesystem, the `data` volume read-only at `/data`, the new `archive` volume read-write at `/archive`, only the `internal` network.
 
@@ -7812,7 +8565,7 @@ sh -n docker/postgres/init/01-roles.sh && echo roles-sh-ok
 grep -c 'compact' docker/rust.Dockerfile
 grep -rlI "$(printf '\r')" crates/store/migrations config || echo lf-ok
 ```
-Expected: `config-ok`, `roles-sh-ok`, `5` (the header, cook, build, binary and config lines), `lf-ok`. (No image is built here: Docker builds happen in Task 15, by the owner.)
+Expected: `config-ok`, `roles-sh-ok`, `5` (the header, cook, build, binary and config lines), `lf-ok`. (No image is built here: Docker builds happen in Task 21's runbook, by the owner.)
 
 - [ ] **Step 5: Commit**
 
@@ -7823,7 +8576,7 @@ git commit -m "docker: compact in the rust image; compose service (0.25 CPU, 256
 
 ---
 
-### Task 15: the deploy runbook `docs/superpowers/runbooks/phase5b-storage-vps.md`
+### Task 21: the deploy runbook `docs/superpowers/runbooks/phase5b-storage-vps.md`
 
 No code. The owner runs it. It follows the 5a runbook's mechanics (`docs/superpowers/runbooks/phase5a-cards-vps.md`) and the 5d lessons (`docs/superpowers/runbooks/phase5d-sweet-vps.md` §5: LF line endings, migrate alone first); only what differs is spelled out. It goes after the current 5d redeploy and the other agent's frontend changes (spec §9).
 
@@ -7849,20 +8602,25 @@ grep -c -E '^(ANALYZE_RW_DB_PASSWORD|SCANNER_HOST|COMPACT_RW_DB_PASSWORD)=' .env
 MSYS_NO_PATHCONV=1 docker run --rm --entrypoint /usr/local/bin/compact cute-trading/rust:dev --help | head -1
 ```
    Expect `raw capture hours → the Parquet archive (paper trading only)`. Write `GIT_SHA` in Results.
-3. **Benchmark on a real hour (spec §8; optional but recommended, the owner copies the hour).** On the VPS, as root, pick a closed hour from the middle of a UTC day (`H=13`, `D=<YYYY-MM-DD>` of yesterday) and copy it with the universe records written around it:
+3. **Benchmark on a real hour (spec §8; optional but recommended, the owner copies the hour).** On the VPS, as root, pick a closed hour from the middle of a UTC day (`H=13`, `D=<YYYY-MM-DD>` of yesterday) and copy it with exactly the universe records its control lines name (each `Ctl::Universe` line carries `"file":"universe-<taken_ms>-<seq>.json.zst"`, stored in the day of its `taken_ms`; `zstdcat` comes with the `zstd` package: `apt-get install -y zstd` if it is missing):
 ```bash
 C=/var/lib/docker/volumes/cute-trading_data/_data/capture
 mkdir -p ~/bench/$D && cp $C/$D/$H.jsonl.zst ~/bench/$D/
-find $C/$D -name 'universe-*.json.zst' -newermt "$D 12:40" ! -newermt "$D 14:05" -exec cp {} ~/bench/$D/ \;
+for f in $(zstdcat $C/$D/$H.jsonl.zst | grep '"kind":"universe"' | grep -o 'universe-[0-9]*-[0-9]*\.json\.zst' | sort -u); do
+  t=${f#universe-}; t=${t%%-*}; d=$(date -u -d @$((t / 1000)) +%F)
+  mkdir -p ~/bench/$d && cp $C/$d/$f ~/bench/$d/
+done
+ls -R ~/bench | head -20
 tar -cf ~/bench.tar -C ~ bench && du -h ~/bench.tar && rm -rf ~/bench
 ```
    Copy it to the PC (`scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123:/root/bench.tar "$HOME/"`), delete `~/bench.tar` on the VPS, unpack to `$HOME/bench/`. Then on the PC:
 ```bash
 MSYS_NO_PATHCONV=1 docker run --rm --cpus 0.25 --memory 256m --tmpfs /tmp -v "$HOME/bench:/bench:ro" --entrypoint /usr/local/bin/compact cute-trading/rust:dev bench /bench/$D/$H.jsonl.zst
 TAPE_AGREEMENT_DIR="$HOME/bench" cargo test -p scanner --test tape_agreement -- --ignored --nocapture
+TAPE_AGREEMENT_DIR="$HOME/bench" cargo test -p scanner --test tob_agreement -- --ignored --nocapture
 COMPACT_BENCH_HOUR="$HOME/bench/$D/$H.jsonl.zst" cargo test -p compact --test bench -- --ignored --nocapture
 ```
-   The first line is the release build under the service's limits: record its `ms`, `peak_rss_kb`, rows and bytes per table, and `per_day_bytes`. The second proves the compactor's books equal the scanner engine's on real data, line by line (debug build). The third is the same compaction in a debug build (correctness, not timing).
+   The first line is the release build under the service's limits: record its `ms`, `peak_rss_kb`, rows and bytes per table, and `per_day_bytes`. The second proves the compactor's books equal the scanner engine's on real data, line by line, and the third that every `tob` row equals the engine's top at its line (debug builds; ruling R1 rests on these two). The fourth is the same compaction in a debug build (correctness, not timing).
    **Decision (spec §8, ruling R3):**
    - `ms` must be under 600,000 (10 min at 0.25 CPU) and `peak_rss_kb` under 200,000 (headroom under 256 MB). If either fails, stop: do not deploy; report the numbers.
    - `per_day_bytes` + 50 MB (the l2 upper estimate, not measured without episodes) ≤ 300 MB: keep the spec §3 defaults.
@@ -7877,19 +8635,22 @@ grep -q '^COMPACT_RW_DB_PASSWORD=' .env || printf 'COMPACT_RW_DB_PASSWORD=%s\n' 
 grep -c '^COMPACT_RW_DB_PASSWORD=' .env
 ```
    Expect `1`. Then check `grep -n -A1 -E '^  compact:$' compose.yml` finds the service.
-6. **Pre-flight (VPS).** Record the raw capture size and free disk, back up as in 5a §5 (tag the running image `cute-trading/rust:<old-sha>`, `cp .env .env.bak-5b`), and note the running scanner's run id:
+6. **Pre-flight (VPS).** Record the raw capture size, back up as in 5a §5 (tag the running image `cute-trading/rust:<old-sha>`, `cp .env .env.bak-5b`), and note the running scanner's run id:
 ```bash
-du -sh /var/lib/docker/volumes/cute-trading_data/_data/capture; df -h /var/lib/docker
+du -sh /var/lib/docker/volumes/cute-trading_data/_data/capture
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT max(run_id) FROM runs WHERE service = 'scanner'"
+df -BG --output=size,used,avail /var/lib/docker
+du -s --block-size=1G /var/lib/docker/volumes/cute-trading_* | awk '{s += $1} END {print "project_gb", s}'
 ```
+   **Disk headroom (required).** The scanner pauses capture when free space drops below 10 GB and resumes only above 15 GB (`config/scanner.toml [capture] pause_below_gb`, `resume_above_gb`), so the disk must keep at least 20 GB free with the project at its full 75 GB. With `size` from `df` and `other_gb = used − project_gb` (everything that isn't this project), check `size − other_gb − 75 ≥ 20`. If it fails, lower the archive budget before deploying: `archive_budget_gb = size − other_gb − 20 − 15 − 1` (20 headroom, 15 raw cap, 1 database), rounded down, at least 1; set it in `config/compact.toml`, commit (`config: archive budget <n> GB for this disk`), rebuild (§2). Write the numbers and the decision in Results.
 7. **Migrate alone first, and check version 8 (VPS).** Never paste the whole block; stop at the first failure (5d lesson).
 ```bash
 docker compose --profile core stop --timeout 60 scanner
 docker compose --profile core run --rm migrate; echo "migrate exit=$?"
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT max(version) FROM _sqlx_migrations WHERE success"
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT has_table_privilege('compact_rw','compact_hours','UPDATE'), has_table_privilege('compact_rw','episodes','INSERT'), has_table_privilege('scanner_rw','compact_hours','INSERT'), has_table_privilege('scanner_rw','compact_hours','UPDATE'), has_table_privilege('analyze_ro','compact_status','SELECT')"
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT has_table_privilege('compact_rw','compact_hours','UPDATE'), has_table_privilege('compact_rw','episodes','INSERT'), has_table_privilege('scanner_rw','compact_hours','INSERT'), has_table_privilege('scanner_rw','compact_hours','UPDATE'), has_table_privilege('analyze_ro','compact_status','SELECT'), has_table_privilege('scanner_rw','compact_status','SELECT')"
 ```
-   Expect `migrate exit=0`, `8`, then `t|f|t|f|t`. If `migrate` fails, read `docker compose --profile core logs --tail 50 migrate` before anything else; 0008 is additive (two new tables, a role, grants), so a clean failure leaves nothing half-applied.
+   Expect `migrate exit=0`, `8`, then `t|f|t|f|t|t`. If `migrate` fails, read `docker compose --profile core logs --tail 50 migrate` before anything else; 0008 is additive (two new tables, a role, grants), so a clean failure leaves nothing half-applied.
 8. **Activate `compact_rw` once (VPS; the password is never printed).** 5a runbook §11 exactly, with the names changed:
 ```bash
 PW="$(grep -E '^COMPACT_RW_DB_PASSWORD=' .env | cut -d= -f2-)"
@@ -7908,7 +8669,7 @@ docker compose --profile core up -d --no-build --no-deps compact
 docker compose --profile core logs --tail 20 compact
 docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web
 ```
-   Expect the scanner's usual start lines and no `capture: compact_hours unreadable`; the compactor's `compact: every 60 s, /data/capture → /archive …` and no `refusing to start`. The first hour it can compact is the oldest raw hour on disk once two newer hours exist, so `compact: <H> done in …` lines start within minutes and then catch up hour by hour (each ~ the benchmark time).
+   Expect the scanner's usual start lines, no `capture: compact_hours unreadable`, and, within 30 s and until compact has reported, `capture: compactor silent (no compact_status within 6 h); retention falls back to age + cap` (today's rule while no compactor runs, ruling R10), followed by `capture: compactor reporting; raw hours wait for compaction` within a minute of compact's start; the compactor's `compact: every 60 s, /data/capture → /archive …` and no `refusing to start`. The first hour it can compact is the oldest raw hour on disk once two newer hours exist, so `compact: <H> done in …` lines start within minutes and then catch up hour by hour (each ~ the benchmark time).
 10. **Post-deploy checks (VPS, then the browser).**
     - Hours become `done` within about 2 h of closing:
 ```bash
@@ -7926,6 +8687,10 @@ docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to
 ```bash
 docker compose --profile core run --rm --no-deps compact verify <day>; echo "verify exit=$?"
 ls -l /var/lib/docker/volumes/cute-trading_archive/_data/<day>/
+```
+    Then the day's timestamp clamps and late rows (ruling R4; both should be small next to the day's `tob` rows):
+```bash
+python3 -c "import json,sys; m=json.load(open(sys.argv[1])); print('tob', m['totals']['tob'], 'ts_clamped', m['ts_clamped'], 'late_rows', m['late_rows'])" /var/lib/docker/volumes/cute-trading_archive/_data/<day>/manifest.json
 ```
     Expect `verify <day>: ok` and `verify exit=0`, and six files (`tokens`, `tob`, `depth`, `l2`, `gaps` `.parquet` + `manifest.json`). Record the day's total bytes and each table's bytes (the manifest's `bytes`). If `l2` is over 50 MB a day, set `l2_before_secs = 120` and `l2_after_secs = 120` in `config/compact.toml` and ship it with the next deploy; record the decision.
 12. **How to query the archive (PC, DuckDB CLI).** Copy day folders to the PC (`scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" -r root@31.97.23.123:/var/lib/docker/volumes/cute-trading_archive/_data/<day> "$HOME/archive/"`), run `duckdb` in `$HOME`, and use these three queries (prices and sizes are micro-units: divide by 1e6; `token_idx` is per day, so tables join on the day folder too):
@@ -7963,8 +8728,8 @@ FROM read_parquet('archive/<day>/gaps.parquet')
 ORDER BY start_ms;
 ```
 13. **Exit (spec §1).** On the VPS: every raw hour compacted within about 2 h of closing; the raw folder holds about a day; the archive grows about the benchmark's per-day bytes (spec: ~250–300 MB); `compact verify` passes on the first full day; Health shows the archive size, oldest day and lag; the project stays under 75 GB. Record the date.
-14. **Rollback.** Stop the compactor: `docker compose --profile core stop compact`. Hours are then never `done`, so the scanner stops deleting them by age and keeps them until the 15 GB cap, where it deletes the oldest and marks them `lost` (ruling R10: with the database reachable the guard is cap-only; the fallback to age plus cap is for an unreachable database). To return fully to the old behaviour, start the previous image (`cute-trading/rust:<old-sha>`) for the scanner as in the 5a runbook Rollback. Migration 0008, the role, the `archive` volume and its files can stay: the old code never reads them.
-15. **Results.** Blanks for: `GIT_SHA`; the pinned `parquet`/`arrow` version; the benchmark (`ms`, `peak_rss_kb`, rows and bytes per table, `per_day_bytes`, the agreement test's line count, the decision); migrate exit and version; the role checks; the first `done` hour and its lag; `docker stats` for `compact`; the raw folder size at deploy and 24 h later; the first merged day, its `verify` output and its bytes per table; the date.
+14. **Rollback.** Stop the compactor: `docker compose --profile core stop compact`. For up to 6 h the scanner keeps waiting (uncompacted hours stay, up to the 15 GB cap); once `compact_status` is 6 h old the scanner logs `capture: compactor silent …; retention falls back to age + cap` and is back on today's rule with the new numbers (24 h, 15 GB), every hour it deletes marked `lost` (ruling R10, owner-approved). To return fully to the old code, start the previous image (`cute-trading/rust:<old-sha>`) for the scanner as in the 5a runbook Rollback. Migration 0008, the role, the `archive` volume and its files can stay: the old code never reads them.
+15. **Results.** Blanks for: `GIT_SHA`; the pinned `parquet`/`arrow` version; the benchmark (`ms`, `peak_rss_kb`, rows and bytes per table, `per_day_bytes`, the two agreement tests' line and row counts, the decision); the disk headroom check (`size`, `other_gb`, the result, any budget change); migrate exit and version; the role checks; the first `done` hour and its lag; `docker stats` for `compact`; the raw folder size at deploy and 24 h later; the first merged day, its `verify` output, its bytes per table, `ts_clamped` and `late_rows`; the date.
 
 - [ ] **Step 2: Commit**
 
@@ -7977,25 +8742,27 @@ git commit -m "runbook: Phase 5b on the VPS (migrate 0008 alone, compact_rw, com
 
 ## Rulings (spec §11 open items and ambiguities)
 
-- **R1, reuse (spec §11 "Reuse").** A new pure crate `crates/tape` holds everything both binaries read the raw capture with: `Line`/`Ctl`/`book_ctl`/`ctl_book` and the time/path helpers (moved from `bins/scanner/src/capture.rs`, re-exported there), `MarketEvent`/`parse_frame` (moved from `crates/pm-api/src/ws.rs`, re-exported and wrapped there, because the arch test bans `pm-api` from `compact`), the capture layout and line reader (replay now reads through it and exposes `apply_line`), a read-only projection of the universe record, and `FeedBooks`. The engine's book-keeping can't be lifted out as code: its books live inside `arb_core::detect::Group` (a premise file) and are interleaved with detection, integrity rows and the paper trader. So `FeedBooks` re-expresses only the book rules on the same `Book`, the same parser and the same line type; the one expression both must share (`server_top`) is called by both; and `bins/scanner/tests/tape_agreement.rs` asserts identical books after every line of a capture that exercises every rule (plus an `#[ignore]` run on a real hour in the runbook). `scanner::run::replay_cmd` itself is not shared: it writes episodes and paper rows, which the compactor never needs.
+- **R1, reuse (spec §11 "Reuse"). Needs the owner's sign-off** (the coordinator is asking; implementation of Tasks 3–4 and 12 should wait for it or be ready to change). A new pure crate `crates/tape` holds everything both binaries read the raw capture with: `Line`/`Ctl`/`book_ctl`/`ctl_book` and the time/path helpers (moved from `bins/scanner/src/capture.rs`, re-exported there), `MarketEvent`/`parse_frame` (moved from `crates/pm-api/src/ws.rs`, re-exported and wrapped there, because the arch test bans `pm-api` from `compact`), the capture layout and line reader (replay now reads through it and exposes `apply_line`), a read-only projection of the universe record, and `FeedBooks`. The engine's book-keeping can't be lifted out as code: its books live inside `arb_core::detect::Group` (a premise file) and are interleaved with detection, integrity rows and the paper trader. So `FeedBooks` re-expresses only the book rules on the same `Book`, the same parser and the same line type; the one expression both must share (`server_top`) is called by both; `bins/scanner/tests/tape_agreement.rs` asserts identical books after every line of a capture that exercises every rule (including `Suspect`/`Resolved` lines, a token moving between groups, a group and a canary pair appearing mid-hour), and `bins/scanner/tests/tob_agreement.rs` asserts every `tob` row the compactor emits equals the engine's top at that line; both also run `#[ignore]` on a real hour in the runbook §3. `scanner::run::replay_cmd` itself is not shared: it writes episodes and paper rows, which the compactor never needs.
 - **R2, Parquet row groups (spec §11 "Parquet writer").** 262,144-row row groups, 65,536-row write batches, zstd 3, dictionary encoding on by default. An open part holds one encoded row group plus one batch; five parts per hour stay well inside 256 MB. Pinned by `row_groups_hold_262144_rows_so_memory_stays_bounded`; measured on a real hour by the runbook §3 bench (`peak_rss_kb` under 200,000 or no deploy).
 - **R3, the benchmark (spec §11 "Benchmark").** A `compact bench <hour file>` subcommand plus an `#[ignore]` test. The timing that decides is the release build inside the image with `--cpus 0.25 --memory 256m` (runbook §3), because the PC runs debug builds only; the debug `#[ignore]` runs check correctness on the real hour (including engine agreement). The owner copies the hour; without it the spec §3 defaults stay. The decision table is in runbook §3 and §11.
-- **R4, timestamps (spec §11 "Timestamps").** Confirmed: the capture file is in engine processing order, and frames from different shards interleave, so `recv_ms` is not monotone in the file. `tob` and `l2` rows are written in `recv_ms` order through a 10 s reorder buffer (ties keep file order); a row older than one already written is appended and counted (`late_rows`), never dropped. Both timestamps are kept: `ts_ms` is the book's server timestamp, raised to the token's previous row's `ts_ms` if it would go back (counted as `ts_clamped`), so `verify`'s "ts_ms non-decreasing per token" holds without inventing data.
+- **R4, timestamps (spec §11 "Timestamps").** Confirmed: the capture file is in engine processing order, and frames from different shards interleave, so `recv_ms` is not monotone in the file. `tob` and `l2` rows are written in `recv_ms` order through a 10 s reorder buffer (ties keep file order); a row older than one already written is appended and counted (`late_rows`), never dropped. Both timestamps are kept: `ts_ms` is the book's server timestamp, raised to the token's previous row's `ts_ms` if it would go back (counted as `ts_clamped`), so `verify`'s "ts_ms non-decreasing per token" holds without inventing data. Both counts are totalled per day in `manifest.json` (`ts_clamped`, `late_rows`) and read in runbook §11.
 - **R5, l2 snapshots.** Each hour restarts every active window with snapshot rows (so each hourly part, and each day across midnight, stands alone for `verify` and for a reader), as does a hand-over between overlapping windows. A token whose book is untrusted or empty when its window starts gets its snapshot at its first trusted, non-empty state.
 - **R6, gaps and `verify`.** `shard = null` gaps are whole-feed stretches (cold start before the first line, `scanner_stopped` from a `Shutdown` to the next line or a missing hour with no record, `raw_hour_lost` for a lost hour or from an unreadable point to the hour's end) and are checked against every row. `shard = n` gaps (`down`, `no_book_yet`) cover tokens of one shard waiting for a snapshot; rows carry no shard, so `verify` can't check them; the reducer tests pin that untrusted books make no rows. Every gap row is clipped to its hour.
 - **R7, `compact_rw` also gets SELECT on `compact_hours`/`compact_status`** (spec §9 lists INSERT and UPDATE): `INSERT … ON CONFLICT DO UPDATE` needs it, and the compactor reads which hours are lost.
 - **R8, which universe records to keep (spec §4.5).** "The newest universe file referenced by any remaining hour" can't be found without decompressing hours every 30 s. Every control line names the record in force when it was captured, which is one written at or after the oldest remaining hour's start, or the newest one written before it; so retention keeps exactly those, by file write time (mtime). `taken_ms` can't be used: a warm start writes a record whose `taken_ms` is older than records written before it.
-- **R9, a missing raw hour.** Recorded `lost` in `compact_hours` → `raw_hour_lost` (the hour's status stays `lost`); no record → `scanner_stopped`, status `done` with no source file. An unreadable file (truncated zstd) keeps the rows before the break, gaps the rest as `raw_hour_lost`, and is `done` with `read_error` in its sidecar, so compaction never stalls on one bad file.
-- **R10, rollback.** With the database reachable and the compactor stopped, the scanner's guard deletes nothing by age and keeps raw up to the 15 GB cap (then deletes oldest first, marked lost). The spec's "falls back to age plus cap" is exactly true only while the database is unreachable; the runbook says so and gives the full revert (the previous scanner image).
+- **R9, a missing raw hour.** A file that was listed and is gone was deleted by the scanner: `lost` at once (`raw_hour_lost`), whether or not its mark has landed (a later mark is a no-op against the compactor's row, so the loss stays visible). Never listed: `lost` if `compact_hours` says so; otherwise, after 5 minutes of being ready (`MISSING_GRACE_MS`), `scanner_stopped` with status `done` and no source file. The scanner inserts every lost mark the moment it deletes (its 30 s tick only retries). An unreadable file (truncated zstd) keeps the rows before the break, gaps the rest as `raw_hour_lost`, and is `done` with `read_error` in its sidecar, so compaction never stalls on one bad file.
+- **R10, rollback (owner-approved).** The scanner waits for compaction only while the compactor is alive: `compact_status` exists and is at most 6 h old (`COMPACTOR_STALE_MS`). No status row (compact not deployed yet) or an older one clears the guard's view, and retention is today's rule (age plus cap) with the new numbers; the same happens while the database is unreachable (view older than 2 minutes). So "stop compact" is the rollback, and before compact's first report (deploy order: scanner first) the scanner behaves as today.
 - **R11, `compact_status` is written every poll (60 s)**, not only after an hour or a merge, so "older than 2 h" on the dashboard means the service is gone, not merely idle between hours.
 - **R12, what a `tob` row is.** A change of the best bid or best ask price *or size* (the table stores both), including a token's first trusted state of the day; the last top is kept across gaps and days, so a book resynchronized to the same top makes no row.
 - **R13, readiness.** Hour H is compacted once any raw hour file at or after H + 2 h exists (H + 1 closed), which also moves on after the scanner skipped hours.
 - **R14, the `tokens` table** lists the tokens that got at least one row that day, with the metadata of the universe in force when they first did; `token_idx` restarts every UTC day.
 - **R15, checkpoints** keep the spec's name `checkpoint-<hour>.bin.zst`; the content is zstd-compressed JSON (the repo's existing serde_json, no new crate).
+- **R16, universe records are named only once written.** The capture thread acknowledges every universe record it wrote (`Metrics::universe_acked_seq`); a refresh reuses the last record only if it was acknowledged, capture is not paused, and no capture message was dropped since; otherwise it writes a new one. A record lost on its way to disk (capture paused, a write error) is therefore never named by later lines, and replay can't break on it.
+- **R17, one more heart case.** Besides "behind" and "older than 2 h", the compactor heart is lost when no `compact_status` row exists 2 h after the first `compact_hours` row (hours are being recorded, e.g. lost at the cap, with no compactor reporting).
 
 ## Results
 
 Filled in by the implementer:
-- Task 6: pinned `parquet` / `arrow` version: ______ (and any `set_max_row_group_size` replacement used: ______)
-- Task 9: resume test compared byte for byte / row for row: ______
-- Task 15 (runbook) results live in `docs/superpowers/runbooks/phase5b-storage-vps.md` Results.
+- Task 8: pinned `parquet` / `arrow` version (60.0.0 at planning time): ______ (and any `set_max_row_group_size` replacement used: ______)
+- Task 15: resume test compared byte for byte / row for row: ______
+- Task 21 (runbook) results live in `docs/superpowers/runbooks/phase5b-storage-vps.md` Results.
