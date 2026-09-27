@@ -1,6 +1,7 @@
-//! CLOB read endpoints: POST /books (≤ 500 tokens per request) and GET /ok (spec §3).
+//! CLOB read endpoints: POST /books (≤ 500 tokens per request), GET /ok (spec §3), and GET /time
+//! (clock-offset sampling, scanner-clock-offset brief).
 use crate::ApiError;
-use crate::routes::{CLOB_BASE, CLOB_BOOKS, CLOB_OK};
+use crate::routes::{CLOB_BASE, CLOB_BOOKS, CLOB_OK, CLOB_TIME};
 use crate::wire::string_or_number;
 use arb_core::book::Book;
 use arb_core::money::{Price, Shares};
@@ -121,5 +122,81 @@ impl ClobClient {
         let req = self.http.get(format!("{}{}", self.base, CLOB_OK));
         let resp = crate::http::send_timed(req, self.rtt.as_ref()).await?;
         Ok(resp.status().is_success())
+    }
+
+    /// One clock-offset sample: `sent_ms` just before the request, `recv_ms` just after the body
+    /// is read, `server_s` the unix-second body CLOB replied with.
+    pub async fn time(&self) -> Result<TimeSample, ApiError> {
+        let req = self.http.get(format!("{}{}", self.base, CLOB_TIME));
+        let sent_ms = pm_api_now_ms();
+        let text = crate::http::send_timed(req, self.rtt.as_ref())
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let recv_ms = pm_api_now_ms();
+        let server_s = parse_time_body(&text)?;
+        Ok(TimeSample {
+            sent_ms,
+            recv_ms,
+            server_s,
+        })
+    }
+}
+
+/// Wall-clock milliseconds on the same clock the scanner uses for lag (`pm_api::ws::now_us`).
+fn pm_api_now_ms() -> i64 {
+    crate::ws::now_us() / 1000
+}
+
+/// A local `(sent, recv)` bracket around one CLOB `/time` unix-second reading (spec: the estimator
+/// in `bins/scanner/src/clock.rs` uses this to bound the clock offset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSample {
+    pub sent_ms: i64,
+    pub recv_ms: i64,
+    pub server_s: i64,
+}
+
+/// The `/time` body is a bare integer of unix seconds, possibly with surrounding whitespace.
+/// Anything else — not an integer, or non-positive — is rejected: a bad reading must never enter
+/// the offset estimator silently.
+fn parse_time_body(text: &str) -> Result<i64, ApiError> {
+    let s: i64 = text
+        .trim()
+        .parse()
+        .map_err(|e: std::num::ParseIntError| ApiError::field("clob_time", e.to_string()))?;
+    if s <= 0 {
+        return Err(ApiError::field("clob_time", "non-positive"));
+    }
+    Ok(s)
+}
+
+#[cfg(test)]
+mod time_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::parse_time_body;
+
+    #[test]
+    fn a_good_body_parses() {
+        assert_eq!(parse_time_body("1790523400").unwrap(), 1_790_523_400);
+    }
+
+    #[test]
+    fn whitespace_is_trimmed() {
+        assert_eq!(parse_time_body("  1790523400\n").unwrap(), 1_790_523_400);
+    }
+
+    #[test]
+    fn a_non_integer_body_is_rejected() {
+        assert!(parse_time_body("not-a-number").is_err());
+        assert!(parse_time_body("").is_err());
+        assert!(parse_time_body("1790523400.5").is_err());
+    }
+
+    #[test]
+    fn negative_or_zero_is_rejected() {
+        assert!(parse_time_body("0").is_err());
+        assert!(parse_time_body("-1").is_err());
     }
 }

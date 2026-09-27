@@ -13,6 +13,7 @@ fn route_table_is_exactly_the_read_only_set() {
             ("GET", "https://clob.polymarket.com/book"),
             ("POST", "https://clob.polymarket.com/books"),
             ("GET", "https://clob.polymarket.com/ok"),
+            ("GET", "https://clob.polymarket.com/time"),
             ("WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market"),
             ("WS", "wss://sports-api.polymarket.com/ws"),
         ]
@@ -26,8 +27,9 @@ fn table_agrees_with_the_constants() {
     assert_eq!(ALLOWED[2].1, format!("{CLOB_BASE}{CLOB_BOOK}"));
     assert_eq!(ALLOWED[3].1, format!("{CLOB_BASE}{CLOB_BOOKS}"));
     assert_eq!(ALLOWED[4].1, format!("{CLOB_BASE}{CLOB_OK}"));
-    assert_eq!(ALLOWED[5].1, WS_MARKET);
-    assert_eq!(ALLOWED[6].1, WS_SPORTS);
+    assert_eq!(ALLOWED[5].1, format!("{CLOB_BASE}{CLOB_TIME}"));
+    assert_eq!(ALLOWED[6].1, WS_MARKET);
+    assert_eq!(ALLOWED[7].1, WS_SPORTS);
 }
 
 /// Recursively collect every file under `dir`.
