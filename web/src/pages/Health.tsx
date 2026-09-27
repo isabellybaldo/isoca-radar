@@ -88,9 +88,10 @@ function SeriesCharts({ s }: { s: HealthSeries }) {
 
 function IntegrityView({ i }: { i: Integrity }) {
   if (i.total === 0) return <EmptyState text={NO_INTEGRITY} />;
+  const sorted = [...i.by_kind].sort((a, b) => b.count - a.count);
   return (
     <>
-      <CountBars label="integrity by kind" items={i.by_kind.map((k) => ({ label: k.kind, count: k.count }))} />
+      <CountBars label="integrity by kind" items={sorted.map((k) => ({ label: k.kind, count: k.count }))} />
       <p className="quip">{`${i.total} events in ${i.msgs} messages: ${i.per_million === null ? '—' : formatDecimal(i.per_million)} per million.`}</p>
     </>
   );
@@ -116,9 +117,11 @@ export function Health() {
           ))}
         </div>
       </PageHead>
-      <Loadable state={now} what="capture status">
-        {(d) => (d.health === null ? <EmptyState text={NO_HEALTH_ROWS} /> : <CaptureStatus h={d.health} />)}
-      </Loadable>
+      <Box title="CAPTURE" help="capture">
+        <Loadable state={now} what="capture status">
+          {(d) => (d.health === null ? <EmptyState text={NO_HEALTH_ROWS} /> : <CaptureStatus h={d.health} />)}
+        </Loadable>
+      </Box>
       <Loadable state={series} what="the health series">
         {(d) => <SeriesCharts s={d} />}
       </Loadable>
