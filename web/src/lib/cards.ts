@@ -1,6 +1,6 @@
 import type { CardBody, CardStatus } from '../api/types';
 import type { TagTone } from '../components/Tag';
-import { compareDecimal, formatDecimal, formatMoney } from './money';
+import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents } from './money';
 import { DAY_MS, isoDay } from './time';
 
 /** Spec §7: results older than this show "updated n min ago" in the thin (dimmed) style. */
@@ -74,12 +74,22 @@ export function withThinEdge(card: CardBody): CardBody {
   };
 }
 
-/** Spec §6.2: "Edge on the table today: +$X · captured at 145 ms: Y%." (string operations only). */
+/**
+ * Spec §6.2: "Edge on the table today: +$X · captured at 145 ms: Y%." (string operations only).
+ * The headline amount rounds to the cent; `teaserAmountExact` carries the full-precision value for
+ * a `title` tooltip.
+ */
 export function teaserLine(card: CardBody): string {
   const onTable = card.columns.find((r) => r.label === ON_TABLE)?.ours ?? null;
   const head = card.series.decay?.find((p) => p.headline);
   const rate = head?.rate_pct ?? null;
-  return `Edge on the table today: ${formatMoney(onTable, { signed: true })} · captured at ${head ? head.net_ms : 145} ms: ${rate === null ? '—' : `${rate}%`}.`;
+  return `Edge on the table today: ${formatMoneyCents(onTable, { signed: true })} · captured at ${head ? head.net_ms : 145} ms: ${rate === null ? '—' : `${rate}%`}.`;
+}
+
+/** The exact (unrounded) edge-on-the-table figure `teaserLine` rounds to the cent, for a title tooltip. */
+export function teaserAmountExact(card: CardBody): string | null {
+  const onTable = card.columns.find((r) => r.label === ON_TABLE)?.ours ?? null;
+  return onTable === null ? null : formatMoney(onTable, { signed: true });
 }
 
 export function updatedText(lastTickMs: number | null, nowMs: number): { text: string; stale: boolean } {

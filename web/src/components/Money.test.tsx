@@ -28,4 +28,16 @@ describe('Money', () => {
     expect(screen.getByText('$0.00')).not.toHaveClass('pos');
     expect(screen.getByText('—')).toHaveAttribute('title', 'not measured');
   });
+
+  it('rounds a headline amount to the cent and keeps the exact value in a title', () => {
+    render(<Money value="123.857755148" cents signed tone />);
+    const el = screen.getByText('+$123.86');
+    expect(el).toHaveClass('pos');
+    expect(el).toHaveAttribute('title', '+$123.857755148');
+  });
+
+  it('still marks a missing cents value as not measured', () => {
+    render(<Money value={null} cents />);
+    expect(screen.getByText('—')).toHaveAttribute('title', 'not measured');
+  });
 });

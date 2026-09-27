@@ -124,22 +124,35 @@ describe('Radar', () => {
     expect(isArbitrage('implication')).toBe(false);
   });
 
-  it('says today in arbitrage episodes per side and the capped edge, with a true subtitle and no fee line', async () => {
+  it('says today in arbitrage episodes per side only, with a true subtitle and no fee line or dollar figure', async () => {
     mockApi({
       '/api/health/now': { health: healthFixture() },
       '/api/episodes/open': { now_ms: 0, items: [] },
       '/api/today': todayFixture(5, 2, '3.1'),
     });
     renderRadar();
-    expect(
-      await screen.findByText('Arbitrage episodes today: 7 (NO 5 · YES 2) · edge on the table: +$3.10 (capped at $100 each)'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('Arbitrage episodes today: 7 (NO 5 · YES 2)')).toBeInTheDocument();
+    expect(screen.queryByText(/edge on the table/)).not.toBeInTheDocument();
     expect(screen.getByText(TODAY_SUBTITLE)).toBeInTheDocument();
     expect(TODAY_SUBTITLE).toBe('On the table, not in the bag. See Edge capture for what latency kept.');
     expect(screen.queryByText(/Fees:/)).not.toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'arbitrage episodes per hour today' })).toBeInTheDocument();
-    expect(todayLine(todayFixture())).toBe('Arbitrage episodes today: 0 (NO 0 · YES 0) · edge on the table: — (capped at $100 each)');
+    expect(todayLine(todayFixture())).toBe('Arbitrage episodes today: 0 (NO 0 · YES 0)');
     expect(msgsPerSecond(59)).toBe('1');
+  });
+
+  it('shows the Edge teaser as the one money figure on the today box, rounded to the cent with the exact value in its title', async () => {
+    const precise = edgeFixture();
+    precise.columns = precise.columns.map((r) => (r.label === 'edge on the table' ? { ...r, ours: '12.567' } : r));
+    mockApi({
+      '/api/health/now': { health: healthFixture() },
+      '/api/episodes/open': { now_ms: 0, items: [] },
+      '/api/today': todayFixture(3, 1),
+      '/api/cards': { win: 'today', cards: [precise] },
+    });
+    renderRadar();
+    const teaser = await screen.findByText('Edge on the table today: +$12.57 · captured at 145 ms: 3.2%.');
+    expect(teaser).toHaveAttribute('title', '+$12.567');
   });
 
   it('names health troubles in text, not colour alone', async () => {

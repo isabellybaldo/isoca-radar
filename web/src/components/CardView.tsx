@@ -3,6 +3,7 @@ import type { CardBody, CardRow } from '../api/types';
 import type { HelpId } from '../help';
 import { UNDER_REVIEW, computedText, fmtValue, shortHash, statusLabel, statusTone, warmingText } from '../lib/cards';
 import { useNow } from '../lib/hooks';
+import { formatMoney, formatMoneyCents } from '../lib/money';
 import { fmtLocal, fmtUtcDateTime } from '../lib/time';
 import { CardChart } from './CardCharts';
 import { Help } from './Help';
@@ -16,6 +17,13 @@ const COLS: { key: Col; label: string }[] = [
   { key: 'their', label: 'THEIR METHOD' },
   { key: 'ours', label: 'OUR METHOD' },
 ];
+
+/** A card value cell: USD headlines round to the cent with the exact value in a title; everything else as sent. */
+function ValueCell({ value, unit }: { value: string | null; unit: string }) {
+  if (unit !== 'USD') return <>{fmtValue(value, unit)}</>;
+  if (value === null) return <span title="not measured">—</span>;
+  return <span title={formatMoney(value)}>{formatMoneyCents(value)}</span>;
+}
 
 /**
  * One card (spec §5, §8.2): status in words, the three columns, n, notes, the short hash and the
@@ -54,7 +62,9 @@ export function CardView({ card, stale = false, now }: { card: CardBody; stale?:
               <tr key={r.label} className={dim ? 'dim' : undefined}>
                 <td className="rowlabel">{r.label}</td>
                 {cols.map((c) => (
-                  <td key={c.key}>{fmtValue(r[c.key], r.unit)}</td>
+                  <td key={c.key}>
+                    <ValueCell value={r[c.key]} unit={r.unit} />
+                  </td>
                 ))}
               </tr>
             ))}

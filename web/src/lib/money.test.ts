@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { compareDecimal, formatDecimal, formatMoney, isZero, signOf } from './money';
+import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, isZero, signOf } from './money';
 
 describe('formatMoney', () => {
   it('never formats money through a float', () => {
@@ -12,6 +12,9 @@ describe('formatMoney', () => {
     ];
     const out = ['12345678901234567.89', '0.000001', '0.1', '-99.84', '1000', '0'].map((v) => formatMoney(v));
     expect(out).toEqual(['$12,345,678,901,234,567.89', '$0.000001', '$0.10', '−$99.84', '$1,000.00', '$0.00']);
+    const cents = ['0.004', '0.005', '-1.235', '123.857755148'].map((v) => formatMoneyCents(v));
+    expect(cents).toEqual(['$0.00', '$0.01', '−$1.24', '$123.86']);
+    expect(formatMoneyCents(null)).toBe('—');
     for (const s of spies) expect(s).not.toHaveBeenCalled();
   });
 
@@ -31,6 +34,19 @@ describe('formatMoney', () => {
     expect(formatDecimal(undefined)).toBe('—');
     expect([signOf('1'), signOf('-1'), signOf('0.000'), signOf(null)]).toEqual([1, -1, 0, 0]);
     expect(isZero('0.00')).toBe(true);
+  });
+});
+
+describe('formatMoneyCents', () => {
+  it('rounds half away from zero, to the cent, on the decimal string', () => {
+    expect(formatMoneyCents('0.004')).toBe('$0.00');
+    expect(formatMoneyCents('0.005')).toBe('$0.01');
+    expect(formatMoneyCents('-1.235')).toBe('−$1.24');
+    expect(formatMoneyCents('123.857755148')).toBe('$123.86');
+    expect(formatMoneyCents(null)).toBe('—');
+    expect(formatMoneyCents('0.41', { signed: true })).toBe('+$0.41');
+    expect(formatMoneyCents('-0.001', { signed: true })).toBe('$0.00');
+    expect(formatMoneyCents('999.995')).toBe('$1,000.00');
   });
 });
 

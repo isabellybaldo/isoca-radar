@@ -72,6 +72,22 @@ describe('CardView', () => {
     expect(screen.getByRole('link', { name: 'biggest opportunity →' })).toHaveAttribute('href', '/episodes/live-9-00000042');
   });
 
+  it('rounds a USD value row to the cent, with the exact value in a title tooltip', () => {
+    renderCard(
+      cardFixture({
+        card: 'EDGE', title: 'Edge capture',
+        columns: [
+          { label: 'edge on the table', unit: 'USD', paper: null, their: null, ours: '12.567755' },
+          { label: 'biggest single opportunity', unit: 'USD', paper: null, their: null, ours: null },
+        ],
+        series: {},
+      }),
+    );
+    const rounded = screen.getByText('$12.57');
+    expect(rounded).toHaveAttribute('title', '$12.567755');
+    expect(screen.getByText('biggest single opportunity').closest('tr')).toHaveTextContent('—');
+  });
+
   it('dims every number when the results are stale', () => {
     renderCard(cardFixture(), true);
     expect(screen.getByText('YES-side episodes').closest('tr')).toHaveClass('dim');

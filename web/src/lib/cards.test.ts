@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cardFixture, CARD_NOW, edgeFixture } from '../test/fixtures';
 import {
-  STALE_MS, THIN_EDGE_REASON, THIN_EDGE_USD, computedText, fmtValue, shortHash, statusLabel, statusTone, teaserLine, updatedText,
-  warmingText, withThinEdge,
+  STALE_MS, THIN_EDGE_REASON, THIN_EDGE_USD, computedText, fmtValue, shortHash, statusLabel, statusTone, teaserAmountExact,
+  teaserLine, updatedText, warmingText, withThinEdge,
 } from './cards';
 import { isoDay } from './time';
 
@@ -60,6 +60,14 @@ describe('teaserLine', () => {
       series: { decay: [{ scenario: 'sp-idle', latency_ms: 300, net_ms: 145, captured: '0', rate_pct: null, headline: true }] },
     });
     expect(teaserLine(zero)).toBe('Edge on the table today: $0.00 · captured at 145 ms: —.');
+  });
+
+  it('rounds the headline amount to the cent, keeping the exact value for a title tooltip', () => {
+    const c = edgeFixture();
+    c.columns = c.columns.map((r) => (r.label === 'edge on the table' ? { ...r, ours: '12.567' } : r));
+    expect(teaserLine(c)).toBe('Edge on the table today: +$12.57 · captured at 145 ms: 3.2%.');
+    expect(teaserAmountExact(c)).toBe('+$12.567');
+    expect(teaserAmountExact(edgeFixture({ columns: [] }))).toBeNull();
   });
 });
 

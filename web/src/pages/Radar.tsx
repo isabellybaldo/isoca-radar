@@ -14,10 +14,10 @@ import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
-import { teaserLine, withThinEdge } from '../lib/cards';
+import { teaserAmountExact, teaserLine, withThinEdge } from '../lib/cards';
 import { useNow, useTicker } from '../lib/hooks';
 import { kindTag } from '../lib/labels';
-import { formatDecimal, formatMoney } from '../lib/money';
+import { formatDecimal } from '../lib/money';
 
 export const NO_ARB = 'No arbitrage open right now. They rarely last.';
 export const NO_HEALTH = 'No health rows yet. The scanner may be asleep.';
@@ -35,9 +35,13 @@ export function isArbitrage(kind: string): boolean {
   return ARB_KINDS.includes(kind);
 }
 
-/** "Arbitrage episodes today: N (NO k · YES m) · edge on the table: +$X (capped at $100 each)". */
+/**
+ * "Arbitrage episodes today: N (NO k · YES m)". Counts only — the api's `edge_budget100` field is
+ * unchanged, but the single money figure for today lives in the Edge teaser line below (the EDGE
+ * `today` card), which is what the capture rate compares against.
+ */
 export function todayLine(t: Today): string {
-  return `Arbitrage episodes today: ${t.arb} (NO ${t.no} · YES ${t.yes}) · edge on the table: ${formatMoney(t.edge_budget100, { signed: true })} (capped at $100 each)`;
+  return `Arbitrage episodes today: ${t.arb} (NO ${t.no} · YES ${t.yes})`;
 }
 
 /** Messages per minute → per second, "4.3k" style. Counts, not money. */
@@ -100,9 +104,9 @@ function episodeColumns(rows: EpisodeSummary[], now: number): Column<EpisodeSumm
       render: (r) => <Link to={`/episodes/${encodeURIComponent(r.id)}`}>{r.event_title ?? r.id}</Link>,
     },
     { key: 's', label: 'S', render: (r) => r.s_legs },
-    { key: 'b100', label: 'PROFIT @ $100', render: (r) => <Money value={r.net_budget100} signed tone /> },
-    { key: 'net', label: 'NET @ DEPTH', render: (r) => <Money value={r.net} signed tone /> },
-    { key: 'gross', label: 'GROSS @ DEPTH', render: (r) => <Money value={r.gross} signed /> },
+    { key: 'b100', label: 'PROFIT @ $100', render: (r) => <Money value={r.net_budget100} signed tone cents /> },
+    { key: 'net', label: 'NET @ DEPTH', render: (r) => <Money value={r.net} signed tone cents /> },
+    { key: 'gross', label: 'GROSS @ DEPTH', render: (r) => <Money value={r.gross} signed cents /> },
     { key: 'q', label: 'Q* (SHARES)', render: (r) => formatDecimal(r.q_star) },
     { key: 'age', label: 'AGE', render: (r) => <Age sinceMs={r.opened_ms} nowMs={now} /> },
     { key: 'edge', label: 'EDGE', render: (r) => <EdgeBar edge={r.edge} max={maxEdge} /> },
@@ -169,7 +173,11 @@ export function Radar() {
               <Spark values={d.hourly.map((h) => h.arb)} label="arbitrage episodes per hour today" />
               <p className="quip">{todayLine(d)}</p>
               <p className="dim">{TODAY_SUBTITLE}</p>
-              {edge && <p className="quip teaser">{teaserLine(withThinEdge(edge))}</p>}
+              {edge && (
+                <p className="quip teaser" title={teaserAmountExact(withThinEdge(edge)) ?? undefined}>
+                  {teaserLine(withThinEdge(edge))}
+                </p>
+              )}
             </>
           )}
         </Loadable>

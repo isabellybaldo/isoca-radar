@@ -35,6 +35,28 @@ export function formatMoney(value: string | null | undefined, opts: { signed?: b
   return opts.signed ? `+${body}` : body;
 }
 
+/**
+ * Headline money: rounds to the cent, half away from zero, using string/BigInt math only (never a
+ * float). Pair with a `title` tooltip carrying the exact value from `formatMoney`. null → "—".
+ */
+export function formatMoneyCents(value: string | null | undefined, opts: { signed?: boolean } = {}): string {
+  if (value === null || value === undefined) return '—';
+  const m = DEC.exec(value.trim());
+  if (!m) return value;
+  const [, minus, int, frac = ''] = m;
+  const roundUp = frac.length > 2 && frac[2] >= '5';
+  let whole = BigInt(int);
+  let cents = BigInt(frac.slice(0, 2).padEnd(2, '0')) + (roundUp ? 1n : 0n);
+  if (cents >= 100n) {
+    cents -= 100n;
+    whole += 1n;
+  }
+  const body = `$${groupThousands(whole.toString())}.${cents.toString().padStart(2, '0')}`;
+  if (whole === 0n && cents === 0n) return body;
+  if (minus) return `−${body}`;
+  return opts.signed ? `+${body}` : body;
+}
+
 /** Any other decimal (prices, edges, Q*): as sent, grouped, with a real minus sign. */
 export function formatDecimal(value: string | null | undefined): string {
   if (value === null || value === undefined) return '—';
