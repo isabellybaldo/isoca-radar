@@ -38,7 +38,7 @@ button { font: inherit; color: inherit; }
 .help-pop { position: absolute; right: 0; top: 130%; width: min(320px, 80vw); z-index: 3; background: var(--bar); border: 2px solid var(--line); box-shadow: 4px 4px 0 var(--line); padding: 8px; font-size: 15px; line-height: 1.5; }
 .help-pop b { display: block; font-family: var(--px); font-size: 8px; margin-bottom: 6px; line-height: 1.5; }
 :focus-visible { outline: 2px dashed var(--salmon); outline-offset: 2px; }
-.app { border: 3px solid var(--line); box-shadow: 6px 6px 0 var(--line); background: var(--bg); max-width: 1100px; margin: 0 auto; }
+.app { border: 3px solid var(--line); box-shadow: 6px 6px 0 var(--line); background: var(--bg); max-width: 1440px; margin: 0 auto; }
 .top { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 3px solid var(--line); background: var(--bar); flex-wrap: wrap; }
 .logo { font-family: var(--px); font-size: 11px; }
 .nav { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
@@ -52,7 +52,8 @@ button { font: inherit; color: inherit; }
 .toggle.wiggle { animation: wiggle 0.3s steps(2) 3; }
 @keyframes wiggle { 0% { transform: translateX(-2px); } 100% { transform: translateX(2px); } }
 .body { padding: 14px; display: grid; gap: 12px; }
-.box { border: 3px solid var(--line); box-shadow: 4px 4px 0 var(--line); background: var(--card); padding: 10px 12px; min-width: 0; }
+.box { border: 3px solid var(--line); background: var(--card); padding: 10px 12px; min-width: 0; }
+.box.hero { box-shadow: 4px 4px 0 var(--line); }
 .box h2 { font-family: var(--px); font-size: 9px; margin-bottom: 8px; line-height: 1.5; }
 .health { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
 .hearts { color: var(--salmon); letter-spacing: 2px; font-size: 24px; }
@@ -142,11 +143,34 @@ svg.decay { height: 120px; }
    or axis labels, so they stay at the 15 px body size (no smaller font-size override here). */
 .teaser { color: var(--teal); }
 @media (prefers-reduced-motion: reduce) { .toggle.wiggle, .blink { animation: none; } }
-@media (max-width: 640px) {
-  body { padding: 8px; }
+.box-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pagehead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 2px 0 4px; }
+.pagehead h1 { font-family: var(--px); font-size: 11px; line-height: 1.5; }
+.pagehead-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; flex: 1; min-width: 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 8px; margin: 6px 0 10px; }
+.tile { display: flex; flex-direction: column-reverse; gap: 2px; border: 2px solid var(--line2); background: var(--chip); padding: 6px 8px; min-width: 0; }
+.tile dt { color: var(--dim); font-size: 13px; }
+.tile dd { font-family: var(--big); font-size: 34px; line-height: 1; white-space: nowrap; }
+.fold { border: 2px solid var(--line2); margin-top: 8px; }
+.fold > summary { cursor: pointer; padding: 4px 8px; color: var(--dim); list-style: none; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before { content: '▸ '; }
+.fold[open] > summary::before { content: '▾ '; }
+.fold-body { padding: 4px 8px 8px; display: grid; gap: 6px; }
+.subhead-row { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line2); padding-top: 8px; margin-top: 10px; }
+.subhead { font-family: var(--body); font-weight: 700; font-size: 15px; flex: 1; min-width: 0; }
+td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  body { padding: 0; }
+  .app { border: 0; box-shadow: none; }
   .body { padding: 8px; }
-  .nav { margin-left: 0; width: 100%; }
+  .top { padding: 8px; gap: 8px; flex-wrap: nowrap; overflow-x: auto; }
+  .logo { font-size: 9px; white-space: nowrap; }
+  .nav { margin-left: 0; flex-wrap: nowrap; gap: 4px; }
+  .nav a { font-size: 7px; padding: 4px; white-space: nowrap; }
   .hearts { font-size: 20px; }
   .box { padding: 8px; }
   .tag { white-space: normal; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  svg.chart { min-height: 140px; }
 }

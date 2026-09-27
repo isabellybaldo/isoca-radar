@@ -4,4 +4,9 @@ import { afterEach } from 'vitest';
 
 afterEach(() => {
   cleanup();
+  try {
+    localStorage.clear();
+  } catch {
+    // a test may have stubbed Storage to throw
+  }
 });
