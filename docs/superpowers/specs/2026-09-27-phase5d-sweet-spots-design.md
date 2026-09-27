@@ -73,6 +73,7 @@ An **attempt** is one (paper account, episode) pair with a `paper_intents` row, 
 - **`skipped`:** `paper_intents.skip_reason` is set. Captured 0, capital 0; counted by reason (`no_cash`, `below_min_size`, `consumed`, `too_long`, `no_lockup_figures`, `annualized_too_low`, `bad_input`).
 - **`missed`:** executed with `paper_execs.q_eff = 0`. A missed attempt can still have partial buys and their unwinds (`trader.rs:605-647`), so its captured value is computed like any executed attempt, and is usually negative.
 - **`filled`:** executed with `q_eff > 0`.
+- **`dropped`:** no skip reason and no exec row, with its planned execution more than 60 s old (a restart drops pending intents, `trader.rs:94-95`). Counted as a skipped attempt with reason `dropped`; while under 60 s old it is `in_flight`.
 - **`in_flight`:** executed less than 60 s before the tick's input cutoff. It is left out and picked up by a later tick, because the conversion, unwinds and 30 s markout may not be written yet.
 
 **The statistic's unit is the executed attempt** (`missed` + `filled`). n and the mean count both; `filled` stays a separate count.
