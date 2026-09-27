@@ -207,3 +207,23 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .endlegend li { white-space: nowrap; }
 .sw.mk { background: var(--line2); }
 @media (max-width: 600px) { .eqwrap { grid-template-columns: 1fr; } }
+.strip svg { display: block; width: 100%; height: 48px; background: var(--bg); border: 2px solid var(--line2); }
+.strip .axis { fill: var(--line2); }
+.strip .tick.no { fill: var(--teal); } .strip .tick.yes { fill: var(--salmon); } .strip .tick.other { fill: var(--dim); }
+.strip .tick.hollow { fill: var(--bg); stroke: var(--dim); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.menu { position: relative; }
+.menu > summary { cursor: pointer; border: 2px solid var(--line); padding: 0 6px; background: var(--chip); list-style: none; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu-body { position: absolute; z-index: 3; top: 110%; left: 0; background: var(--bar); border: 2px solid var(--line); padding: 6px 8px; display: grid; gap: 2px; white-space: nowrap; }
+.eptable tr.day th { font-family: var(--px); font-size: 8px; padding-top: 10px; color: var(--dim); border-bottom: 1px solid var(--line2); }
+.eptable .c-event { max-width: 0; width: 45%; }
+.eptable .c-event a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) {
+  .eptable thead { display: none; }
+  .eptable tr.ep { display: grid; grid-template-columns: auto auto 1fr; grid-template-areas: 'time kind net' 'event event event' 's dur flags'; gap: 2px 8px; padding: 6px 0; border-bottom: 1px dashed var(--line2); }
+  .eptable tr.ep td { border: 0; padding: 0; }
+  .eptable .c-time { grid-area: time; } .eptable .c-kind { grid-area: kind; } .eptable .c-net { grid-area: net; justify-self: end; }
+  .eptable .c-event { grid-area: event; max-width: none; width: auto; min-width: 0; }
+  .eptable .c-s { grid-area: s; } .eptable .c-dur { grid-area: dur; } .eptable .c-flags { grid-area: flags; justify-self: end; }
+  .eptable .c-gross, .eptable .c-q { display: none; }
+}

@@ -29,7 +29,7 @@ export const HELP = {
   },
   filters: {
     title: 'What do the filters do?',
-    text: 'They narrow the list by kind, day and flags, and they live in the URL, so a filtered view can be bookmarked. Days are UTC. Nothing here changes the data, only what you see of it.',
+    text: 'They narrow the list by kind, day and flags, and they live in the URL, so a filtered view can be bookmarked. Days are UTC. Nothing here changes the data, only what you see of it. UTC days. Seven days at a time.',
   },
   episodes: {
     title: 'What is in this list?',
