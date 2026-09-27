@@ -11,9 +11,9 @@ pub const CLOB_BOOKS: &str = "/books";
 pub const CLOB_OK: &str = "/ok";
 pub const CLOB_TIME: &str = "/time";
 
-/// Unit tests only (`http.rs`'s round-trip timing tests): the scheme of the throwaway plain-http
-/// server they start on 127.0.0.1. Never a route and never compiled into the crate; it lives here
-/// because this is the one file allowed URL literals (tests/routes.rs).
+/// Unit tests only (`http.rs`'s and `clob.rs`'s round-trip timing tests): the scheme of the
+/// throwaway plain-http server they start on 127.0.0.1. Never a route and never compiled into the
+/// crate; it lives here because this is the one file allowed URL literals (tests/routes.rs).
 #[cfg(test)]
 pub(crate) const LOCAL_TEST_SCHEME: &str = "http://";
 
