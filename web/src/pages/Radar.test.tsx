@@ -135,6 +135,7 @@ describe('Radar', () => {
       await screen.findByText('Arbitrage episodes today: 7 (NO 5 · YES 2) · edge on the table: +$3.10 (capped at $100 each)'),
     ).toBeInTheDocument();
     expect(screen.getByText(TODAY_SUBTITLE)).toBeInTheDocument();
+    expect(TODAY_SUBTITLE).toBe('On the table, not in the bag. See Edge capture for what latency kept.');
     expect(screen.queryByText(/Fees:/)).not.toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'arbitrage episodes per hour today' })).toBeInTheDocument();
     expect(todayLine(todayFixture())).toBe('Arbitrage episodes today: 0 (NO 0 · YES 0) · edge on the table: — (capped at $100 each)');

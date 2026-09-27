@@ -290,11 +290,20 @@ impl Store {
 
     /// Today (UTC) in live complete baskets (`yes_basket`, `no_basket`): counts per kind and per
     /// hour, and the $100-capped net edge they offered. Incomplete sets and implications are not
-    /// arbitrage and never count. ROLLUP adds the whole-day row (hour NULL), even on an empty day.
+    /// arbitrage and never count. ROLLUP adds a whole-day row (hour NULL) when any episode matched;
+    /// over zero rows it returns zero rows, so an empty day reads as zero from the Rust defaults below
+    /// (counts 0, edge None, 24 zero hours).
     pub async fn today(&self, now_ms: i64) -> Result<Today, StoreError> {
         let day_start_ms = now_ms - now_ms.rem_euclid(DAY_MS);
         let rows: Vec<(Option<i64>, i64, i64, Option<Decimal>)> = sqlx::query_as(
-            "SELECT ((opened_server_ms - $1) / 3600000)::int8 AS hour,                     count(*) FILTER (WHERE kind = 'no_basket') AS no,                     count(*) FILTER (WHERE kind = 'yes_basket') AS yes,                     sum(pnl_net_budget100_usd) AS edge              FROM episodes              WHERE source = 'live' AND kind IN ('yes_basket', 'no_basket')                AND opened_server_ms >= $1 AND opened_server_ms < $2              GROUP BY ROLLUP (1) ORDER BY 1 NULLS LAST LIMIT 25",
+            "SELECT ((opened_server_ms - $1) / 3600000)::int8 AS hour, \
+                    count(*) FILTER (WHERE kind = 'no_basket') AS no, \
+                    count(*) FILTER (WHERE kind = 'yes_basket') AS yes, \
+                    sum(pnl_net_budget100_usd) AS edge \
+             FROM episodes \
+             WHERE source = 'live' AND kind IN ('yes_basket', 'no_basket') \
+               AND opened_server_ms >= $1 AND opened_server_ms < $2 \
+             GROUP BY ROLLUP (1) ORDER BY 1 NULLS LAST LIMIT 25",
         )
         .bind(day_start_ms)
         .bind(day_start_ms + DAY_MS)

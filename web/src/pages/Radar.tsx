@@ -23,8 +23,8 @@ export const NO_ARB = 'No arbitrage open right now. They rarely last.';
 export const NO_HEALTH = 'No health rows yet. The scanner may be asleep.';
 export const OPEN_STALE = 'scanner not reporting — list may be stale';
 export const INCOMPLETE_WHY = "An outcome outside the set can win (e.g. 'Other'). Shown for context, not money.";
-/** True of every episode counted: each one was net-positive while it lasted, by definition. */
-export const TODAY_SUBTITLE = 'Every one paid on paper, for as long as it lasted. Usually not long.';
+/** Episodes are prices observed, not fills: what was on the table is not what was captured. */
+export const TODAY_SUBTITLE = 'On the table, not in the bag. See Edge capture for what latency kept.';
 /** Past this age (ms) the last health minute is old enough that the open-episodes list itself may
  * no longer reflect reality (the scanner could be down, and nothing would ever close these rows). */
 const STALE_HEALTH_MS = 180_000;
