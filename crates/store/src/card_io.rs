@@ -590,24 +590,24 @@ impl Store {
         if run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query_as(
-            "SELECT e.episode_id, e.run_id, e.event_id, e.kind, e.opened_server_ms AS opened_ms, \
+        let sql = format!(
+            "{SWEET_EPS}SELECT e.episode_id, e.run_id, e.event_id, e.kind, e.opened_server_ms AS opened_ms, \
                     e.peak_pnl_net_usd AS pnl_net, e.pnl_net_budget100_usd AS budget100, \
                     e.engine_suspect AS suspect, e.stale_transport AS stale, e.days_to_end, \
                     e.annualized_return AS annualized, e.peak_cost_usd AS peak_cost, \
                     (SELECT count(*) FROM episode_legs l WHERE l.episode_id = e.episode_id AND l.in_s) AS s_legs, \
                     ev.tags \
-             FROM episodes e LEFT JOIN events ev ON ev.event_id = e.event_id \
-             WHERE e.source = 'live' AND e.run_id = ANY($1) AND e.kind IN ('yes_basket', 'no_basket') \
-               AND e.opened_server_ms >= $2 AND e.opened_server_ms < $3 \
-             ORDER BY e.opened_server_ms, e.episode_id LIMIT $4",
-        )
-        .bind(run_ids.to_vec())
-        .bind(from_ms)
-        .bind(to_ms)
-        .bind(MAX_SWEET_ROWS + 1)
-        .fetch_all(self.pool())
-        .await?;
+             FROM se JOIN episodes e ON e.episode_id = se.episode_id \
+             LEFT JOIN events ev ON ev.event_id = e.event_id \
+             ORDER BY e.opened_server_ms, e.episode_id LIMIT $4"
+        );
+        let rows = sqlx::query_as(&sql)
+            .bind(run_ids.to_vec())
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(MAX_SWEET_ROWS + 1)
+            .fetch_all(self.pool())
+            .await?;
         capped(rows, MAX_SWEET_ROWS, "sweet_episodes")
     }
 

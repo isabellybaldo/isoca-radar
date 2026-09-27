@@ -703,11 +703,19 @@ async fn sweet_reads_return_one_hours_attempts_and_nothing_else() {
                 ),
                 acct(
                     run,
+                    "P0-converter/sp-idle/fee50",
+                    "P0-converter",
+                    "sp-idle",
+                    dec!(50),
+                ),
+                acct(
+                    run,
                     "P1-settlement/sp-idle",
                     "P1-settlement",
                     "sp-idle",
                     dec!(0),
                 ),
+                acct(run, "P2-combo/sp-idle", "P2-combo", "sp-idle", dec!(0)),
                 acct(run, "P3-naive/sp-idle", "P3-naive", "sp-idle", dec!(0)),
             ],
             paper_intents: vec![
@@ -779,7 +787,13 @@ async fn sweet_reads_return_one_hours_attempts_and_nothing_else() {
     let ids: Vec<&str> = accts.iter().map(|a| a.account_id.as_str()).collect();
     assert_eq!(
         ids,
-        vec![p0, "P0-converter/sp-idle/fee10", "P1-settlement/sp-idle"]
+        vec![
+            p0,
+            "P0-converter/sp-idle/fee10",
+            "P0-converter/sp-idle/fee50",
+            "P1-settlement/sp-idle"
+        ],
+        "fee 50 is included (P0 at 0/10/50); P2-combo and P3-naive are never SWEET accounts"
     );
     let all: Vec<String> = accts.iter().map(|a| a.account_id.clone()).collect();
     let eps = rw.sweet_episodes(&[run], t, t + H).await.unwrap();
