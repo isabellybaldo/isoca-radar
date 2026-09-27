@@ -50,6 +50,14 @@ pub struct Analyzer {
     edge: Family<EdgeCell>,
     cursor: Option<i64>,
     last_hour: Option<i64>,
+    /// When the last successful tick ran (for late paper marks and health rows).
+    last_tick_ms: Option<i64>,
+}
+
+/// The newest live run's P0 accounts: its run and each account's starting bankroll.
+struct Bankrolls {
+    run_id: Option<i64>,
+    by_account: BTreeMap<String, Decimal>,
 }
 
 struct Env<'a> {
@@ -57,12 +65,13 @@ struct Env<'a> {
     now_ms: i64,
     now_hour: i64,
     last_hour: Option<i64>,
+    last_tick_ms: Option<i64>,
     pause: Duration,
     version: &'a str,
     scenarios: &'a [ScenarioLat],
     accounts: &'a [(String, String)],
-    /// P0 account -> starting bankroll (for an account's first mark).
-    bankrolls: &'a BTreeMap<String, Decimal>,
+    /// Starting bankrolls, for an account's first mark (see `bankroll_for`).
+    bankrolls: &'a Bankrolls,
     runs: &'a [RunPremises],
     changed: &'a [ChangedSpan],
 }
@@ -89,6 +98,7 @@ impl Analyzer {
             edge: Family::new(0),
             cursor,
             last_hour: None,
+            last_tick_ms: None,
         })
     }
 
@@ -171,18 +181,20 @@ impl Analyzer {
             .collect();
         let (changed, cursor) = self.changed().await?;
         let accounts = self.store.p0_accounts().await?;
-        let bankrolls: BTreeMap<String, Decimal> = self
-            .store
-            .paper_accounts_now()
-            .await?
-            .into_iter()
-            .map(|a| (a.account_id, a.bankroll))
-            .collect();
+        let now_accounts = self.store.paper_accounts_now().await?;
+        let bankrolls = Bankrolls {
+            run_id: now_accounts.first().map(|a| a.run_id),
+            by_account: now_accounts
+                .into_iter()
+                .map(|a| (a.account_id, a.bankroll))
+                .collect(),
+        };
         let env = Env {
             store: &self.store,
             now_ms,
             now_hour: hour_of(now_ms),
             last_hour: self.last_hour,
+            last_tick_ms: self.last_tick_ms,
             pause: self.pause,
             version: &self.version,
             scenarios: &self.scenarios,
@@ -211,6 +223,7 @@ impl Analyzer {
         report.results = results.len();
         self.cursor = cursor;
         self.last_hour = Some(env.now_hour);
+        self.last_tick_ms = Some(now_ms);
         Ok(report)
     }
 }
@@ -268,6 +281,17 @@ async fn sync<C: Card>(
     dirty.insert(env.now_hour);
     if let Some(last) = env.last_hour.filter(|l| *l < env.now_hour) {
         dirty.extend(hours_between(last, env.now_hour));
+    }
+    // paper marks and health rows have no updated_ms cursor, and a row stamped late in the hour
+    // that just closed may commit after its rebuild: rebuild that hour again while within the
+    // lookback of the hour, and on the first tick after one that ran within it
+    if C::EDGE_INPUTS
+        && (env.now_ms - env.now_hour < LOOKBACK_MS
+            || env
+                .last_tick_ms
+                .is_some_and(|t| t < env.now_hour + LOOKBACK_MS))
+    {
+        dirty.insert(env.now_hour - HOUR_MS);
     }
     let since_hour = fam.since_ms().map_or(env.now_hour, hour_of);
     dirty.retain(|h| *h >= since_hour && *h <= env.now_hour);
@@ -497,6 +521,12 @@ async fn edge_inputs<C: CellData>(
         .collect();
     let ids: Vec<String> = env.accounts.iter().map(|(a, _)| a.clone()).collect();
     let marks = env.store.marks_with_prev(&ids, from, to).await?;
+    // each run's `sim` premise version (it embeds the policies file's sha256)
+    let sim: BTreeMap<i64, &str> = env
+        .runs
+        .iter()
+        .filter_map(|r| r.versions.get("sim").map(|v| (r.span.run_id, v.as_str())))
+        .collect();
     let mut deltas = Deltas::new();
     let mut prev: Option<&MarkPoint> = None;
     for m in &marks {
@@ -508,22 +538,50 @@ async fn edge_inputs<C: CellData>(
         let Some(s) = scenario.get(m.account_id.as_str()) else {
             continue;
         };
+        let fresh = || bankroll_for(env, &sim, m.run_id, &m.account_id).map(|b| m.equity - b);
         let delta = match p {
-            Some(p) if fam.runs.contains_key(&p.run_id) => m.equity - p.equity,
-            Some(_) => continue,
+            Some(p) if fam.runs.contains_key(&p.run_id) => Some(m.equity - p.equity),
+            // the previous mark is another premise key's: if that run traded other policies
+            // (another `sim` version), every account started fresh at this run (scanner
+            // `restore_trader`), so this first mark counts against the bankroll; if the policies
+            // were the same, the account was restored and the change straddles two keys: skipped
+            Some(p) => match (sim.get(&p.run_id), sim.get(&m.run_id)) {
+                (Some(a), Some(b)) if a != b => fresh(),
+                _ => None,
+            },
             // no mark before this one, ever: the account began inside the window, so its first
             // delta is against its starting bankroll (never the absolute equity)
-            None => match env.bankrolls.get(m.account_id.as_str()) {
-                Some(b) => m.equity - *b,
-                None => continue,
-            },
+            None => fresh(),
         };
+        let Some(delta) = delta else { continue };
         deltas
             .entry(hour_of(m.t_ms))
             .or_default()
             .push((s.to_string(), delta));
     }
     Ok((lat, deltas))
+}
+
+/// The starting bankroll of `account_id` in run `run_id`. A run's paper_accounts rows come from
+/// its policies file (scanner `account_rows`), and the `sim` premise version embeds that file's
+/// sha256, so two runs with the same `sim` version have the same bankroll per account id. The
+/// store gives the newest live run's rows, so this is known exactly when `run_id` is that run or
+/// has its `sim` version; otherwise None (the delta is skipped, never guessed).
+fn bankroll_for(
+    env: &Env<'_>,
+    sim: &BTreeMap<i64, &str>,
+    run_id: i64,
+    account_id: &str,
+) -> Option<Decimal> {
+    let newest = env.bankrolls.run_id?;
+    let same = run_id == newest
+        || sim
+            .get(&run_id)
+            .is_some_and(|v| sim.get(&newest) == Some(v));
+    if !same {
+        return None;
+    }
+    env.bankrolls.by_account.get(account_id).copied()
 }
 
 async fn build_hours<C: CellData>(

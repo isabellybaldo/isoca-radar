@@ -126,60 +126,153 @@ pub fn km_totals<I>(entries: I, events: i64, censored: i64, grid: &[i64]) -> KmS
 where
     I: Iterator<Item = (i64, (i64, i64))>,
 {
-    debug_assert!(
-        grid.windows(2).all(|w| w[0] <= w[1]),
-        "km: grid must be ascending, got {grid:?}"
-    );
-    let mut at_risk = events + censored;
-    let mut s = FP_ONE;
-    let mut at = Vec::with_capacity(grid.len());
-    let mut gi = 0usize;
-    let mut median = None;
+    let mut acc = KmAcc::new(grid, events, censored);
     for (t, (e, c)) in entries {
+        acc.step(t, e, c);
+        if acc.settled() {
+            break;
+        }
+    }
+    acc.finish()
+}
+
+/// Kaplan–Meier of two sides and of both merged, in one walk over the merged stream (G2 needs each
+/// side at `side_grid`, G3 both sides together at `merged_grid`): the same three summaries as
+/// `km` on each side and `km` on `merge_sorted` of both (Review Focus 5: one pass per window).
+pub fn km_sides_and_merged(
+    yes: &DurMap,
+    no: &DurMap,
+    side_grid: &[i64],
+    merged_grid: &[i64],
+) -> [KmSummary; 3] {
+    let (ey, cy) = dur_total(yes);
+    let (en, cn) = dur_total(no);
+    let mut ay = KmAcc::new(side_grid, ey, cy);
+    let mut an = KmAcc::new(side_grid, en, cn);
+    let mut am = KmAcc::new(merged_grid, ey + en, cy + cn);
+    let mut iy = yes.iter().peekable();
+    let mut in_ = no.iter().peekable();
+    loop {
+        let ky = iy.peek().map(|(k, _)| **k);
+        let kn = in_.peek().map(|(k, _)| **k);
+        let t = match (ky, kn) {
+            (None, None) => break,
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+        };
+        let vy = if ky == Some(t) {
+            iy.next().map(|(_, v)| *v)
+        } else {
+            None
+        };
+        let vn = if kn == Some(t) {
+            in_.next().map(|(_, v)| *v)
+        } else {
+            None
+        };
+        if let Some((e, c)) = vy
+            && !ay.settled()
+        {
+            ay.step(t, e, c);
+        }
+        if let Some((e, c)) = vn
+            && !an.settled()
+        {
+            an.step(t, e, c);
+        }
+        if !am.settled() {
+            let (y, n) = (vy.unwrap_or((0, 0)), vn.unwrap_or((0, 0)));
+            am.step(t, y.0 + n.0, y.1 + n.1);
+        }
+        if ay.settled() && an.settled() && am.settled() {
+            break;
+        }
+    }
+    [ay.finish(), an.finish(), am.finish()]
+}
+
+/// One Kaplan–Meier walk in progress (the body of `km`), so several can share one stream.
+struct KmAcc<'g> {
+    grid: &'g [i64],
+    at_risk: i64,
+    s: i128,
+    at: Vec<i128>,
+    gi: usize,
+    median: Option<i64>,
+    events: i64,
+    censored: i64,
+}
+
+impl<'g> KmAcc<'g> {
+    fn new(grid: &'g [i64], events: i64, censored: i64) -> Self {
+        debug_assert!(
+            grid.windows(2).all(|w| w[0] <= w[1]),
+            "km: grid must be ascending, got {grid:?}"
+        );
+        Self {
+            grid,
+            at_risk: events + censored,
+            s: FP_ONE,
+            at: Vec::with_capacity(grid.len()),
+            gi: 0,
+            median: None,
+            events,
+            censored,
+        }
+    }
+
+    /// Every grid point is filled and the median is found: the rest of the walk cannot change
+    /// the summary (the totals came from the first pass), so a caller may stop.
+    fn settled(&self) -> bool {
+        self.gi >= self.grid.len() && self.median.is_some()
+    }
+
+    fn step(&mut self, t: i64, e: i64, c: i64) {
         debug_assert!(
             e >= 0 && c >= 0,
             "km: negative counts (e={e}, c={c}) at t={t}"
         );
         debug_assert!(
-            e <= at_risk,
-            "km: events ({e}) exceed at-risk ({at_risk}) at t={t}"
+            e <= self.at_risk,
+            "km: events ({e}) exceed at-risk ({}) at t={t}",
+            self.at_risk
         );
-        while gi < grid.len() && grid.get(gi).is_some_and(|g| *g < t) {
-            at.push(s);
-            gi += 1;
+        while self.grid.get(self.gi).is_some_and(|g| *g < t) {
+            self.at.push(self.s);
+            self.gi += 1;
         }
-        if e > 0 && at_risk > 0 {
-            let factor = i128::from(at_risk - e);
-            let product = s.checked_mul(factor);
+        if e > 0 && self.at_risk > 0 {
+            let factor = i128::from(self.at_risk - e);
+            let product = self.s.checked_mul(factor);
             debug_assert!(
                 product.is_some(),
-                "km: i128 overflow computing the survival product at t={t} (s={s}, factor={factor})"
+                "km: i128 overflow computing the survival product at t={t} (s={}, factor={factor})",
+                self.s
             );
             // Release fallback only: saturate toward the largest representable value rather
             // than wrapping to 0. Unreachable for realistic episode counts (s ≤ FP_ONE ≈ 1e28,
             // factor bounded by the at-risk count), so no test exercises this arm.
-            s = product.unwrap_or(i128::MAX) / i128::from(at_risk);
-            s = s.max(0); // defence in depth: a corrupted window sum must never yield a negative Ŝ
-            if median.is_none() && s.saturating_mul(2) <= FP_ONE {
-                median = Some(t);
+            self.s = product.unwrap_or(i128::MAX) / i128::from(self.at_risk);
+            self.s = self.s.max(0); // defence in depth: a corrupted window sum must never yield a negative Ŝ
+            if self.median.is_none() && self.s.saturating_mul(2) <= FP_ONE {
+                self.median = Some(t);
             }
         }
-        at_risk -= e + c;
-        if gi >= grid.len() && median.is_some() {
-            // every grid point is filled and the median is found: the rest of the walk cannot
-            // change the summary (events/censored came from the first pass), so stop here
-            break;
+        self.at_risk -= e + c;
+    }
+
+    fn finish(mut self) -> KmSummary {
+        while self.gi < self.grid.len() {
+            self.at.push(self.s);
+            self.gi += 1;
         }
-    }
-    while gi < grid.len() {
-        at.push(s);
-        gi += 1;
-    }
-    KmSummary {
-        at,
-        median,
-        events,
-        censored,
+        KmSummary {
+            at: self.at,
+            median: self.median,
+            events: self.events,
+            censored: self.censored,
+        }
     }
 }
 
@@ -303,6 +396,72 @@ pub fn nearest_rank<I: Iterator<Item = (i64, i64)>>(entries: I, n: i64, pct: i64
         }
     }
     None
+}
+
+/// [`nearest_rank`] at two percentiles and [`bins`], in one walk over `m` (`n` = its total).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RanksAndBins {
+    /// `nearest_rank(m, n, pcts[i])`.
+    pub ranks: [Option<i64>; 2],
+    /// `bins(m, width, top)` (None when `width <= 0`).
+    pub bins: Option<(i64, Vec<(i64, i64)>)>,
+}
+
+/// The same integers as `nearest_rank` (twice) and `bins`, in a single walk (Review Focus 5).
+pub fn ranks_and_bins(m: &CountMap, n: i64, pcts: [i64; 2], width: i64, top: i64) -> RanksAndBins {
+    let rank = |pct: i64| ((pct * n + 99) / 100).max(1);
+    let (t0, t1) = (rank(pcts[0]), rank(pcts[1]));
+    let (mut r0, mut r1) = (None, None);
+    let mut bin_part = bins(&CountMap::new(), width, top);
+    let mut seen = 0i64;
+    // n <= 0 means no ranks (nearest_rank's rule): start with both "found"
+    let mut pending = n > 0;
+    match bin_part.as_mut() {
+        Some((below, out)) => {
+            let last = out.len().saturating_sub(1);
+            for (v, c) in m {
+                if pending {
+                    seen += c;
+                    if r0.is_none() && seen >= t0 {
+                        r0 = Some(*v);
+                    }
+                    if r1.is_none() && seen >= t1 {
+                        r1 = Some(*v);
+                    }
+                    pending = r0.is_none() || r1.is_none();
+                }
+                if *v < 0 {
+                    *below += c;
+                } else {
+                    let i = usize::try_from((*v).min(top) / width)
+                        .unwrap_or(0)
+                        .min(last);
+                    if let Some(slot) = out.get_mut(i) {
+                        slot.1 += c;
+                    }
+                }
+            }
+        }
+        None => {
+            for (v, c) in m {
+                if !pending {
+                    break;
+                }
+                seen += c;
+                if r0.is_none() && seen >= t0 {
+                    r0 = Some(*v);
+                }
+                if r1.is_none() && seen >= t1 {
+                    r1 = Some(*v);
+                }
+                pending = r0.is_none() || r1.is_none();
+            }
+        }
+    }
+    RanksAndBins {
+        ranks: [r0, r1],
+        bins: bin_part,
+    }
 }
 
 /// Fixed-width bins: (count below 0, [(lo, count)] for lo = 0, width, …, top − width, then the

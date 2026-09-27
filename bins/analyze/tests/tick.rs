@@ -917,3 +917,192 @@ async fn long_windows_re_render_at_most_hourly_and_keep_their_own_computed_ms() 
     rw.close().await;
     db.drop(owner).await;
 }
+
+/// `premises` with a chosen `sim` version (it embeds the policies sha256) and optionally no host.
+fn premises_sim(run_id: i64, sim: &str, host: bool) -> Vec<RunPremiseRow> {
+    premises(run_id, "1+aa")
+        .into_iter()
+        .filter(|p| host || p.area != "host")
+        .map(|mut p| {
+            if p.area == "sim" {
+                p.version = sim.to_string();
+            }
+            p
+        })
+        .collect()
+}
+
+fn p0(run_id: i64, bankroll: rust_decimal::Decimal) -> PaperAccountRow {
+    PaperAccountRow {
+        run_id,
+        account_id: "p0-sp-idle".into(),
+        policy: "P0-converter".into(),
+        scenario: "sp-idle".into(),
+        fee_bips: dec!(0),
+        bankroll,
+        per_trade: dec!(100),
+        policies_sha256: "x".into(),
+    }
+}
+
+async fn paper(owner: &Store, accounts: Vec<PaperAccountRow>, marks: Vec<PaperMarkRow>) {
+    owner
+        .write_batch(&Batch {
+            paper_accounts: accounts,
+            paper_marks: marks,
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+}
+
+const CAPTURED: &str = "captured at sp-idle (145 ms)";
+
+#[tokio::test]
+async fn a_mark_that_lands_just_after_its_hour_closed_still_counts() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    // no episodes: the episode cursor's own lookback must not be what re-dirties the hour
+    paper(
+        &owner,
+        vec![p0(r, dec!(1000))],
+        vec![mark(r, T0 - H + 10 * M, dec!(1001))],
+    )
+    .await;
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0 + 30_000).await.unwrap(); // 30 s after the hour: its last rebuild
+    assert_eq!(cell(&body(&rw, "24h", "EDGE").await, CAPTURED, "ours"), "1");
+    // stamped 1 s before the hour closed, committed after that rebuild
+    paper(&owner, vec![], vec![mark(r, T0 - 1_000, dec!(1004))]).await;
+    a.tick(T0 + 15 * M).await.unwrap();
+    assert_eq!(
+        cell(&body(&rw, "24h", "EDGE").await, CAPTURED, "ours"),
+        "4",
+        "+1, then the late +3"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_newer_run_with_other_policies_never_lends_its_bankroll() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run(&owner, T0 - 5 * H).await;
+    owner
+        .insert_run_premises(&premises_sim(r1, "1+bb", true))
+        .await
+        .unwrap();
+    owner.end_run(r1, T0 - 2 * H, "shutdown").await.unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r1,
+            "no_basket",
+            T0 - 4 * H,
+            Some(T0 - 4 * H + 1_000),
+        )],
+    )
+    .await;
+    paper(
+        &owner,
+        vec![p0(r1, dec!(1000))],
+        vec![
+            mark(r1, T0 - 4 * H + 10 * M, dec!(1001)),
+            mark(r1, T0 - 4 * H + 20 * M, dec!(1003)),
+        ],
+    )
+    .await;
+    // a newer run under other policies, no host row yet: Edge capture's key is still run 1's
+    let r2 = run(&owner, T0 - H).await;
+    owner
+        .insert_run_premises(&premises_sim(r2, "1+cc", false))
+        .await
+        .unwrap();
+    paper(&owner, vec![p0(r2, dec!(5000))], vec![]).await;
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0)
+        .await
+        .unwrap();
+    let e = body(&rw, "all", "EDGE").await;
+    assert!(e["premise_key"].as_str().unwrap().contains("sim=1+bb"));
+    // run 1's bankroll is not the newest run's (5000): its first mark is skipped, never guessed
+    assert_eq!(cell(&e, CAPTURED, "ours"), "2");
+    rw.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn a_fresh_start_under_new_policies_counts_from_the_bankroll() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run(&owner, T0 - 6 * H).await;
+    owner
+        .insert_run_premises(&premises_sim(r1, "1+bb", true))
+        .await
+        .unwrap();
+    owner.end_run(r1, T0 - 4 * H, "shutdown").await.unwrap();
+    paper(
+        &owner,
+        vec![p0(r1, dec!(1000))],
+        vec![mark(r1, T0 - 5 * H, dec!(1200))],
+    )
+    .await;
+    let r2 = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises_sim(r2, "1+cc", true))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r2,
+            "no_basket",
+            T0 - 2 * H,
+            Some(T0 - 2 * H + 1_000),
+        )],
+    )
+    .await;
+    // new policies: every account starts fresh at the bankroll (scanner restore_trader)
+    paper(
+        &owner,
+        vec![p0(r2, dec!(1000))],
+        vec![
+            mark(r2, T0 - 2 * H, dec!(1000.5)),
+            mark(r2, T0 - 2 * H + 10 * M, dec!(1001.5)),
+        ],
+    )
+    .await;
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0)
+        .await
+        .unwrap();
+    let e = body(&rw, "all", "EDGE").await;
+    assert!(e["premise_key"].as_str().unwrap().contains("sim=1+cc"));
+    assert_eq!(
+        cell(&e, CAPTURED, "ours"),
+        "1.5",
+        "+0.5 from the bankroll (not −199.5 from run 1's mark), then +1"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}

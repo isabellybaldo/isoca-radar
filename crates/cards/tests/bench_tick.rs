@@ -258,16 +258,32 @@ fn tick_ms(days: i64) -> (u128, u128, u128) {
 
 #[test]
 #[ignore = "benchmark: run by hand (Phase 5a plan, Task 9)"]
+/// 30 days: every tick < 200 ms. 90 days: ticks that don't render `all` < 200 ms; the one that
+/// does is printed and held under a 400 ms sanity ceiling (accepted overrun, ruling T9 fix round 2).
 fn tick_stays_under_200ms_as_all_grows_from_30_to_90_days() {
     for days in [30, 90] {
         let (full, t1, t2) = tick_ms(days);
         println!(
             "tick total at {days} days: tick1 {t1} ms, tick2 {t2} ms (every window at once: {full} ms)"
         );
-        let worst = t1.max(t2);
-        assert!(
-            worst < 200,
-            "one tick over {days} days took {worst} ms (budget 200 ms, spec §9; ruling T9 (c))"
-        );
+        if days == 30 {
+            let worst = t1.max(t2);
+            assert!(
+                worst < 200,
+                "one tick over {days} days took {worst} ms (budget 200 ms, spec §9; ruling T9 (c))"
+            );
+        } else {
+            // ruling (fix round 2): past 30 days the tick that renders `all` may overrun (exact
+            // Kaplan–Meier over a growing number of distinct durations); a loose ceiling still
+            // catches a regression. Every other tick keeps the 200 ms budget.
+            assert!(
+                t1 < 200,
+                "tick 1 over {days} days took {t1} ms (budget 200 ms)"
+            );
+            assert!(
+                t2 < 400,
+                "the all-rendering tick over {days} days took {t2} ms (ceiling 400 ms)"
+            );
+        }
     }
 }

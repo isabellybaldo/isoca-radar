@@ -6,8 +6,8 @@ use crate::body::{
 };
 use crate::cells::{DurCell, EDGE_MINUTES_MS, G1Cell, G4Cell, LONG_MS, MERGE_GAPS_MS, Side};
 use crate::stats::{
-    CountMap, KmSummary, bins, dec, emp_and_median, fp_to_dec, km, km_totals, median_of,
-    merge_sorted, pct, secs, total,
+    CountMap, KmSummary, bins, dec, emp_and_median, fp_to_dec, km_sides_and_merged, median_of,
+    merge_sorted, pct, ranks_and_bins, secs, total,
 };
 use rust_decimal::Decimal;
 
@@ -173,25 +173,24 @@ pub struct SideStats {
 
 impl DurStats {
     pub fn of(c: &DurCell) -> Self {
-        let side = |s: Side| {
+        let [ky, kn, merged] =
+            km_sides_and_merged(&c.ours.yes, &c.ours.no, &GRID_MS, &[LONG_MS - 1]);
+        let side = |s: Side, km: KmSummary| {
             let their = c.their.get(s);
             let n_their = total(their);
             let (emp, emp_med) = emp_and_median(their, n_their, &GRID_MS);
             SideStats {
-                km: km(c.ours.get(s).iter().map(|(t, v)| (*t, *v)), &GRID_MS),
+                km,
                 n_their,
                 emp,
                 emp_med,
             }
         };
-        let (yes, no) = (side(Side::Yes), side(Side::No));
-        let merged = km_totals(
-            merge_sorted(&c.ours.yes, &c.ours.no, |a, b| (a.0 + b.0, a.1 + b.1)),
-            yes.km.events + no.km.events,
-            yes.km.censored + no.km.censored,
-            &[LONG_MS - 1],
-        );
-        Self { yes, no, merged }
+        Self {
+            yes: side(Side::Yes, ky),
+            no: side(Side::No, kn),
+            merged,
+        }
     }
 }
 
@@ -446,42 +445,6 @@ pub fn g4(c: &G4Cell, ctx: &BodyCtx<'_>) -> CardBody {
     make(g4_parts(c), ctx)
 }
 
-/// (median, p90, count below the first bin, bins)
-type RanksAndBins = (Option<i64>, Option<i64>, i64, Vec<(i64, i64)>);
-
-/// One walk over a side's net-edge counts (`n` = their total): the nearest-rank median and p90 and
-/// the 25 bp bins, the same integers as `nearest_rank(…, 50)`, `nearest_rank(…, 90)` and `binned`
-/// (Review Focus 5: one tick < 200 ms).
-fn ranks_and_bins(m: &CountMap, n: i64) -> RanksAndBins {
-    let (below, mut out) = binned(&CountMap::new(), BIN_CBPS, TOP_CBPS);
-    let rank = |pct: i64| ((pct * n + 99) / 100).max(1);
-    let (r50, r90) = (rank(50), rank(90));
-    let (mut q50, mut q90) = (None, None);
-    let mut below = below;
-    let mut seen = 0i64;
-    let last = out.len().saturating_sub(1);
-    for (v, c) in m {
-        seen += c;
-        if n > 0 && q50.is_none() && seen >= r50 {
-            q50 = Some(*v);
-        }
-        if n > 0 && q90.is_none() && seen >= r90 {
-            q90 = Some(*v);
-        }
-        if *v < 0 {
-            below += c;
-            continue;
-        }
-        let i = usize::try_from((*v).min(TOP_CBPS) / BIN_CBPS)
-            .unwrap_or(0)
-            .min(last);
-        if let Some(slot) = out.get_mut(i) {
-            slot.1 += c;
-        }
-    }
-    (q50, q90, below, out)
-}
-
 fn g4_parts(c: &G4Cell) -> Parts {
     let mut thin = Vec::new();
     let mut columns = vec![
@@ -510,7 +473,9 @@ fn g4_parts(c: &G4Cell) -> Parts {
                 "{name} side: n = {n} < {THIN_MEDIAN_N}; the median and p90 are not reliable"
             ));
         }
-        let (q50, q90, below, net_bins) = ranks_and_bins(net, n);
+        let rb = ranks_and_bins(net, n, [50, 90], BIN_CBPS, TOP_CBPS);
+        let [q50, q90] = rb.ranks;
+        let (below, net_bins) = rb.bins.unwrap_or_default();
         let q = |p: i64| if p == 50 { q50 } else { q90 }.map(bps);
         columns.push(row(
             &format!("{name} median net edge"),
