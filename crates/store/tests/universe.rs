@@ -11,6 +11,7 @@ fn event(id: &str) -> EventRow {
         neg_risk_market_id: Some("0xabc".into()),
         augmented: false,
         n_legs: 1,
+        tags: None,
     }
 }
 
@@ -141,5 +142,44 @@ async fn duplicate_keys_in_one_scan_keep_the_last() {
         .await
         .unwrap();
     assert_eq!(store.mark_gone(200).await.unwrap(), 0, "e1 was seen at 200");
+    db.drop(store).await;
+}
+
+#[tokio::test]
+async fn event_tags_are_written_once_and_frozen() {
+    let Some((store, db)) = common::fresh().await else {
+        return;
+    };
+    let mut e = event("ev1");
+    e.tags = Some(vec!["politics".into(), "us-election".into()]);
+    store
+        .upsert_universe(&[e.clone()], &[], 1_000)
+        .await
+        .unwrap();
+    e.tags = Some(vec!["sports".into()]); // a later refresh with other tags changes nothing
+    store
+        .upsert_universe(&[e.clone()], &[], 2_000)
+        .await
+        .unwrap();
+    let mut f = event("ev2"); // first seen without tags, gains them later
+    store
+        .upsert_universe(&[f.clone()], &[], 1_000)
+        .await
+        .unwrap();
+    f.tags = Some(vec!["crypto".into()]);
+    store.upsert_universe(&[f], &[], 2_000).await.unwrap();
+    assert_eq!(
+        store
+            .event_tags(&["ev1".into(), "ev2".into()])
+            .await
+            .unwrap(),
+        vec![
+            (
+                "ev1".to_string(),
+                Some(vec!["politics".to_string(), "us-election".to_string()])
+            ),
+            ("ev2".to_string(), Some(vec!["crypto".to_string()])),
+        ]
+    );
     db.drop(store).await;
 }

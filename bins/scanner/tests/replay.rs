@@ -64,6 +64,7 @@ fn universe() -> Universe {
             neg_risk_market_id: None,
             augmented: false,
             legs,
+            tags: None,
         }],
         canary: vec![],
     }

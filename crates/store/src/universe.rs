@@ -102,7 +102,7 @@ impl Store {
         let events = dedupe_last_events(events);
         for chunk in events.chunks(CHUNK) {
             let mut qb = QueryBuilder::<Postgres>::new(
-                "INSERT INTO events (event_id, slug, title, neg_risk_market_id, augmented, n_legs, first_seen_ms, last_seen_ms) ",
+                "INSERT INTO events (event_id, slug, title, neg_risk_market_id, augmented, n_legs, tags, first_seen_ms, last_seen_ms) ",
             );
             qb.push_values(chunk, |mut b, e| {
                 b.push_bind(clean(&e.event_id))
@@ -111,13 +111,19 @@ impl Store {
                     .push_bind(clean_opt(&e.neg_risk_market_id))
                     .push_bind(e.augmented)
                     .push_bind(e.n_legs)
+                    .push_bind(
+                        e.tags
+                            .as_ref()
+                            .map(|t| t.iter().map(|s| clean(s)).collect::<Vec<_>>()),
+                    )
                     .push_bind(seen_ms)
                     .push_bind(seen_ms);
             });
             qb.push(
                 " ON CONFLICT (event_id) DO UPDATE SET slug = EXCLUDED.slug, title = EXCLUDED.title, \
                  neg_risk_market_id = EXCLUDED.neg_risk_market_id, augmented = EXCLUDED.augmented, \
-                 n_legs = EXCLUDED.n_legs, last_seen_ms = EXCLUDED.last_seen_ms, gone_ms = NULL",
+                 n_legs = EXCLUDED.n_legs, last_seen_ms = EXCLUDED.last_seen_ms, gone_ms = NULL, \
+                 tags = COALESCE(events.tags, EXCLUDED.tags)",
             );
             qb.build().execute(&mut *tx).await?;
         }
@@ -185,6 +191,19 @@ impl Store {
         )
         .bind(event_id)
         .fetch_one(self.pool())
+        .await?)
+    }
+
+    /// (event_id, tags) for the given events, ordered by event_id.
+    pub async fn event_tags(
+        &self,
+        event_ids: &[String],
+    ) -> Result<Vec<(String, Option<Vec<String>>)>, StoreError> {
+        Ok(sqlx::query_as(
+            "SELECT event_id, tags FROM events WHERE event_id = ANY($1) ORDER BY event_id",
+        )
+        .bind(event_ids)
+        .fetch_all(self.pool())
         .await?)
     }
 }

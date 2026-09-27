@@ -423,6 +423,7 @@ mod tests {
             title: None,
             neg_risk_market_id: None,
             augmented: false,
+            tags: None,
             legs: (0..2)
                 .map(|i| LegMeta {
                     market_id: format!("m{i}"),

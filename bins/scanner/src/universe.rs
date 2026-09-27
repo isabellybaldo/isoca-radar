@@ -87,6 +87,9 @@ pub struct GroupMeta {
     pub neg_risk_market_id: Option<String>,
     pub augmented: bool,
     pub legs: Vec<LegMeta>,
+    /// Lower-cased Gamma tag slugs (spec 5d §3). `#[serde(default)]` keeps old `universe_snapshots` readable.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 impl GroupMeta {
@@ -183,6 +186,7 @@ impl Universe {
                     neg_risk_market_id: e.neg_risk_market_id.clone(),
                     augmented,
                     legs,
+                    tags: Some(e.tag_slugs()).filter(|t| !t.is_empty()),
                 });
             } else {
                 for m in e.markets() {
@@ -232,6 +236,7 @@ impl Universe {
                 neg_risk_market_id: g.neg_risk_market_id.clone(),
                 augmented: g.augmented,
                 n_legs: i32::try_from(g.legs.len()).unwrap_or(i32::MAX),
+                tags: g.tags.clone(),
             });
             for l in &g.legs {
                 legs.push(LegRow {
@@ -386,5 +391,32 @@ mod tests {
         assert_eq!(g.legs[0].book.server_ts_ms(), 7);
         assert!(g.legs[1].book.asks_best_first().is_empty());
         assert_eq!(g.legs[2].status, LegStatus::ClosedNo);
+    }
+
+    #[test]
+    fn store_rows_carry_the_event_tags_and_old_snapshots_still_load() {
+        let mut u = Universe {
+            taken_ms: 0,
+            groups: Vec::new(),
+            canary: Vec::new(),
+        };
+        u.groups.push(GroupMeta {
+            event_id: "e1".into(),
+            slug: None,
+            title: None,
+            neg_risk_market_id: None,
+            augmented: false,
+            legs: vec![],
+            tags: None,
+        });
+        // a snapshot written before this field existed: drop "tags" from the JSON and reload it
+        let mut v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&u).unwrap()).unwrap();
+        v["groups"][0].as_object_mut().unwrap().remove("tags");
+        let old = Universe::from_json(&v.to_string()).unwrap();
+        assert_eq!(old.groups[0].tags, None);
+        u.groups[0].tags = Some(vec!["politics".into()]);
+        let (events, _) = u.store_rows();
+        assert_eq!(events[0].tags, Some(vec!["politics".to_string()]));
     }
 }
