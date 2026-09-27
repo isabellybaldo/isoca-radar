@@ -10,6 +10,7 @@ export function troubles(h: HealthNow): string[] {
   if (h.lag_p99_ms !== null && h.lag_p99_ms > 5000) t.push('lag p99 over 5 s');
   if (h.age_ms > 180_000) t.push('health row older than 3 min');
   if (h.capture_paused) t.push('capture paused');
+  // 250 mirrors CLOCK_SKEW_MS in bins/scanner/src/clock.rs.
   if (h.clock_offset_ms !== null && Math.abs(h.clock_offset_ms) > 250) t.push(`clock off by ${h.clock_offset_ms} ms`);
   return t;
 }
