@@ -12,7 +12,7 @@ import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
 import { shortId } from '../lib/labels';
-import { formatDecimal, formatMoney, formatMoneyCents, isZero } from '../lib/money';
+import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, isZero } from '../lib/money';
 import { fmtUtcDateTime, fmtUtcHm } from '../lib/time';
 
 export const PAPER_QUIP = "The naive strategy is doing great. Until 'Other' wins.";
@@ -129,7 +129,11 @@ function AccountsChart({ accounts }: { accounts: PaperAccount[] }) {
             Math.min(...loaded.map(({ e }) => e.from_ms)),
             Math.max(...loaded.map(({ e }) => e.to_ms)),
           );
-          const ends = all.filter(({ e }) => e.points.length > 0);
+          // Ordered by final equity, highest first, so the legend pairs top-to-bottom with where the
+          // lines end on the right edge of the chart (spec §4.2), not with the accounts' own order.
+          const ends = all
+            .filter(({ e }) => e.points.length > 0)
+            .sort((x, y) => compareDecimal(y.e.points[y.e.points.length - 1].equity, x.e.points[x.e.points.length - 1].equity));
           return (
             <>
               <div className="eqwrap">

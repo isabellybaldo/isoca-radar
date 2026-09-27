@@ -91,6 +91,29 @@ describe('Paper', () => {
     expect(urls.some((u) => u.includes('/api/paper/ledger?account=P0-converter%2Fsp-idle'))).toBe(true);
   });
 
+  it('orders the equity-now legend by final equity, highest first, regardless of the api order', async () => {
+    mockApi({
+      '/api/paper/accounts': {
+        items: [
+          accountFixture({ account_id: 'P3-naive/sp-idle', policy: 'P3-naive', equity: '713.4' }),
+          accountFixture({ account_id: 'P0-converter/sp-idle', policy: 'P0-converter', equity: '1002.56' }),
+        ],
+      },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper');
+    const legend = await screen.findByRole('list', { name: 'equity now' });
+    const items = within(legend)
+      .getAllByRole('listitem')
+      .map((li) => li.textContent);
+    expect(items[0]).toContain('P0 converter');
+    expect(items[0]).toContain('$1,002.56');
+    expect(items[1]).toContain('P3 naive');
+    expect(items[1]).toContain('$713.40');
+  });
+
   it('labels policies and finds extremes without printing floats', () => {
     expect(policyLabel({ policy: 'P0-converter', fee_bips: '0' })).toBe('P0 converter');
     expect(policyLabel({ policy: 'P0-converter', fee_bips: '10' })).toBe('P0 converter (fee 10 bp)');
