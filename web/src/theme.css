@@ -160,9 +160,14 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
   body { padding: 0; }
   .app { border: 0; box-shadow: none; }
   .body { padding: 8px; }
-  .top { padding: 8px; gap: 8px; flex-wrap: nowrap; overflow-x: auto; }
+  .top { padding: 8px; gap: 8px; flex-wrap: nowrap; overflow: visible; }
+  .logo, .live, .toggle { flex: none; }
   .logo { font-size: 9px; white-space: nowrap; }
-  .nav { margin-left: 0; flex-wrap: nowrap; gap: 4px; }
+  .logo-word {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  .nav { margin-left: 0; flex-wrap: nowrap; gap: 4px; overflow-x: auto; min-width: 0; flex: 1; }
   .nav a { font-size: 7px; padding: 4px; white-space: nowrap; }
   .hearts { font-size: 20px; }
   .box { padding: 8px; }
