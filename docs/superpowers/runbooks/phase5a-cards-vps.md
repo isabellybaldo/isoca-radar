@@ -122,8 +122,8 @@ powershell -ExecutionPolicy Bypass -File scripts/disk-budget.ps1
 git status --short --untracked-files=no
 export GIT_SHA="$(git rev-parse --short HEAD)" && echo "$GIT_SHA"
 docker compose build --build-arg GIT_SHA="$GIT_SHA" migrate                        # cute-trading/rust:dev (scanner + api + analyze)
-docker compose -f compose.yml -f compose.web.yml --profile web build web          # cute-trading/web:dev
-docker run --rm --entrypoint /usr/local/bin/analyze cute-trading/rust:dev 2>&1 | head -1
+docker compose --env-file .env.example -f compose.yml -f compose.web.yml --profile web build web   # cute-trading/web:dev (placeholders: the PC has no OAuth secrets and the build needs none)
+MSYS_NO_PATHCONV=1 docker run --rm --entrypoint /usr/local/bin/analyze cute-trading/rust:dev 2>&1 | head -1   # stops Git Bash rewriting the path
 ```
 The last line proves that `analyze` is in the image. With no `DATABASE_URL` it exits at once with
 `analyze: DATABASE_URL is not set (the analyze_rw URL)`. Write `GIT_SHA` in Results.
