@@ -41,6 +41,7 @@ describe('Papers', () => {
     expect(screen.getByText('coming later: needs the on-chain dataset and somewhere to put it that is not your laptop')).toBeInTheDocument();
     expect(screen.getByText('DROPPED')).toBeInTheDocument();
     expect(screen.getByText('not replicated (2)').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByRole('button', { name: 'Help: What is not replicated, and why?' })).toBeInTheDocument();
     expect(screen.getByText(/308,416,666 messages/)).toBeInTheDocument();
     expect(screen.getByText('updated 5 min ago')).not.toHaveClass('stale');
     } finally {

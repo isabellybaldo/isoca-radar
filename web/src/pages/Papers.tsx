@@ -22,8 +22,7 @@ function PaperSection({ paper, cards, stale }: { paper: PaperEntry; cards: ApiSt
   const tag =
     paper.status === 'live' ? <Tag tone="no">LIVE</Tag> : paper.status === 'coming_later' ? <Tag>COMING LATER</Tag> : <Tag tone="flag">DROPPED</Tag>;
   return (
-    <Box title={paper.cite} help={paper.status === 'live' ? 'gebele' : 'otherPapers'} className="paper">
-      {tag}
+    <Box title={paper.cite} help={paper.status === 'live' ? 'gebele' : 'otherPapers'} className="paper" actions={tag}>
       {paper.status !== 'live' ? (
         <p className="quip">{paper.note ?? ''}</p>
       ) : (
@@ -69,13 +68,15 @@ export function Papers() {
             {m.papers.map((p) => (
               <PaperSection key={p.id} paper={p} cards={cards} stale={upd.stale} />
             ))}
-            <Fold id="papers:notrep" label={`not replicated (${m.not_replicated.length})`}>
-              <ul className="plain">
-                {m.not_replicated.map((n) => (
-                  <li key={n.item}><b>{n.item}.</b> {n.why}</li>
-                ))}
-              </ul>
-            </Fold>
+            <Box help="notReplicated">
+              <Fold id="papers:notrep" label={`not replicated (${m.not_replicated.length})`}>
+                <ul className="plain">
+                  {m.not_replicated.map((n) => (
+                    <li key={n.item}><b>{n.item}.</b> {n.why}</li>
+                  ))}
+                </ul>
+              </Fold>
+            </Box>
           </>
         )}
       </Loadable>
