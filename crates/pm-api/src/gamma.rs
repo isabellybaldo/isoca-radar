@@ -1,5 +1,6 @@
 //! Gamma (market discovery): wire types and normalization (spec §3, §7).
 use crate::ApiError;
+use crate::retry::with_retry;
 use crate::routes::{GAMMA_BASE, GAMMA_EVENTS_KEYSET, GAMMA_MARKETS};
 use crate::wire::{decimal, string_array, string_or_number};
 use arb_core::detect::LegStatus;
@@ -9,6 +10,25 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// At most 4 attempts per page (the first try plus 3 retries). Public so a caller that wants to
+/// log a retry (via [`GammaClient::with_retry_sink`]) can render "k/N" without duplicating it.
+pub const PAGE_ATTEMPTS: usize = 4;
+/// Backoff between attempts: 2 s, 5 s, then 10 s.
+const PAGE_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
+
+/// Reports one failed-but-retried page attempt: `(attempt that failed, 1-based; the error; how
+/// long before the next attempt)`. Mirrors `RttSink` in `http.rs` — pm-api has no logging
+/// convention of its own, so this is how a caller (the scanner) can log a retry in its own style.
+/// Never carries the request itself, so it can't leak anything (like a pagination cursor) beyond
+/// what's already in `ApiError`'s own `Display`.
+pub type RetrySink = Arc<dyn Fn(usize, &ApiError, Duration) + Send + Sync>;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -323,17 +343,29 @@ where
 pub struct GammaClient {
     http: reqwest::Client,
     base: String,
+    retry_sink: Option<RetrySink>,
 }
 
 impl GammaClient {
     pub fn new() -> Result<Self, ApiError> {
         Ok(Self {
-            http: crate::http::http_client()?,
+            http: crate::http::http_client(crate::http::GAMMA_TIMEOUT)?,
             base: GAMMA_BASE.to_string(),
+            retry_sink: None,
         })
     }
 
+    /// Report every page retry to `sink` (e.g. so the scanner can log it in its own style; pm-api
+    /// itself has no logging convention). Mirrors `ClobClient::with_rtt`.
+    pub fn with_retry_sink(mut self, sink: RetrySink) -> Self {
+        self.retry_sink = Some(sink);
+        self
+    }
+
     /// One page of active, open events (≤ 100). The cursor parameter is exactly `after_cursor`.
+    /// Retried up to `PAGE_ATTEMPTS` times (spec: Gamma outage resilience) on a retryable error
+    /// (timeouts, connect/transport errors, 429/5xx); a retried page never re-sends earlier pages,
+    /// since only this single-page fetch is wrapped, not `fetch_all`.
     pub async fn page(&self, cursor: Option<String>) -> Result<KeysetPage, ApiError> {
         let mut query: Vec<(&str, String)> = vec![
             ("closed", "false".to_string()),
@@ -343,10 +375,26 @@ impl GammaClient {
         if let Some(c) = cursor {
             query.push(("after_cursor", c));
         }
+        let sink = self.retry_sink.clone();
+        with_retry(
+            PAGE_ATTEMPTS,
+            &PAGE_BACKOFF,
+            || self.fetch_page(&query),
+            tokio::time::sleep,
+            move |attempt, err, delay| {
+                if let Some(s) = &sink {
+                    s(attempt, err, delay);
+                }
+            },
+        )
+        .await
+    }
+
+    async fn fetch_page(&self, query: &[(&str, String)]) -> Result<KeysetPage, ApiError> {
         let text = self
             .http
             .get(format!("{}{}", self.base, GAMMA_EVENTS_KEYSET))
-            .query(&query)
+            .query(query)
             .send()
             .await?
             .error_for_status()?
@@ -382,5 +430,73 @@ impl GammaClient {
             out.extend(parse_resolutions(&text, chunk)?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod page_retry_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::routes::LOCAL_TEST_SCHEME;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A local server that replies with `statuses[n]` on request n (200 bodies are `OK_BODY`,
+    /// everything else has an empty body), then keeps replying with the last entry.
+    async fn serve(statuses: &'static [u16], hits: Arc<AtomicUsize>) -> String {
+        const OK_BODY: &str = r#"{"events": [], "next_cursor": null}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                let status = statuses[n.min(statuses.len() - 1)];
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                let body = if status == 200 { OK_BODY } else { "" };
+                let line = match status {
+                    200 => "HTTP/1.1 200 OK",
+                    503 => "HTTP/1.1 503 Service Unavailable",
+                    404 => "HTTP/1.1 404 Not Found",
+                    _ => unreachable!("test only uses 200/503/404"),
+                };
+                let resp = format!(
+                    "{line}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("{LOCAL_TEST_SCHEME}{addr}")
+    }
+
+    fn client(base: String) -> GammaClient {
+        GammaClient {
+            http: reqwest::Client::builder().build().unwrap(),
+            base,
+            retry_sink: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn page_retries_a_retryable_failure_then_succeeds() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let base = serve(&[503, 200], hits.clone()).await;
+        let page = client(base).page(None).await.unwrap();
+        assert!(page.events.is_empty());
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "one retry, then success");
+    }
+
+    #[tokio::test]
+    async fn page_does_not_retry_a_non_retryable_failure() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let base = serve(&[404], hits.clone()).await;
+        let err = client(base).page(None).await.unwrap_err();
+        assert!(!crate::retry::retryable(&err));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no retry on a 404");
     }
 }

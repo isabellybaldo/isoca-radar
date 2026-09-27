@@ -144,11 +144,11 @@ cd "$HOME" && rm -rf "$HOME/ct-5a" && ls -l "$HOME/ct-5a.tar"
 docker builder prune -f --keep-storage 5GB
 powershell -ExecutionPolicy Bypass -File "$R/scripts/disk-budget.ps1"
 ```
-The disk budget must pass after the prune. Ship the bundle from PowerShell (the key has a passphrase):
-```powershell
-scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" $HOME\ct-5a.tar root@31.97.23.123:/root/
+The disk budget must pass after the prune. Ship the bundle (the key has a passphrase). The quoted forward-slash path works in both Git Bash and PowerShell; an unquoted `$HOME\ct-5a.tar` breaks in Git Bash:
+```bash
+scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" "$HOME/ct-5a.tar" root@31.97.23.123:/root/
 ```
-Once §7 has loaded it on the VPS, delete `$HOME\ct-5a.tar` on the PC.
+Once §7 has loaded it on the VPS, delete `$HOME/ct-5a.tar` on the PC.
 
 ---
 

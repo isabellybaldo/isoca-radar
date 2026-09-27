@@ -87,7 +87,7 @@ pub struct ClobClient {
 impl ClobClient {
     pub fn new() -> Result<Self, ApiError> {
         Ok(Self {
-            http: crate::http::http_client()?,
+            http: crate::http::http_client(crate::http::CLOB_TIMEOUT)?,
             base: CLOB_BASE.to_string(),
             rtt: None,
         })

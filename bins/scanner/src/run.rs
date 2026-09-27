@@ -34,10 +34,50 @@ pub fn warm_start_usable(taken_ms: i64, now_ms: i64, max_age_ms: i64) -> bool {
     taken_ms <= now_ms && now_ms - taken_ms < max_age_ms
 }
 
+/// How to start the universe at boot (a Gamma outage at start: spec brief `gamma-resilience`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartPlan {
+    /// A snapshot under `warm_start_max_age_secs` old: use it directly, as before.
+    Warm,
+    /// No snapshot fresh enough to warm-start from, but one no older than
+    /// `warm_start_fallback_max_age_secs` exists: try the cold fetch, and if that fails, fall
+    /// back to that snapshot (without persisting it again; the next refresh replaces it).
+    ColdThenFallback,
+    /// No usable snapshot at all (too old or none): the cold fetch is the only option, and its
+    /// error is fatal, same as before this brief.
+    ColdOnly,
+}
+
+/// Pure decision behind the warm-start / fallback logic in `run_live`. `snapshot_age_ms` is the
+/// latest stored snapshot's age (`now_ms - taken_ms`), or `None` when there is no snapshot yet.
+/// "Fresh enough to warm-start" is exactly `warm_start_usable`'s own rule (one copy of it, reused
+/// here instead of re-implemented) — including its guard against a snapshot from the future.
+pub fn choose_start(
+    snapshot_age_ms: Option<i64>,
+    warm_max_ms: i64,
+    fallback_max_ms: i64,
+) -> StartPlan {
+    match snapshot_age_ms {
+        Some(age) if warm_start_usable(0, age, warm_max_ms) => StartPlan::Warm,
+        Some(age) if age >= 0 && age <= fallback_max_ms => StartPlan::ColdThenFallback,
+        _ => StartPlan::ColdOnly,
+    }
+}
+
+/// `secs * 1000` as milliseconds, saturating instead of silently becoming 0 (or overflowing) when
+/// a config value is absurdly large: `warm_start_max_age_secs`/`warm_start_fallback_max_age_secs`
+/// come straight from `scanner.toml` as `u64`, unvalidated against `i64::MAX`.
+pub fn secs_to_ms_saturating(secs: u64) -> i64 {
+    i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000)
+}
+
 /// Graceful-stop budget for `run_live` from the shutdown signal (S3a). With END_RUN_TIMEOUT for
 /// the `runs` exit row, the whole stop fits compose's 30 s stop_grace_period.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
 pub const END_RUN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Overall cap on the `StartPlan::ColdThenFallback` cold fetch at boot (gamma-resilience brief).
+pub const COLD_FETCH_BOOT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Rows per `scanner replay` write, and per message on its bounded replay → writer channel.
 const REPLAY_CHUNK: usize = 2_000;
@@ -124,8 +164,26 @@ fn engine_ctx(cfg: &Config, cfg_hash: &str, run_id: i64, source: &str) -> Engine
     }
 }
 
+/// pm-api has no logging convention of its own (checked: no eprintln/tracing anywhere in
+/// `crates/pm-api/src`), so it hands page retries to this sink instead of printing them itself.
+/// Never includes the cursor: `ApiError::short()` is built specifically to never carry the
+/// request URL a Gamma page retry would otherwise leak it through.
+fn gamma_retry_sink() -> pm_api::gamma::RetrySink {
+    Arc::new(|attempt, err, delay| {
+        eprintln!(
+            "gamma: page attempt {attempt}/{} failed: {}; retrying in {}s",
+            pm_api::gamma::PAGE_ATTEMPTS,
+            err.short(),
+            delay.as_secs()
+        );
+    })
+}
+
+/// Used by both the startup cold fetch (`cold_start`, and `ColdThenFallback`'s own cold attempt in
+/// `run_live`) and the refresher loop below — wiring the retry sink once here covers both.
 async fn fetch_universe(cfg: &Config) -> anyhow::Result<Universe> {
     let events = GammaClient::new()?
+        .with_retry_sink(gamma_retry_sink())
         .all_active_events()
         .await
         .context("gamma universe")?;
@@ -134,6 +192,13 @@ async fn fetch_universe(cfg: &Config) -> anyhow::Result<Universe> {
         now_ms(),
         cfg.universe.canary_pairs,
     ))
+}
+
+/// Cold-fetch a fresh universe and persist it (the normal, non-fallback path).
+async fn cold_start(cfg: &Config, store: &Store) -> anyhow::Result<Universe> {
+    let u = fetch_universe(cfg).await?;
+    persist_universe(store, &u).await?;
+    Ok(u)
 }
 
 async fn persist_universe(store: &Store, u: &Universe) -> anyhow::Result<()> {
@@ -444,27 +509,65 @@ async fn run_live(
     std::fs::create_dir_all(&cfg.capture.dir)
         .with_context(|| format!("create {}", cfg.capture.dir))?;
 
-    // Universe: warm start or fresh (spec §8.1.2)
+    // Universe: warm start, cold fetch, or — a Gamma outage right at boot — fall back to an
+    // older stored snapshot the cold fetch couldn't reach (gamma-resilience brief). `choose_start`
+    // makes the pure decision; this just carries it out. `used_fallback` says whether we started
+    // from a stale snapshot, so the refresher can be nudged to replace it right away below.
     let now = now_ms();
-    let warm = match store.latest_universe().await? {
-        Some(s)
-            if warm_start_usable(
-                s.taken_ms,
-                now,
-                i64::try_from(cfg.universe.warm_start_max_age_secs).unwrap_or(0) * 1000,
-            ) =>
-        {
-            Universe::from_json(&s.body).ok()
+    let latest = store.latest_universe().await?;
+    let warm_max_ms = secs_to_ms_saturating(cfg.universe.warm_start_max_age_secs);
+    let fallback_max_ms = secs_to_ms_saturating(cfg.universe.warm_start_fallback_max_age_secs);
+    let snapshot_age_ms = latest.as_ref().map(|s| now - s.taken_ms);
+    let (universe, used_fallback) = match choose_start(
+        snapshot_age_ms,
+        warm_max_ms,
+        fallback_max_ms,
+    ) {
+        StartPlan::Warm => {
+            match latest
+                .as_ref()
+                .and_then(|s| Universe::from_json(&s.body).ok())
+            {
+                Some(u) => (u, false),
+                None => (cold_start(cfg, store).await?, false),
+            }
         }
-        _ => None,
-    };
-    let universe = match warm {
-        Some(u) => u,
-        None => {
-            let u = fetch_universe(cfg).await?;
-            persist_universe(store, &u).await?;
-            u
+        StartPlan::ColdThenFallback => {
+            // Bound the boot: a Gamma outage that also makes the cold fetch hang (rather than
+            // fail outright) must still let a fallback snapshot start the scanner instead of
+            // blocking forever. `ColdOnly` below has no such cap — there's no fallback to catch
+            // it, so a timeout there would just trade "hangs" for "fails outright" for nothing.
+            let cold =
+                match tokio::time::timeout(COLD_FETCH_BOOT_TIMEOUT, fetch_universe(cfg)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "cold fetch did not finish within {}s",
+                        COLD_FETCH_BOOT_TIMEOUT.as_secs()
+                    )),
+                };
+            match cold {
+                Ok(u) => {
+                    persist_universe(store, &u).await?;
+                    (u, false)
+                }
+                Err(e) => {
+                    let fallback = latest
+                        .as_ref()
+                        .and_then(|s| Universe::from_json(&s.body).ok().map(|u| (u, s.taken_ms)));
+                    match fallback {
+                        Some((u, taken_ms)) => {
+                            let age_min = (now - taken_ms) / 60_000;
+                            eprintln!(
+                                "universe: cold fetch failed ({e:#}); starting from the {age_min} min old snapshot, refresh will replace it"
+                            );
+                            (u, true)
+                        }
+                        None => return Err(e),
+                    }
+                }
+            }
         }
+        StartPlan::ColdOnly => (cold_start(cfg, store).await?, false),
     };
     let universe = Arc::new(universe);
     let plan = shards::plan(shards::units(&universe, &HashMap::new()), &cfg.shards);
@@ -480,6 +583,11 @@ async fn run_live(
     let (plan_tx, mut plan_rx) = mpsc::channel::<Plan>(8);
     let (u_tx, u_rx) = watch::channel(universe.clone());
     let refresh = Arc::new(tokio::sync::Notify::new());
+    if used_fallback {
+        // Booted from a stale snapshot: don't wait a full refresh_secs to replace it — a permit
+        // stored now is consumed by the refresher's very first `refresh.notified()` below.
+        refresh.notify_one();
+    }
 
     // Tasks
     let writer_task = tokio::spawn(writer::run_writer(
@@ -1155,6 +1263,71 @@ mod tests {
             !warm_start_usable(500_000, 400_000, 300_000),
             "a snapshot from the future is not trusted"
         );
+    }
+
+    #[test]
+    fn choose_start_fresh_snapshot_is_warm() {
+        assert_eq!(
+            choose_start(Some(100_000), 300_000, 86_400_000),
+            StartPlan::Warm
+        );
+    }
+
+    #[test]
+    fn choose_start_stale_but_under_fallback_tries_cold_then_falls_back() {
+        assert_eq!(
+            choose_start(Some(3_600_000), 300_000, 86_400_000),
+            StartPlan::ColdThenFallback
+        );
+    }
+
+    #[test]
+    fn choose_start_too_old_or_missing_is_cold_only() {
+        assert_eq!(
+            choose_start(Some(90_000_000), 300_000, 86_400_000),
+            StartPlan::ColdOnly
+        );
+        assert_eq!(choose_start(None, 300_000, 86_400_000), StartPlan::ColdOnly);
+    }
+
+    #[test]
+    fn choose_start_boundaries() {
+        // Exactly at warm_max: no longer warm (strictly under), but still within fallback.
+        assert_eq!(
+            choose_start(Some(300_000), 300_000, 86_400_000),
+            StartPlan::ColdThenFallback
+        );
+        // One ms under warm_max: still warm.
+        assert_eq!(
+            choose_start(Some(299_999), 300_000, 86_400_000),
+            StartPlan::Warm
+        );
+        // Exactly at fallback_max: "no older than" includes the boundary.
+        assert_eq!(
+            choose_start(Some(86_400_000), 300_000, 86_400_000),
+            StartPlan::ColdThenFallback
+        );
+        // One ms past fallback_max: too old.
+        assert_eq!(
+            choose_start(Some(86_400_001), 300_000, 86_400_000),
+            StartPlan::ColdOnly
+        );
+        // A snapshot from the future is never trusted as warm, same guard as warm_start_usable.
+        assert_eq!(
+            choose_start(Some(-1), 300_000, 86_400_000),
+            StartPlan::ColdOnly
+        );
+    }
+
+    #[test]
+    fn secs_to_ms_saturates_instead_of_wrapping_to_zero() {
+        assert_eq!(secs_to_ms_saturating(300), 300_000);
+        assert_eq!(secs_to_ms_saturating(86_400), 86_400_000);
+        assert_eq!(secs_to_ms_saturating(0), 0);
+        // A u64 that doesn't fit in i64, and one that fits i64 but overflows once * 1000: both
+        // saturate to i64::MAX, never silently wrap to 0.
+        assert_eq!(secs_to_ms_saturating(u64::MAX), i64::MAX);
+        assert_eq!(secs_to_ms_saturating(i64::MAX as u64), i64::MAX);
     }
 
     #[test]
