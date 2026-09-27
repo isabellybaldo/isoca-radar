@@ -133,6 +133,8 @@ pub struct HourInput<'a> {
     pub latency_ms: &'a [i64],
     /// Edge capture: (scenario, equity change) per paper mark inside the hour.
     pub equity_deltas: &'a [(String, Decimal)],
+    /// SWEET: the hour's attempts and their episodes (Phase 5d). Default (empty) for other cards.
+    pub sweet: crate::sweet::SweetInput<'a>,
 }
 
 pub fn opened_in(eps: &[Ep], hour_ms: i64) -> impl Iterator<Item = &Ep> {
@@ -154,6 +156,10 @@ pub trait CellData: Clone + Default + PartialEq + Debug + Serialize + Deserializ
     const AREAS: &'static [&'static str];
     /// Needs health latency and paper marks (Edge capture only).
     const EDGE_INPUTS: bool = false;
+    /// Needs the SWEET inputs (Phase 5d): SWEET only.
+    const SWEET_INPUTS: bool = false;
+    /// analyze rebuilds every hour touched by [last tick − LATE_MS, now] (0: no such rule).
+    const LATE_MS: i64 = 0;
     /// Non-subtractable per-hour maxima, merged over a window's hours by `merge_max`.
     type Max: Clone + Default + PartialEq + Debug;
 
@@ -162,6 +168,12 @@ pub trait CellData: Clone + Default + PartialEq + Debug + Serialize + Deserializ
     fn sub(&mut self, other: &Self);
     fn max_part(&self) -> Self::Max;
     fn merge_max(into: &mut Self::Max, other: &Self::Max);
+
+    /// Appended to the run-derived premise key (card-side parameters, Phase 5d spec §6). Empty
+    /// for every 5a family, so their keys never change.
+    fn key_suffix() -> String {
+        String::new()
+    }
 
     fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)

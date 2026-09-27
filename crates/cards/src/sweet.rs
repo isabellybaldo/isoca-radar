@@ -7,10 +7,11 @@
 //! the premise-key suffix, so an edit starts a new key and 5a's catch-up rebuilds the card from
 //! stored history. (Plain labels — `OTHER`, `UNTAGGED`, `NOT_NET_POSITIVE`, `DROPPED`, `DIMS` —
 //! don't change a computation, so they are left out.)
-use crate::cells::Side;
-use crate::{DAY_MS, HOUR_MS};
+use crate::cells::{CellData, HourInput, Num, Side};
+use crate::{DAY_MS, HOUR_MS, hour_of};
 use arb_core::premises::sha8;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -455,4 +456,318 @@ pub fn captured(a: &Attempt) -> Captured {
     out.x0 = cash + sets;
     out.x = out.x0 + leftover;
     out
+}
+
+/// One episode as SWEET sees it (analyze maps `store::SweetEpisodeRow` into this).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweetEp {
+    pub id: String,
+    pub event_id: String,
+    pub side: Side,
+    pub opened_ms: i64,
+    pub pnl_net: Decimal,
+    pub budget100: Option<Decimal>,
+    /// engine_suspect or stale_transport: excluded and counted (spec §4).
+    pub flagged: bool,
+    pub days: Option<Decimal>,
+    pub annualized: Option<Decimal>,
+    pub peak_cost: Decimal,
+    pub s_legs: i64,
+    pub tags: Option<Vec<String>>,
+}
+
+impl SweetEp {
+    pub fn positive(&self) -> bool {
+        self.pnl_net > Decimal::ZERO
+    }
+
+    /// (dimension, bucket) rows this episode lands in; a fee row has only "all".
+    pub fn buckets(&self, fee_row: bool) -> Vec<(&'static str, &'static str)> {
+        let mut out = vec![("all", "all")];
+        if fee_row {
+            return out;
+        }
+        if CATEGORY_AVAILABLE {
+            out.push(("category", category_bucket(self.tags.as_deref())));
+        }
+        out.push(("days", days_bucket(self.days)));
+        out.push(("s", s_bucket(self.s_legs)));
+        out.push(("hour", hour_bucket(self.opened_ms)));
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SweetInput<'a> {
+    pub now_ms: i64,
+    /// Episodes of the build range; the cell keeps those opened in its hour.
+    pub eps: &'a [SweetEp],
+    pub attempts: &'a [Attempt],
+    /// Every (side, row scenario) with an account: an episode is on the table in each, attempt or not.
+    pub scenarios: &'a [(Side, String)],
+}
+
+/// One row's additive sums (spec §6). Every field merges by addition, so windows are sums of cells
+/// and an expiring hour is subtracted exactly. Counts are i64; money is Num (a JSON string).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Acc {
+    /// Net-positive, unflagged episodes with a $100-capped P&L, and their Σ (edge on the table).
+    pub eps: i64,
+    pub on_table: Num,
+    /// On the table minus the episodes this row's P1 account filter-skipped (NO rows: the same).
+    pub on_table_elig: Num,
+    /// Net-positive but flagged episodes: excluded, counted.
+    pub flagged: i64,
+    /// YES upper bound (spec §7.5): Σ annualized × peak cost and Σ peak cost, over those episodes.
+    pub up_w: Num,
+    pub up_c: Num,
+    pub attempts: i64,
+    pub skipped: BTreeMap<String, i64>,
+    pub filter_skips: i64,
+    pub missed: i64,
+    pub filled: i64,
+    pub unpriced: i64,
+    pub pooled: i64,
+    /// Executed YES attempts whose episode has no days_to_end (annualization is then withheld).
+    pub nodays: i64,
+    pub sx: Num,
+    pub sx2: Num,
+    pub sabs: Num,
+    pub sx0: Num,
+    pub cost: Num,
+    pub cost_days: Num,
+    /// Clusters: (event, hour) groups with at least one executed attempt, and Σc², Σc·n, Σn².
+    pub clusters: i64,
+    pub sc2: Num,
+    pub scn: Num,
+    pub sn2: i64,
+}
+
+impl Acc {
+    fn apply(&mut self, o: &Acc, sign: i64) {
+        let s = Decimal::from(sign);
+        self.eps += sign * o.eps;
+        self.on_table.0 += s * o.on_table.0;
+        self.on_table_elig.0 += s * o.on_table_elig.0;
+        self.flagged += sign * o.flagged;
+        self.up_w.0 += s * o.up_w.0;
+        self.up_c.0 += s * o.up_c.0;
+        self.attempts += sign * o.attempts;
+        for (k, v) in &o.skipped {
+            let e = self.skipped.entry(k.clone()).or_insert(0);
+            *e += sign * v;
+            if *e == 0 {
+                self.skipped.remove(k);
+            }
+        }
+        self.filter_skips += sign * o.filter_skips;
+        self.missed += sign * o.missed;
+        self.filled += sign * o.filled;
+        self.unpriced += sign * o.unpriced;
+        self.pooled += sign * o.pooled;
+        self.nodays += sign * o.nodays;
+        self.sx.0 += s * o.sx.0;
+        self.sx2.0 += s * o.sx2.0;
+        self.sabs.0 += s * o.sabs.0;
+        self.sx0.0 += s * o.sx0.0;
+        self.cost.0 += s * o.cost.0;
+        self.cost_days.0 += s * o.cost_days.0;
+        self.clusters += sign * o.clusters;
+        self.sc2.0 += s * o.sc2.0;
+        self.scn.0 += s * o.scn.0;
+        self.sn2 += sign * o.sn2;
+    }
+
+    /// Executed attempts (the statistic's unit, spec §4): missed + filled.
+    pub fn n_exec(&self) -> i64 {
+        self.missed + self.filled
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweetCell {
+    /// row_key → sums; empty rows are never stored.
+    #[serde(default)]
+    pub rows: BTreeMap<String, Acc>,
+}
+
+fn side_str(s: Side) -> &'static str {
+    match s {
+        Side::Yes => "yes",
+        Side::No => "no",
+    }
+}
+
+pub fn row_key(side: Side, scenario: &str, dim: &str, bucket: &str) -> String {
+    format!("{}|{scenario}|{dim}|{bucket}", side_str(side))
+}
+
+pub fn parse_key(k: &str) -> Option<(Side, String, String, String)> {
+    let mut it = k.split('|');
+    let side = match it.next()? {
+        "yes" => Side::Yes,
+        "no" => Side::No,
+        _ => return None,
+    };
+    let (scen, dim, bucket) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    Some((side, scen.to_string(), dim.to_string(), bucket.to_string()))
+}
+
+impl SweetCell {
+    fn apply(&mut self, o: &SweetCell, sign: i64) {
+        for (k, a) in &o.rows {
+            let e = self.rows.entry(k.clone()).or_default();
+            e.apply(a, sign);
+            if *e == Acc::default() {
+                self.rows.remove(k);
+            }
+        }
+    }
+}
+
+impl CellData for SweetCell {
+    const FAMILY: &'static str = "sweet";
+    /// Edge capture's areas (spec §6): no premise area of its own (review B1).
+    const AREAS: &'static [&'static str] = &[
+        "depth",
+        "detector_no",
+        "detector_yes",
+        "episode_def",
+        "fees",
+        "host",
+        "sim",
+    ];
+    const SWEET_INPUTS: bool = true;
+    const LATE_MS: i64 = LATE_MS;
+    type Max = ();
+
+    fn key_suffix() -> String {
+        key_suffix()
+    }
+
+    fn build(inp: &HourInput<'_>) -> Self {
+        let s = &inp.sweet;
+        let h = inp.hour_ms;
+        let eps: BTreeMap<&str, &SweetEp> = s
+            .eps
+            .iter()
+            .filter(|e| hour_of(e.opened_ms) == h)
+            .map(|e| (e.id.as_str(), e))
+            .collect();
+        let mut by: BTreeMap<(&str, &str), &Attempt> = BTreeMap::new();
+        for a in s.attempts {
+            if eps.contains_key(a.episode_id.as_str()) {
+                by.insert((a.scenario.as_str(), a.episode_id.as_str()), a);
+            }
+        }
+        let mut c = SweetCell::default();
+        // row → event → (executed n, Σx)
+        let mut clus: BTreeMap<String, BTreeMap<&str, (i64, Decimal)>> = BTreeMap::new();
+        for e in eps.values() {
+            if !e.positive() {
+                continue;
+            }
+            for (_, scen) in s.scenarios.iter().filter(|(sd, _)| *sd == e.side) {
+                let fee_row = scen.contains('@');
+                let a = by
+                    .get(&(scen.as_str(), e.id.as_str()))
+                    .copied()
+                    .filter(|a| a.side == e.side);
+                let cap = a.filter(|a| a.exec.is_some()).map(captured);
+                for (dim, bucket) in e.buckets(fee_row) {
+                    let key = row_key(e.side, scen, dim, bucket);
+                    let acc = c.rows.entry(key.clone()).or_default();
+                    if e.flagged {
+                        acc.flagged += 1;
+                        continue;
+                    }
+                    if let Some(b) = e.budget100 {
+                        acc.eps += 1;
+                        acc.on_table.0 += b;
+                        let filtered = a
+                            .and_then(|a| a.skip.as_deref())
+                            .is_some_and(is_filter_skip);
+                        if !filtered {
+                            acc.on_table_elig.0 += b;
+                        }
+                    }
+                    if e.side == Side::Yes
+                        && let Some(ann) = e.annualized
+                    {
+                        acc.up_w.0 += ann * e.peak_cost;
+                        acc.up_c.0 += e.peak_cost;
+                    }
+                    let Some(a) = a else { continue };
+                    let in_flight = a.exec.is_some_and(|(t, _)| t > s.now_ms - IN_FLIGHT_MS);
+                    if a.pending || in_flight || a.skip.as_deref() == Some(NOT_NET_POSITIVE) {
+                        continue;
+                    }
+                    acc.attempts += 1;
+                    if let Some(r) = &a.skip {
+                        *acc.skipped.entry(r.clone()).or_insert(0) += 1;
+                        if is_filter_skip(r) {
+                            acc.filter_skips += 1;
+                        }
+                        continue;
+                    }
+                    let (Some((_, q)), Some(cp)) = (a.exec, cap) else {
+                        continue;
+                    };
+                    if q > Decimal::ZERO {
+                        acc.filled += 1;
+                    } else {
+                        acc.missed += 1;
+                    }
+                    acc.sx.0 += cp.x;
+                    acc.sx2.0 += cp.x * cp.x;
+                    acc.sabs.0 += cp.x.abs();
+                    acc.sx0.0 += cp.x0;
+                    acc.cost.0 += cp.cost;
+                    acc.unpriced += cp.unpriced;
+                    acc.pooled += cp.pooled;
+                    if e.side == Side::Yes {
+                        match e.days {
+                            Some(d) => acc.cost_days.0 += cp.cost * d,
+                            None => acc.nodays += 1,
+                        }
+                    }
+                    let cl = clus
+                        .entry(key)
+                        .or_default()
+                        .entry(e.event_id.as_str())
+                        .or_insert((0, Decimal::ZERO));
+                    cl.0 += 1;
+                    cl.1 += cp.x;
+                }
+            }
+        }
+        for (key, events) in clus {
+            if let Some(acc) = c.rows.get_mut(&key) {
+                for (n, cx) in events.values() {
+                    acc.clusters += 1;
+                    acc.sc2.0 += *cx * *cx;
+                    acc.scn.0 += *cx * Decimal::from(*n);
+                    acc.sn2 += n * n;
+                }
+            }
+        }
+        c.rows.retain(|_, a| *a != Acc::default());
+        c
+    }
+
+    fn add(&mut self, o: &Self) {
+        self.apply(o, 1);
+    }
+
+    fn sub(&mut self, o: &Self) {
+        self.apply(o, -1);
+    }
+
+    fn max_part(&self) {}
+
+    fn merge_max(_: &mut (), _: &()) {}
 }

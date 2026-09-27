@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use cards::cells::Side;
+use cards::cells::{CellData, HourInput, Side};
 use cards::sweet::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -363,4 +363,197 @@ fn the_key_suffix_is_a_semicolon_segment_over_every_parameter() {
         assert!(p.contains(needle), "params_text lacks {needle}: {p}");
     }
     assert_eq!(key_suffix(), key_suffix(), "deterministic");
+}
+
+const T: i64 = 20_000 * 24 * H;
+
+fn sep(id: &str, event: &str, side: Side, opened: i64) -> SweetEp {
+    SweetEp {
+        id: id.into(),
+        event_id: event.into(),
+        side,
+        opened_ms: opened,
+        pnl_net: dec!(0.41),
+        budget100: Some(dec!(0.33)),
+        flagged: false,
+        days: Some(dec!(3)),
+        annualized: Some(dec!(0.5)),
+        peak_cost: dec!(99),
+        s_legs: 2,
+        tags: Some(vec!["nba".into()]),
+    }
+}
+
+/// buys 10 + 10 NO for 9.10, converts 10 for 9.10 + x_cash. s_legs matches `sep`'s episode (2).
+fn no_att(ep: &str, scen: &str, x_cash: Decimal) -> Attempt {
+    let mut a = attempt(
+        Side::No,
+        dec!(10),
+        2,
+        vec![
+            buy("m0", "no", dec!(10), dec!(-4.00)),
+            buy("m1", "no", dec!(10), dec!(-5.10)),
+            convert(dec!(10), dec!(9.10) + x_cash),
+        ],
+        &[],
+    );
+    a.episode_id = ep.into();
+    a.scenario = scen.into();
+    a
+}
+
+fn build(now: i64, eps: &[SweetEp], atts: &[Attempt], scen: &[(Side, String)]) -> SweetCell {
+    SweetCell::build(&HourInput {
+        hour_ms: T,
+        episodes: &[],
+        latency_ms: &[],
+        equity_deltas: &[],
+        sweet: SweetInput {
+            now_ms: now,
+            eps,
+            attempts: atts,
+            scenarios: scen,
+        },
+    })
+}
+
+fn scen() -> Vec<(Side, String)> {
+    vec![
+        (Side::No, "sp-idle".into()),
+        (Side::No, "sp-idle@10".into()),
+        (Side::Yes, "sp-idle".into()),
+    ]
+}
+
+#[test]
+fn a_cell_counts_the_table_the_attempts_and_the_clusters_per_row() {
+    let eps = vec![
+        sep("e1", "ev1", Side::No, T + 60_000),
+        sep("e2", "ev1", Side::No, T + 120_000),
+        sep("e3", "ev2", Side::No, T + 180_000),
+    ];
+    let atts = vec![
+        no_att("e1", "sp-idle", dec!(1)),
+        no_att("e2", "sp-idle", dec!(-0.5)),
+        no_att("e3", "sp-idle", dec!(2)),
+    ];
+    let c = build(T + 2 * H, &eps, &atts, &scen());
+    let all = &c.rows[&row_key(Side::No, "sp-idle", "all", "all")];
+    assert_eq!(
+        (all.eps, all.attempts, all.filled, all.missed),
+        (3, 3, 3, 0)
+    );
+    assert_eq!(all.on_table.0, dec!(0.99));
+    assert_eq!(all.sx.0, dec!(2.5));
+    assert_eq!(all.sx2.0, dec!(5.25)); // 1 + 0.25 + 4
+    assert_eq!(all.sabs.0, dec!(3.5));
+    assert_eq!(all.cost.0, dec!(27.30));
+    // clusters: ev1 (n=2, c=0.5) and ev2 (n=1, c=2)
+    assert_eq!((all.clusters, all.sn2), (2, 5));
+    assert_eq!(all.sc2.0, dec!(4.25)); // 0.25 + 4
+    assert_eq!(all.scn.0, dec!(3)); // 0.5*2 + 2*1
+    // the fee scenario has only the all row, on the table but with no attempts
+    let fee = &c.rows[&row_key(Side::No, "sp-idle@10", "all", "all")];
+    assert_eq!((fee.eps, fee.attempts), (3, 0));
+    assert!(
+        !c.rows
+            .contains_key(&row_key(Side::No, "sp-idle@10", "days", "1-7"))
+    );
+    // other dimensions carry the same attempt
+    assert_eq!(
+        c.rows[&row_key(Side::No, "sp-idle", "days", "1-7")].attempts,
+        3
+    );
+    assert_eq!(c.rows[&row_key(Side::No, "sp-idle", "s", "2")].attempts, 3);
+    assert_eq!(
+        c.rows[&row_key(Side::No, "sp-idle", "hour", "00-04")].attempts,
+        3
+    );
+    assert_eq!(
+        c.rows
+            .contains_key(&row_key(Side::No, "sp-idle", "category", "sports")),
+        CATEGORY_AVAILABLE
+    );
+    // YES scenario: no YES episode, so no YES row at all
+    assert!(c.rows.keys().all(|k| !k.starts_with("yes|")));
+}
+
+#[test]
+fn in_flight_pending_non_positive_and_flagged_never_become_attempts() {
+    let mut flagged = sep("e4", "ev4", Side::No, T + 1);
+    flagged.flagged = true;
+    let mut losing = sep("e5", "ev5", Side::No, T + 2);
+    losing.pnl_net = dec!(-0.01);
+    let eps = vec![
+        sep("e1", "ev1", Side::No, T + 1),
+        sep("e2", "ev2", Side::No, T + 1),
+        flagged,
+        losing,
+    ];
+    let now = T + H;
+    let mut in_flight = no_att("e1", "sp-idle", dec!(1));
+    in_flight.exec = Some((now - 10_000, dec!(10)));
+    let mut pending = no_att("e2", "sp-idle", dec!(1));
+    pending.exec = None;
+    pending.pending = true;
+    let atts = vec![
+        in_flight,
+        pending,
+        no_att("e4", "sp-idle", dec!(1)),
+        no_att("e5", "sp-idle", dec!(1)),
+    ];
+    let c = build(now, &eps, &atts, &scen());
+    let all = &c.rows[&row_key(Side::No, "sp-idle", "all", "all")];
+    assert_eq!((all.eps, all.attempts, all.flagged), (2, 0, 1));
+}
+
+#[test]
+fn p1_filter_skips_count_and_leave_the_eligible_table() {
+    let eps = vec![
+        sep("y1", "ev1", Side::Yes, T + 1),
+        sep("y2", "ev2", Side::Yes, T + 2),
+    ];
+    let mut skip = attempt(Side::Yes, dec!(0), 2, vec![], &[]);
+    skip.episode_id = "y1".into();
+    skip.exec = None;
+    skip.skip = Some("too_long".into());
+    let mut cash = skip.clone();
+    cash.episode_id = "y2".into();
+    cash.skip = Some("no_cash".into());
+    let c = build(T + H, &eps, &[skip, cash], &scen());
+    let all = &c.rows[&row_key(Side::Yes, "sp-idle", "all", "all")];
+    assert_eq!((all.attempts, all.filter_skips), (2, 1));
+    assert_eq!(all.skipped.get("too_long"), Some(&1));
+    assert_eq!(all.skipped.get("no_cash"), Some(&1));
+    assert_eq!(
+        (all.on_table.0, all.on_table_elig.0),
+        (dec!(0.66), dec!(0.33))
+    );
+    assert_eq!((all.up_w.0, all.up_c.0), (dec!(99), dec!(198))); // 0.5 x 99 twice
+}
+
+#[test]
+fn add_then_sub_is_the_identity_and_empty_rows_disappear() {
+    let eps = vec![sep("e1", "ev1", Side::No, T + 1)];
+    let c = build(T + H, &eps, &[no_att("e1", "sp-idle", dec!(1))], &scen());
+    let mut sum = SweetCell::default();
+    sum.add(&c);
+    sum.add(&c);
+    sum.sub(&c);
+    assert_eq!(sum, c);
+    sum.sub(&c);
+    assert_eq!(sum, SweetCell::default());
+    assert_eq!(SweetCell::from_json(&c.to_json().unwrap()).unwrap(), c);
+}
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn sweet_keys_its_family_with_the_suffix_and_rebuilds_late_hours() {
+    assert_eq!(SweetCell::FAMILY, "sweet");
+    assert!(SweetCell::SWEET_INPUTS);
+    assert_eq!(SweetCell::LATE_MS, LATE_MS);
+    assert_eq!(SweetCell::key_suffix(), key_suffix());
+    assert_eq!(cards::edge::EdgeCell::key_suffix(), "");
+    assert_eq!(cards::cells::G1Cell::key_suffix(), "");
+    assert_eq!(cards::edge::EdgeCell::LATE_MS, 0);
 }

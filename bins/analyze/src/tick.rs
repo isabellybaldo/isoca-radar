@@ -17,6 +17,7 @@ use cards::edge::EdgeCell;
 use cards::family::{
     Family, LONG_WINDOWS, RunPremises, RunSpan, contiguous, current_key, hours_between,
 };
+use cards::sweet::SweetInput;
 use cards::window::SPANS;
 use cards::{DAY_MS, HOUR_MS, hour_of};
 use rust_decimal::Decimal;
@@ -634,6 +635,8 @@ async fn build_hours<C: CellData>(
                 episodes: &eps,
                 latency_ms: lat.get(h).map_or(&no_lat[..], |v| &v[..]),
                 equity_deltas: deltas.get(h).map_or(&no_deltas[..], |v| &v[..]),
+                // Task 8 fills the real SWEET inputs; SWEET isn't in LONG_WINDOWS/Family yet.
+                sweet: SweetInput::default(),
             };
             (*h, C::build(&inp))
         })

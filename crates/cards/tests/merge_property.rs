@@ -5,6 +5,7 @@
 use cards::HOUR_MS as H;
 use cards::cells::*;
 use cards::stats::{self, CountMap, DurMap};
+use cards::sweet::SweetInput;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -73,6 +74,7 @@ fn summed<C: CellData>(eps: &[Ep]) -> C {
             episodes: &view,
             latency_ms: &[],
             equity_deltas: &[],
+            sweet: SweetInput::default(),
         }));
     }
     sum

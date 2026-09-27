@@ -10,6 +10,7 @@ use cards::body::{BodyCtx, Card, ScenarioLat, base_status};
 use cards::cells::*;
 use cards::edge::EdgeCell;
 use cards::family::{LONG_WINDOWS, LongRender};
+use cards::sweet::SweetInput;
 use cards::window::{SPANS, Windows};
 use cards::{DAY_MS, HOUR_MS as H};
 use rust_decimal::Decimal;
@@ -108,6 +109,7 @@ fn catch_up<C: CellData>(first: i64, now: i64) -> Run<C> {
             episodes: &v,
             latency_ms: &lat,
             equity_deltas: &d,
+            sweet: SweetInput::default(),
         });
         run.stored.insert(h, c.to_json().unwrap());
         run.w.apply(h, None, &c);
@@ -143,6 +145,7 @@ fn tick<C: Card>(
             episodes: v,
             latency_ms: &lat,
             equity_deltas: &d,
+            sweet: SweetInput::default(),
         });
         let json = c.to_json().unwrap();
         bytes += json.len();
