@@ -93,6 +93,22 @@ band in its first 10 minutes, and a skewed clock would put those minutes out of 
 
 ## 5. Stop the scanner and analyze, migrate 0007, start again (on the VPS)
 
+**First attempt, 2026-09-27: two lessons.**
+- **Line endings.** The first 5d image failed `migrate` with "migration 1 was previously applied but
+  has been modified". The PC's `core.autocrlf` had rewritten the SQL and config files with CRLF
+  line endings before the build. `.gitattributes` now pins them to LF, and the Docker build refuses
+  CRLF. Rebuild from a fresh `git pull`.
+- **Stop at the first failure.** Run `migrate` on its own and check `exit=0` and version 7 before
+  starting anything. Never paste the whole block.
+
+**Remove the temporary warm-start override first.** It was used while Gamma was slow. The new
+scanner has the same fallback built in (`warm_start_fallback_max_age_secs`, a 5-minute boot cap,
+and retries), so the override must not stay mounted over the new image's config:
+```bash
+rm -f compose.override-warm.yml /root/scanner-warm.toml
+```
+Every command below uses only `compose.yml` (and `compose.web.yml` for api/web), never the override.
+
 `scanner`, `analyze` and `migrate` live in `compose.yml` under the `core` profile, so every command
 touching them needs `--profile core` (5a runbook §9, §10, §12). `api` and `web` live in
 `compose.web.yml` under the `web` profile, so restarting them needs both `-f` files and
