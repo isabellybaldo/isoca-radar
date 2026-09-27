@@ -220,3 +220,6 @@ spikes/probe/results/
 web/node_modules/
 web/dist/
 !web/src/lib/
+
+# brainstorming companion scratch
+.superpowers/
