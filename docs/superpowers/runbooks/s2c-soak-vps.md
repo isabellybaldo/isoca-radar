@@ -105,3 +105,19 @@ sh scripts/disk-budget.sh
 - **Fixes shipped after run 2:**
   - S3a-2: exact top-of-book gate; `pending_tops` indexed by connection and by group. Release bench 365 → 19.6 µs/frame. Per-minute `engine:` timing log line.
   - aba9ce5: replay streams to a sink, so memory stays bounded. Run 5's 2.9 GB peak came from the old collect-everything path.
+
+### Run 3: 2026-09-26 → 27, LIVE=7, 24 h. No-drops PASSED; Phase 2 exit met
+- **Image and window:** image 2c5b84d (S3a-2). START=1790384263621 (2026-09-26 00:57:43 UTC). The 24 h window ended 2026-09-27 00:57:43 UTC.
+- **24 h window:** 1,438 health minutes, **0 drops**, 2,205 reconnects (retiers), max 2 parked shards, capture never paused. Lag p99: median minute 202 ms; 99th percentile minute 26.3 s; worst minute 60.5 s.
+- **Worst lag:** one storm at 20:47–20:51 UTC (47–60 s, 2–6 reconnects per minute, still 0 drops). Earlier isolated spikes: 09:23 (19.8 s), 13:24 (21.6 s), 14:45–14:47 (26–43 s).
+- **Episodes:** 8,880 in run 7 (all net-positive by the episode definition, Π > 0 net of fees); 61 open at check time.
+- **Resources:**
+  - Scanner memory 1.48 GiB at 24 h, flat since ~14 h (1.51 GiB), so no leak trend.
+  - CPU steal 25–59 % under load; Hostinger throttling persists, but the scanner absorbed it with no drops.
+- **Disk:**
+  - Found: the capture housekeeping never ran in release (an `i64::MIN` sentinel wrapped). Capture reached 24.2 GB and the project total hit 30.01 GB at ~14 h.
+  - Mitigation: a host trim loop (hour files older than 120 min). Project total 10.77 GB at 24 h.
+  - Fixed in code at cc51942; not yet deployed.
+- **Replay equality:** not re-run. It passed on run 2's data (run 5), and the scanner is unchanged since.
+- **Phase 2 exit:** both halves are met: 24 h without drops (this run) and replay reproduces episodes (run 2).
+- **After the run:** the scanner keeps running as the permanent live service (owner's call, 2026-09-26). The trim loops stay until the next deploy, which carries cc51942. Run 7 is the first run the Phase 5a Gebele cards count (backfill `run_id >= 7`).
