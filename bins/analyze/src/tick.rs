@@ -521,11 +521,16 @@ async fn edge_inputs<C: CellData>(
         .collect();
     let ids: Vec<String> = env.accounts.iter().map(|(a, _)| a.clone()).collect();
     let marks = env.store.marks_with_prev(&ids, from, to).await?;
-    // each run's `sim` premise version (it embeds the policies file's sha256)
+    // each run's policies, as the config part of its `sim` premise version (see `policies_of`)
     let sim: BTreeMap<i64, &str> = env
         .runs
         .iter()
-        .filter_map(|r| r.versions.get("sim").map(|v| (r.span.run_id, v.as_str())))
+        .filter_map(|r| {
+            r.versions
+                .get("sim")
+                .and_then(|v| policies_of(v))
+                .map(|p| (r.span.run_id, p))
+        })
         .collect();
     let mut deltas = Deltas::new();
     let mut prev: Option<&MarkPoint> = None;
@@ -541,12 +546,13 @@ async fn edge_inputs<C: CellData>(
         let fresh = || bankroll_for(env, &sim, m.run_id, &m.account_id).map(|b| m.equity - b);
         let delta = match p {
             Some(p) if fam.runs.contains_key(&p.run_id) => Some(m.equity - p.equity),
-            // the previous mark is another premise key's: if that run traded other policies
-            // (another `sim` version), every account started fresh at this run (scanner
-            // `restore_trader`), so this first mark counts against the bankroll; if the policies
-            // were the same, the account was restored and the change straddles two keys: skipped
+            // the previous mark is another premise key's run. Scanner `restore_trader` starts
+            // every account fresh only when the policies file changed: other policies -> this
+            // first mark counts from the bankroll; the same policies (e.g. a `sim` code bump) ->
+            // the account was restored, so it telescopes from its previous mark; unknown -> skip
             Some(p) => match (sim.get(&p.run_id), sim.get(&m.run_id)) {
                 (Some(a), Some(b)) if a != b => fresh(),
+                (Some(_), Some(_)) => Some(m.equity - p.equity),
                 _ => None,
             },
             // no mark before this one, ever: the account began inside the window, so its first
@@ -562,11 +568,21 @@ async fn edge_inputs<C: CellData>(
     Ok((lat, deltas))
 }
 
+/// A `sim` premise version is `{code}+{sha8(sim_section(policies_sha256))}` (arb-core
+/// `effective_version`, scanner `premises::section`): the part after the last `+` changes with
+/// the policies file and only with it, while the code part also moves on a `sim` code bump that
+/// keeps the policies (and the accounts, which `restore_trader` then restores). The store exposes
+/// no run's policies_sha256 to analyze, so this suffix is the exact comparison available
+/// (a 32-bit hash: two different policies files colliding is ~2^-32).
+fn policies_of(sim_version: &str) -> Option<&str> {
+    sim_version.rsplit_once('+').map(|(_, config)| config)
+}
+
 /// The starting bankroll of `account_id` in run `run_id`. A run's paper_accounts rows come from
-/// its policies file (scanner `account_rows`), and the `sim` premise version embeds that file's
-/// sha256, so two runs with the same `sim` version have the same bankroll per account id. The
-/// store gives the newest live run's rows, so this is known exactly when `run_id` is that run or
-/// has its `sim` version; otherwise None (the delta is skipped, never guessed).
+/// its policies file (scanner `account_rows`), so two runs with the same policies (`policies_of`
+/// their `sim` versions) have the same bankroll per account id. The store gives the newest live
+/// run's rows, so this is known exactly when `run_id` is that run or has its policies; otherwise
+/// None (the delta is skipped, never guessed).
 fn bankroll_for(
     env: &Env<'_>,
     sim: &BTreeMap<i64, &str>,

@@ -57,9 +57,10 @@ fn emp_reference(m: &CountMap, grid: &[i64]) -> Vec<Option<Decimal>> {
         .collect()
 }
 
-/// Values from a narrow range, so ties are the rule (several entries collapse on one key).
+/// Values from a narrow range, so ties are the rule (several entries collapse on one key); a
+/// zero count is allowed, as a window subtraction can leave one.
 fn countmap() -> impl Strategy<Value = CountMap> {
-    proptest::collection::vec((-5i64..40, 1i64..4), 0..40).prop_map(|v| {
+    proptest::collection::vec((-5i64..40, 0i64..4), 0..40).prop_map(|v| {
         let mut m = CountMap::new();
         for (k, c) in v {
             *m.entry(k).or_insert(0) += c;
@@ -73,10 +74,8 @@ fn countmap() -> impl Strategy<Value = CountMap> {
 fn durmap(event_max: i64) -> impl Strategy<Value = DurMap> {
     proptest::collection::vec((0i64..30, 0i64..event_max, 0i64..4), 0..40).prop_map(|v| {
         let mut m = DurMap::new();
+        // (0, 0) entries allowed: a window subtraction can leave them behind
         for (t, e, c) in v {
-            if e + c == 0 {
-                continue;
-            }
             let x = m.entry(t).or_insert((0, 0));
             x.0 += e;
             x.1 += c;

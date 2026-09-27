@@ -1106,3 +1106,64 @@ async fn a_fresh_start_under_new_policies_counts_from_the_bankroll() {
     rw.close().await;
     db.drop(owner).await;
 }
+
+#[tokio::test]
+async fn a_sim_code_bump_under_the_same_policies_restores_and_telescopes() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r1 = run(&owner, T0 - 6 * H).await;
+    owner
+        .insert_run_premises(&premises_sim(r1, "1+bb", true))
+        .await
+        .unwrap();
+    owner.end_run(r1, T0 - 4 * H, "shutdown").await.unwrap();
+    paper(
+        &owner,
+        vec![p0(r1, dec!(1000))],
+        vec![mark(r1, T0 - 5 * H, dec!(1200))],
+    )
+    .await;
+    // sim code 1 -> 2, same policies (+bb): scanner restore_trader restores every account
+    let r2 = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises_sim(r2, "2+bb", true))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r2,
+            "no_basket",
+            T0 - 2 * H,
+            Some(T0 - 2 * H + 1_000),
+        )],
+    )
+    .await;
+    paper(
+        &owner,
+        vec![p0(r2, dec!(1000))],
+        vec![
+            mark(r2, T0 - 2 * H, dec!(1201)),
+            mark(r2, T0 - 2 * H + 10 * M, dec!(1203)),
+        ],
+    )
+    .await;
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0)
+        .await
+        .unwrap();
+    let e = body(&rw, "all", "EDGE").await;
+    assert!(e["premise_key"].as_str().unwrap().contains("sim=2+bb"));
+    assert_eq!(
+        cell(&e, CAPTURED, "ours"),
+        "3",
+        "+1 from run 1's last mark (restored, not +201 from the bankroll), then +2"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
