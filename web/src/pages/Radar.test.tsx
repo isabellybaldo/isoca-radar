@@ -44,7 +44,7 @@ describe('Radar', () => {
     });
     renderRadar();
     await screen.findByText(NO_ARB);
-    expect(h2s()).toEqual(['TODAY (UTC)', 'ARBITRAGE (YES / NO) · 0', 'NOT ARBITRAGE: INCOMPLETE SETS · 0']);
+    expect(h2s()).toEqual(['TODAY (UTC)', 'SWEET SPOTS · LAST 30 DAYS', 'ARBITRAGE (YES / NO) · 0', 'NOT ARBITRAGE: INCOMPLETE SETS · 0']);
   });
 
   it('lists arbitrage with PROFIT @ $100 first, the depth figures second, and a link to the detail', async () => {
@@ -212,6 +212,7 @@ describe('Radar', () => {
     expect(names).toEqual([
       'Help: What are the hearts?',
       'Help: What does today count?',
+      'Help: What is a sweet spot?',
       'Help: What is an episode?',
       'Help: Why is an incomplete set not arbitrage?',
     ]);
