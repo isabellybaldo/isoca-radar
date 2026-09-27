@@ -7,12 +7,14 @@ import { EpisodeDetail } from './pages/EpisodeDetail';
 import { Episodes } from './pages/Episodes';
 import { Health } from './pages/Health';
 import { Paper } from './pages/Paper';
+import { Papers } from './pages/Papers';
 import { Radar } from './pages/Radar';
 
 const NAV = [
   { to: '/', label: 'RADAR', end: true },
   { to: '/episodes', label: 'EPISODES', end: false },
   { to: '/paper', label: 'PAPER', end: false },
+  { to: '/papers', label: 'PAPERS', end: false },
   { to: '/health', label: 'HEALTH', end: false },
 ];
 
@@ -48,6 +50,7 @@ export function App() {
           <Route path="/episodes" element={<Episodes />} />
           <Route path="/episodes/:id" element={<EpisodeDetail />} />
           <Route path="/paper" element={<Paper />} />
+          <Route path="/papers" element={<Papers />} />
           <Route path="/health" element={<Health />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

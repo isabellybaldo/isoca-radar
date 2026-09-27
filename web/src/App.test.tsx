@@ -17,7 +17,7 @@ describe('App shell', () => {
       </MemoryRouter>,
     );
     expect(screen.getByText('♥ isoca-radar')).toBeInTheDocument();
-    for (const name of ['RADAR', 'EPISODES', 'PAPER', 'HEALTH']) {
+    for (const name of ['RADAR', 'EPISODES', 'PAPER', 'PAPERS', 'HEALTH']) {
       expect(screen.getByRole('link', { name })).toBeInTheDocument();
     }
     expect(screen.getByText('RECONNECTING')).toBeInTheDocument();

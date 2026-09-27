@@ -209,3 +209,64 @@ export interface LedgerEntry {
   cash_after: Dec;
   equity: Dec | null;
 }
+export type CardStatus = 'live' | 'warming' | 'thin' | 'under_review';
+export interface CardRow {
+  label: string;
+  /** count | × | s | % | bps | USD | ms */
+  unit: string;
+  paper: Dec | null;
+  their: Dec | null;
+  ours: Dec | null;
+}
+export interface DecayPoint {
+  scenario: string;
+  latency_ms: number;
+  net_ms: number;
+  captured: Dec | null;
+  rate_pct: Dec | null;
+  headline: boolean;
+}
+export interface CardSeries {
+  bars?: { label: string; value: number }[];
+  curves?: { label: string; points: { t_ms: number; s: Dec }[]; median_ms: Dec | null }[];
+  bins?: { side: string; lo_bps: number; hi_bps: number | null; net: number; gross: number }[];
+  decay?: DecayPoint[];
+  measured?: { latency_ms: number; host: string };
+}
+export interface CardBody {
+  card: string;
+  paper: string;
+  title: string;
+  win: string;
+  status: CardStatus;
+  premise_key: string;
+  hash: string;
+  data_from_ms: number | null;
+  data_to_ms: number | null;
+  since_ms: number | null;
+  n: number;
+  columns: CardRow[];
+  series: CardSeries;
+  notes: string[];
+  thin_reasons: string[];
+  episode_link: string | null;
+  computed_ms: number;
+}
+export interface CardsResponse {
+  win: string;
+  cards: CardBody[];
+}
+export interface PaperEntry {
+  id: string;
+  cite: string;
+  status: 'live' | 'coming_later' | 'dropped';
+  note: string | null;
+  cards: string[];
+}
+export interface CardsMeta {
+  tick: { last_tick_ms: number; analyze_version: string; tick_ms: number } | null;
+  last_error: { ms: number; text: string } | null;
+  catch_up: Record<string, { key: string; next_hour: number; done: boolean }>;
+  papers: PaperEntry[];
+  not_replicated: { item: string; why: string }[];
+}

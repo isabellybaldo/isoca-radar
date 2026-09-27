@@ -1,5 +1,6 @@
 import type {
-  EpisodeDetail, EpisodeSummary, HealthNow, HealthPoint, LedgerEntry, PaperAccount, Position, Today,
+  CardBody, CardsMeta, EpisodeDetail, EpisodeSummary, HealthNow, HealthPoint, LedgerEntry, PaperAccount,
+  Position, Today,
 } from '../api/types';
 
 export function healthFixture(o: Partial<HealthNow> = {}): HealthNow {
@@ -86,5 +87,43 @@ export function healthPointFixture(minute_ms: number, reconnects: number): Healt
   return {
     minute_ms, run_id: 3, msgs: 258_000, drops: 0, reconnects, lag_p50_ms: 78, lag_p99_ms: 1900, shards: 40,
     parked_shards: 0, capture_paused: false,
+  };
+}
+
+export const CARD_NOW = 1_790_000_000_000;
+
+export function cardFixture(o: Partial<CardBody> = {}): CardBody {
+  return {
+    card: 'G1', paper: 'gebele-2026', title: 'G1 · Side asymmetry', win: '7d', status: 'live',
+    premise_key: 'detector_no=1+e3b0c442;detector_yes=1+e3b0c442;episode_def=1+9d1c1e3a;fees=1+e3b0c442',
+    hash: '3f2a9c1b7d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4',
+    data_from_ms: CARD_NOW - 7 * 86_400_000, data_to_ms: CARD_NOW, since_ms: CARD_NOW - 10 * 86_400_000, n: 1240,
+    columns: [
+      { label: 'YES-side episodes', unit: 'count', paper: '2098', their: '1200', ours: '1150' },
+      { label: 'NO-side episodes', unit: 'count', paper: '36', their: '40', ours: '38' },
+      { label: 'YES : NO', unit: '×', paper: '58.28', their: '30', ours: '30.26' },
+    ],
+    series: { bars: [{ label: 'YES', value: 1150 }, { label: 'NO', value: 38 }] },
+    notes: ['PAPER: CLOB sample, hour-stratified, 14 Apr 2026 00:00 UTC to 19 May 2026 06:00 UTC.'],
+    thin_reasons: [], episode_link: null, computed_ms: CARD_NOW,
+    ...o,
+  };
+}
+
+export function metaFixture(o: Partial<CardsMeta> = {}): CardsMeta {
+  return {
+    tick: { last_tick_ms: CARD_NOW - 5 * 60_000, analyze_version: 'abc1234', tick_ms: 42 },
+    last_error: null,
+    catch_up: { g1: { key: 'k', next_hour: CARD_NOW, done: true } },
+    papers: [
+      { id: 'gebele-2026', cite: 'Gebele, Mutzel, Matthes (2026). Executable Arbitrage and Market Efficiency in Prediction Markets. arXiv 2608.00666 v1.', status: 'live', note: null, cards: ['G1', 'G2', 'G3', 'G4'] },
+      { id: 'saguillo', cite: 'Saguillo et al.', status: 'coming_later', note: 'coming later: needs the on-chain dataset and somewhere to put it that is not your laptop', cards: [] },
+      { id: 'cheng', cite: 'Cheng et al.', status: 'dropped', note: "dropped: the owner's call, not a data problem", cards: [] },
+    ],
+    not_replicated: [
+      { item: 'Converter profits', why: "They come from on-chain conversions, which we don't observe." },
+      { item: 'Same-condition findings of the WebSocket validation appendix (20 inconsistencies in 308,416,666 messages)', why: 'They need the on-chain side too.' },
+    ],
+    ...o,
   };
 }

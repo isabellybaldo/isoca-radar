@@ -1,6 +1,6 @@
 import type {
-  EpisodeDetail, EpisodeSummary, EquitySeries, HealthEnvelope, HealthSeries, Integrity, LedgerEntry,
-  OpenEpisodes, Page, PaperAccount, Position, Today,
+  CardsMeta, CardsResponse, EpisodeDetail, EpisodeSummary, EquitySeries, HealthEnvelope, HealthSeries,
+  Integrity, LedgerEntry, OpenEpisodes, Page, PaperAccount, Position, Today,
 } from './types';
 
 export class ApiError extends Error {
@@ -109,4 +109,6 @@ export const api = {
   paperPositions: (signal?: AbortSignal) => getJson<{ items: Position[] }>('/api/paper/positions', signal),
   paperLedger: (account: string, cursor: string | null, signal?: AbortSignal) =>
     getJson<Page<LedgerEntry>>(`/api/paper/ledger${qs({ account, cursor })}`, signal),
+  cards: (win: string, signal?: AbortSignal) => getJson<CardsResponse>(`/api/cards${qs({ win })}`, signal),
+  cardsMeta: (signal?: AbortSignal) => getJson<CardsMeta>('/api/cards/meta', signal),
 };
