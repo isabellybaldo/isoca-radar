@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { api } from '../api/client';
 import type { LedgerEntry, PaperAccount, Position } from '../api/types';
@@ -9,6 +10,7 @@ import { LineChart, type Series } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
+import { shortId } from '../lib/labels';
 import { formatDecimal, formatMoney, isZero } from '../lib/money';
 import { fmtUtcDateTime } from '../lib/time';
 
@@ -52,32 +54,62 @@ const ledgerColumns: Column<LedgerEntry>[] = [
 
 const positionColumns: Column<Position>[] = [
   { key: 'acct', label: 'ACCT', render: (p) => p.account_id.split('-')[0] },
-  { key: 'market', label: 'MARKET', render: (p) => <span title={p.market_id}>{p.event_title ?? p.market_id}</span> },
+  {
+    key: 'market',
+    label: 'MARKET',
+    // No outcome name is stored anywhere (legs carry ids only), so the short market id tells rows apart.
+    render: (p) => (
+      <span title={p.market_id}>
+        {p.event_title !== null && (
+          <>
+            <span>{p.event_title}</span>{' '}
+          </>
+        )}
+        <span className="dim">{shortId(p.market_id)}</span>
+      </span>
+    ),
+  },
   { key: 'side', label: 'SIDE', render: (p) => `${p.outcome.toUpperCase()}${p.returned ? ' (returned)' : ''}` },
   { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty) },
   { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} /> },
 ];
 
+const CONTROL = 'P3-naive';
+
 function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
   const ids = accounts.map((a) => a.account_id);
-  const eq = useApi((s) => Promise.all(ids.map((id) => api.paperEquity(id, 24, s))), [ids.join('|')]);
+  // Each result carries its own account: a render that still holds the previous scenario's answer
+  // (before the refetch lands) never pairs it with this scenario's accounts by position.
+  const eq = useApi(
+    (s) => Promise.all(accounts.map((a) => api.paperEquity(a.account_id, 24, s).then((e) => ({ a, e })))),
+    [ids.join('|')],
+  );
+  const [hideControl, setHideControl] = useState(false);
+  const hasControl = accounts.some((a) => a.policy === CONTROL);
   return (
     <Box title={`EQUITY · ${formatMoney(accounts[0]?.bankroll ?? null)} EACH · LAST 24 H`} help="equity">
+      {hasControl && (
+        <label className="check">
+          <input type="checkbox" checked={hideControl} onChange={(e) => setHideControl(e.target.checked)} />
+          hide P3 (control)
+        </label>
+      )}
       <Loadable state={eq} what="equity">
-        {(all) => {
-          const series: Series[] = all.map((e, i) => ({
-            label: policyLabel(accounts[i]),
-            tone: TONES[accounts[i].policy] ?? 'p0',
+        {(loaded) => {
+          const all = loaded.filter(({ a }) => ids.includes(a.account_id) && !(hideControl && a.policy === CONTROL));
+          const series: Series[] = all.map(({ a, e }) => ({
+            label: policyLabel(a),
+            tone: TONES[a.policy] ?? 'p0',
             // geometry only: the numbers never reach the screen as text
             points: e.points.map((p) => ({ x: p.t_ms, y: Number(p.equity) })),
           }));
-          const ext = extremes(all.flatMap((e) => e.points.map((p) => p.equity)));
+          const ext = extremes(all.flatMap(({ e }) => e.points.map((p) => p.equity)));
           return (
             <>
               <LineChart
                 label="equity per account"
-                xMin={Math.min(...all.map((e) => e.from_ms))}
-                xMax={Math.max(...all.map((e) => e.to_ms))}
+                xMin={Math.min(...loaded.map(({ e }) => e.from_ms))}
+                xMax={Math.max(...loaded.map(({ e }) => e.to_ms))}
                 series={series}
                 yLabels={ext ? { bottom: formatMoney(ext.min), top: formatMoney(ext.max) } : undefined}
               />
@@ -116,14 +148,17 @@ function Cards({ accounts }: { accounts: PaperAccount[] }) {
   );
 }
 
-function Ledger({ accounts, account, cursor, onAccount, onCursor }: {
+function Ledger({ accounts, account, cursor, marks, onAccount, onCursor, onMarks }: {
   accounts: PaperAccount[];
   account: string;
   cursor: string | null;
+  /** Show the minute `mark` rows (hidden by default). */
+  marks: boolean;
   onAccount: (id: string) => void;
   onCursor: (c: string | null) => void;
+  onMarks: (show: boolean) => void;
 }) {
-  const page = useApi((s) => api.paperLedger(account, cursor, s), [account, cursor]);
+  const page = useApi((s) => api.paperLedger(account, cursor, !marks, s), [account, cursor, marks]);
   const current = accounts.find((a) => a.account_id === account);
   return (
     <Box title={`LEDGER · ${current ? policyCardTitle(current.policy) : account}`} help="ledger">
@@ -134,6 +169,10 @@ function Ledger({ accounts, account, cursor, onAccount, onCursor }: {
           </button>
         ))}
       </div>
+      <label className="check">
+        <input type="checkbox" checked={marks} onChange={(e) => onMarks(e.target.checked)} />
+        show minute marks
+      </label>
       <Loadable state={page} what="the ledger">
         {(d) =>
           d.items.length === 0 ? (
@@ -185,7 +224,7 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
           ))}
         </div>
       </Box>
-      <EquityChart accounts={inScenario} />
+      <EquityChart key={scenario} accounts={inScenario} />
       <Cards accounts={inScenario} />
       <div className="grid2">
         <Box title="AWAITING RESOLUTION" help="awaiting">
@@ -205,8 +244,10 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
             accounts={inScenario}
             account={account}
             cursor={sp.get('lcursor')}
+            marks={sp.get('marks') === '1'}
             onAccount={(id) => set({ account: id, lcursor: null })}
             onCursor={(c) => set({ lcursor: c })}
+            onMarks={(show) => set({ marks: show ? '1' : null, lcursor: null })}
           />
         )}
       </div>

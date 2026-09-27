@@ -107,8 +107,9 @@ export const api = {
   paperEquity: (account: string, hours: number, signal?: AbortSignal) =>
     getJson<EquitySeries>(`/api/paper/equity${qs({ account, hours })}`, signal),
   paperPositions: (signal?: AbortSignal) => getJson<{ items: Position[] }>('/api/paper/positions', signal),
-  paperLedger: (account: string, cursor: string | null, signal?: AbortSignal) =>
-    getJson<Page<LedgerEntry>>(`/api/paper/ledger${qs({ account, cursor })}`, signal),
+  /** `hideMarks` drops the minute `mark` rows server-side, before paging. */
+  paperLedger: (account: string, cursor: string | null, hideMarks: boolean, signal?: AbortSignal) =>
+    getJson<Page<LedgerEntry>>(`/api/paper/ledger${qs({ account, cursor, hide_marks: hideMarks ? 1 : null })}`, signal),
   cards: (win: string, signal?: AbortSignal) => getJson<CardsResponse>(`/api/cards${qs({ win })}`, signal),
   cardsMeta: (signal?: AbortSignal) => getJson<CardsMeta>('/api/cards/meta', signal),
 };

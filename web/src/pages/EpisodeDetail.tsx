@@ -8,7 +8,7 @@ import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
 import { FLAG_WORDS } from '../lib/flags';
-import { kindTag } from '../lib/labels';
+import { kindTag, shortId } from '../lib/labels';
 import { formatDecimal, signOf } from '../lib/money';
 import { fmtDuration, fmtLocal, fmtUtcTime } from '../lib/time';
 
@@ -50,10 +50,6 @@ export function actionSide(action: string): string {
 function signedDec(v: string | null): string {
   if (v === null) return '—';
   return signOf(v) > 0 ? `+${formatDecimal(v)}` : formatDecimal(v);
-}
-
-function shortId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
 }
 
 const legColumns: Column<Leg>[] = [

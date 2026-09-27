@@ -61,15 +61,15 @@ export const HELP = {
   },
   equity: {
     title: 'What is equity?',
-    text: 'Cash plus positions marked at the current prices, for each paper account in the chosen scenario. Every account starts with the same bankroll. No real money exists anywhere in this project.',
+    text: 'Cash plus positions marked at the current prices, for each paper account in the chosen scenario. Every account starts with the same bankroll. P3 naive is the control (it buys incomplete sets too); hide it when its drawdown squashes the other lines. No real money exists anywhere in this project.',
   },
   awaiting: {
     title: 'What is awaiting resolution?',
-    text: 'Positions that only pay when the event resolves: bought YES baskets, and YES tokens returned by a NO conversion. They are marked but not cashable until the event ends.',
+    text: 'Positions that only pay when the event resolves: bought YES baskets, and YES tokens returned by a NO conversion. They are marked but not cashable until the event ends. The grey id after the event names the market (the outcome) held; the full id is in its tooltip.',
   },
   ledger: {
     title: 'What is the ledger?',
-    text: 'Every paper cash movement of the chosen account: buys, conversions, settlements and marks, in order. Cash, fees and realized profit add up exactly; nothing is rounded on the way.',
+    text: 'Every paper cash movement of the chosen account: buys, conversions, settlements and marks, in order. Cash, fees and realized profit add up exactly; nothing is rounded on the way. The once-a-minute marks are hidden unless you tick show minute marks.',
   },
   paper: {
     title: 'What is paper trading?',

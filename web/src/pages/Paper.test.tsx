@@ -1,10 +1,22 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { accountFixture, edgeFixture, ledgerFixture, positionFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { PAPER_EMPTY, PAPER_QUIP, Paper, extremes, policyLabel } from './Paper';
+
+const equityRoute = (url: URL) => ({
+  account_id: url.searchParams.get('account'),
+  from_ms: 0,
+  to_ms: 100,
+  points: url.searchParams.get('account')?.endsWith('nodelay')
+    ? []
+    : [
+        { t_ms: 0, equity: '1000' },
+        { t_ms: 50, equity: url.searchParams.get('account')?.startsWith('P3') ? '713.4' : '1002.56' },
+      ],
+});
 
 function Loc() {
   return <output data-testid="loc">{useLocation().search}</output>;
@@ -91,5 +103,90 @@ describe('Paper', () => {
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
     expect(headings[0]).toBe('EDGE CAPTURE');
     expect(await screen.findByRole('img', { name: 'capture rate by latency' })).toBeInTheDocument();
+  });
+
+  it('renders sp-idle-nodelay after another scenario, with fewer accounts there and no marks yet', async () => {
+    mockApi({
+      '/api/paper/accounts': {
+        items: [
+          ...accounts,
+          accountFixture({
+            account_id: 'P0-converter/sp-idle-nodelay', scenario: 'sp-idle-nodelay', marked_ms: null, cash: null, equity: null,
+            realized: null, unrealized: null, fees_paid: null, locked: null, max_drawdown: null, n_positions: null,
+          }),
+        ],
+      },
+      '/api/paper/positions': { items: [positionFixture()] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper?scenario=sp-idle');
+    expect(await screen.findByText('P3 naive')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'SP-IDLE-NODELAY' }));
+    expect(screen.getByRole('button', { name: 'SP-IDLE-NODELAY' })).toHaveClass('on');
+    expect(await screen.findByText('No marks yet. Nothing ventured, nothing lost.')).toBeInTheDocument();
+    expect(await screen.findByText('Nothing to draw yet. The chart is patient.')).toBeInTheDocument();
+    expect(screen.queryByText('P3 naive')).not.toBeInTheDocument();
+    expect(await screen.findByText('Empty ledger. Nothing ventured, nothing lost.')).toBeInTheDocument();
+  });
+
+  it('names the outcome of each awaiting position by a short market id, not only the event', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': {
+        items: [
+          positionFixture({ market_id: '0x5f2e11aa22bb33cc44dd9a01', event_title: 'Best AI model end of September?' }),
+          positionFixture({ market_id: '0x77aa11aa22bb33cc44dd4c3d', event_title: 'Best AI model end of September?' }),
+        ],
+      },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper?scenario=sp-idle');
+    expect(await screen.findByText('0x5f2e…9a01')).toBeInTheDocument();
+    expect(screen.getByText('0x77aa…4c3d')).toBeInTheDocument();
+    expect(screen.getAllByText('Best AI model end of September?')).toHaveLength(2);
+  });
+
+  it('hides minute marks in the ledger by default, shows them on request, and still pages', async () => {
+    const f = mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': (url: URL) =>
+        url.searchParams.get('hide_marks') === '1'
+          ? { items: [ledgerFixture()], next_cursor: url.searchParams.get('cursor') ? null : '3_1' }
+          : { items: [ledgerFixture({ seq: 2, kind: 'mark', cash_delta: '0', fees: '0', equity: '1002' }), ledgerFixture()], next_cursor: null },
+    });
+    renderAt('/paper?scenario=sp-idle');
+    expect(await screen.findByText('−$99.84')).toBeInTheDocument();
+    expect(screen.queryByText('mark')).not.toBeInTheDocument();
+    const ledgerUrls = () => f.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/api/paper/ledger'));
+    expect(ledgerUrls().every((u) => u.includes('hide_marks=1'))).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: 'OLDER →' }));
+    await waitFor(() => expect(ledgerUrls().at(-1)).toContain('cursor=3_1'));
+    expect(ledgerUrls().at(-1)).toContain('hide_marks=1');
+    const toggle = await screen.findByRole('checkbox', { name: 'show minute marks' });
+    expect(toggle).not.toBeChecked();
+    await userEvent.click(toggle);
+    expect(await screen.findByText('mark')).toBeInTheDocument();
+    expect(ledgerUrls().at(-1)).not.toContain('hide_marks');
+    expect(ledgerUrls().at(-1)).not.toContain('cursor');
+  });
+
+  it('can hide the P3 control line so its drawdown does not flatten the others', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper?scenario=sp-idle');
+    expect(await screen.findByText('low $713.40')).toBeInTheDocument();
+    expect(screen.getByText('P3 naive')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'hide P3 (control)' }));
+    expect(screen.getByText('low $1,000.00')).toBeInTheDocument();
+    expect(screen.queryByText('P3 naive')).not.toBeInTheDocument();
+    expect(screen.getAllByText('P3 · NAIVE').length).toBeGreaterThan(0); // its card and ledger button stay
   });
 });

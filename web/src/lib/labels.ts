@@ -15,3 +15,8 @@ export function kindTag(kind: string, long = false): { text: string; tone: TagTo
       return { text: kind.toUpperCase(), tone: 'plain' };
   }
 }
+
+/** A long market id, short enough to tell rows apart: "0x5f2e…9a01" (the full id goes in a title). */
+export function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
+}

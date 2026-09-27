@@ -76,6 +76,7 @@ tr.dim td { color: var(--dim); }
 .dim { color: var(--dim); }
 .quip { opacity: 0.9; }
 .box.dimmed, .box.dimmed a { color: var(--dim); }
+.check { display: inline-flex; gap: 6px; align-items: center; margin: 4px 0; }
 .legend-note { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .error { color: var(--salmon); }
 .blink { animation: blink 1s steps(1) infinite; }
