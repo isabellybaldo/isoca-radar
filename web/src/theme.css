@@ -202,3 +202,8 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .claim dt { color: var(--dim); font-size: 13px; }
 .claim dd { font-family: var(--big); font-size: 30px; line-height: 1; white-space: nowrap; }
 .cardv { border: 2px solid var(--line2); }
+.eqwrap { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+.endlegend { gap: 4px; }
+.endlegend li { white-space: nowrap; }
+.sw.mk { background: var(--line2); }
+@media (max-width: 600px) { .eqwrap { grid-template-columns: 1fr; } }

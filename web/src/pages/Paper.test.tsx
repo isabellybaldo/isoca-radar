@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
@@ -81,7 +81,12 @@ describe('Paper', () => {
     expect(screen.getByText('−$286.60')).toHaveClass('neg');
     expect(screen.getByText('Fed decision in October?')).toBeInTheDocument();
     expect(await screen.findByText('−$99.84')).toBeInTheDocument();
-    const urls = f.mock.calls.map((c) => String(c[0]));
+    const legend = screen.getByRole('list', { name: 'equity now' });
+    expect(within(legend).getByText('P3 naive')).toBeInTheDocument();
+    expect(within(legend).getByText('$713.40')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: /^ACCOUNTS/ })).toBeInTheDocument();
+    for (const f2 of ['all numbers', 'ledger', 'awaiting resolution']) expect(screen.getByText(f2).closest('details')).not.toHaveAttribute('open');
+    const urls = f.mock.calls.map((c) => String(c[0])); // f2 avoids shadowing the mockApi handle `f` above
     expect(urls.some((u) => u.includes('/api/paper/equity?account=P3-naive%2Fsp-idle&hours=24'))).toBe(true);
     expect(urls.some((u) => u.includes('/api/paper/ledger?account=P0-converter%2Fsp-idle'))).toBe(true);
   });
@@ -166,6 +171,7 @@ describe('Paper', () => {
     expect(screen.queryByText('mark')).not.toBeInTheDocument();
     const ledgerUrls = () => f.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/api/paper/ledger'));
     expect(ledgerUrls().every((u) => u.includes('hide_marks=1'))).toBe(true);
+    await userEvent.click(screen.getByText('ledger'));
     await userEvent.click(screen.getByRole('button', { name: 'OLDER →' }));
     await waitFor(() => expect(ledgerUrls().at(-1)).toContain('cursor=3_1'));
     expect(ledgerUrls().at(-1)).toContain('hide_marks=1');
@@ -206,6 +212,6 @@ describe('Paper', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: 'hide P3 (control)' }));
     expect(screen.getByText('low $1,000.00')).toBeInTheDocument();
     expect(screen.queryByText('P3 naive')).not.toBeInTheDocument();
-    expect(screen.getAllByText('P3 · NAIVE').length).toBeGreaterThan(0); // its card and ledger button stay
+    expect(screen.getAllByText('P3 · NAIVE').length).toBeGreaterThan(0); // its accounts row and ledger button stay
   });
 });

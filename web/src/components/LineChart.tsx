@@ -58,6 +58,8 @@ export function LineChart({
   markers = [],
   yLabels,
   xLabels,
+  legend = true,
+  markerLabel,
 }: {
   series: Series[];
   label: string;
@@ -67,6 +69,10 @@ export function LineChart({
   yLabels?: { top: string; bottom: string };
   /** The x-axis range, already formatted (e.g. a duration string): "0.10 s" … "24 h 0 min". */
   xLabels?: { left: string; right: string };
+  /** Show the per-series legend below the chart (default true). */
+  legend?: boolean;
+  /** Extra legend entry for the marker swatch, e.g. "fill". */
+  markerLabel?: string;
 }) {
   const cols = series.map((s) => ({ ...s, points: toColumns(s.points, xMin, xMax, W) }));
   const all = cols.flatMap((s) => s.points);
@@ -104,14 +110,23 @@ export function LineChart({
           <span>high {yLabels.top}</span>
         </div>
       )}
-      <div className="legend">
-        {series.map((s) => (
-          <span key={s.label}>
-            <span className={`sw ${s.tone}`} aria-hidden="true" />
-            {s.label}
-          </span>
-        ))}
-      </div>
+      {(legend || markerLabel) && (
+        <div className="legend">
+          {legend &&
+            series.map((s) => (
+              <span key={s.label}>
+                <span className={`sw ${s.tone}`} aria-hidden="true" />
+                {s.label}
+              </span>
+            ))}
+          {markerLabel && (
+            <span>
+              <span className="sw mk" aria-hidden="true" />
+              {markerLabel}
+            </span>
+          )}
+        </div>
+      )}
     </figure>
   );
 }
