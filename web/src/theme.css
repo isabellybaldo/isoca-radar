@@ -136,11 +136,6 @@ svg.histo { display: block; width: 100%; height: 60px; background: var(--bg); }
 .stale { color: var(--salmon); }
 ul.plain { list-style: none; display: grid; gap: 6px; }
 @media (max-width: 760px) { .cardgrid { grid-template-columns: minmax(0, 1fr); } }
-svg.decay { height: 120px; }
-.decay .pt { fill: var(--teal); }
-.decay .pt.head { fill: var(--salmon); }
-/* F8 (controller ruling): the decay legend's "scenario · latency → rate" lines are data, not tags
-   or axis labels, so they stay at the 15 px body size (no smaller font-size override here). */
 .teaser { color: var(--teal); }
 @media (prefers-reduced-motion: reduce) { .toggle.wiggle, .blink { animation: none; } }
 .box-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -188,3 +183,17 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .iv.dim .bar { stroke: var(--line2); } .iv.dim .dot { fill: var(--dim); }
 .iv .dot.hollow { fill: var(--bg); stroke: var(--bad); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 @media (max-width: 600px) { .iv { grid-template-columns: 1fr auto; grid-template-areas: 'name num' 'track track' 'meta meta'; } }
+.latency { display: grid; gap: 2px; margin: 8px 0; }
+.lat-row { display: grid; grid-template-columns: minmax(min(100%, 160px), 1fr) minmax(0, 1.2fr); gap: 10px; align-items: center; }
+.lat-track { display: block; width: 100%; height: 16px; }
+.lat-track .axis { fill: var(--line2); }
+.lat-track .measured { fill: var(--salmon); }
+.lat-track .dot { fill: var(--teal); }
+.lat-track .dot.head { fill: var(--mint); }
+.lat-track .dot.hollow { fill: var(--bg); stroke: var(--teal); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.lat-label.head { font-weight: 700; }
+.split { display: grid; gap: 4px; margin: 8px 0; }
+.split-labels { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.split-bar { display: flex; height: 14px; border: 2px solid var(--line2); }
+.split-part { display: block; height: 100%; width: auto; margin: 0; }
+@media (max-width: 600px) { .lat-row { grid-template-columns: 1fr; } }

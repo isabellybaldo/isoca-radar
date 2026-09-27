@@ -103,7 +103,7 @@ describe('Paper', () => {
     await screen.findByText(PAPER_EMPTY);
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
     expect(headings[0]).toBe('EDGE CAPTURE');
-    expect(await screen.findByRole('img', { name: 'capture rate by latency' })).toBeInTheDocument();
+    expect(await screen.findByRole('figure', { name: 'capture rate by latency' })).toBeInTheDocument();
   });
 
   it('renders sp-idle-nodelay after another scenario, with fewer accounts there and no marks yet', async () => {

@@ -17,7 +17,7 @@ describe('EdgeCapture', () => {
   it('shows the decay chart, the measured marker, the split, the capital and the subtitle for 24H', async () => {
     const fetch = mockApi({ '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [edgeFixture({ win: '24h' })] }) });
     renderBox();
-    expect(await screen.findByRole('img', { name: 'capture rate by latency' })).toBeInTheDocument();
+    expect(await screen.findByRole('figure', { name: 'capture rate by latency' })).toBeInTheDocument();
     expect(String(fetch.mock.calls[0][0])).toBe('/api/cards?win=24h');
     expect(screen.getByText(EDGE_SUBTITLE)).toBeInTheDocument();
     expect(EDGE_SUBTITLE).toBe('The difference is physics and other people.');
