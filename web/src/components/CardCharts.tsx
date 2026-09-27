@@ -1,5 +1,6 @@
 import type { CardBody, CardSeries } from '../api/types';
 import { fmtDuration } from '../lib/time';
+import { DecayChart } from './DecayChart';
 import { LineChart, type Series } from './LineChart';
 
 /** Two pixel bars (G1). Counts, not money. */
@@ -107,5 +108,6 @@ export function CardChart({ card }: { card: CardBody }) {
   if (s.bars && s.bars.length > 0) return <SideBars bars={s.bars} />;
   if (s.curves && s.curves.length > 0) return <Survival curves={s.curves} />;
   if (s.bins && s.bins.length > 0) return <Histogram bins={s.bins} />;
+  if (s.decay && s.decay.length > 0) return <DecayChart points={s.decay} measured={s.measured ?? null} />;
   return null;
 }

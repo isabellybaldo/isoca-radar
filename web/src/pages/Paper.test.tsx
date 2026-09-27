@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
-import { accountFixture, ledgerFixture, positionFixture } from '../test/fixtures';
+import { accountFixture, edgeFixture, ledgerFixture, positionFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { PAPER_EMPTY, PAPER_QUIP, Paper, extremes, policyLabel } from './Paper';
 
@@ -78,5 +78,18 @@ describe('Paper', () => {
     expect(policyLabel({ policy: 'P0-converter', fee_bips: '10' })).toBe('P0 converter (fee 10 bp)');
     expect(extremes(['1000', '713.4', '1002.56'])).toEqual({ min: '713.4', max: '1002.56' });
     expect(extremes([])).toBeNull();
+  });
+
+  it('puts the Edge capture box at the top of the page', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: [] },
+      '/api/paper/positions': { items: [] },
+      '/api/cards': { win: '24h', cards: [edgeFixture({ win: '24h' })] },
+    });
+    renderAt('/paper');
+    await screen.findByText(PAPER_EMPTY);
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    expect(headings[0]).toBe('EDGE CAPTURE');
+    expect(await screen.findByRole('img', { name: 'capture rate by latency' })).toBeInTheDocument();
   });
 });

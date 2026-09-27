@@ -13,6 +13,7 @@ import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
+import { teaserLine } from '../lib/cards';
 import { useNow, useTicker } from '../lib/hooks';
 import { kindTag } from '../lib/labels';
 import { formatDecimal } from '../lib/money';
@@ -78,6 +79,8 @@ export function Radar() {
   const health = useApi((s) => api.healthNow(s), [], [healthTick, slow]);
   const open = useApi((s) => api.openEpisodes(s), [], [episodeTick, slow]);
   const today = useApi((s) => api.today(s), [], [episodeTick, slow]);
+  const edgeToday = useApi((s) => api.cards('today', s), [], [slow]);
+  const edge = edgeToday.data?.cards.find((c) => c.card === 'EDGE');
   const now = useNow(100);
   const rows = open.data?.items ?? [];
   const staleHealth = (health.data?.health?.age_ms ?? 0) > STALE_HEALTH_MS;
@@ -126,6 +129,7 @@ export function Radar() {
             <>
               <Spark values={d.hourly.map((h) => h.gross)} label="gross episodes per hour today" />
               <p className="quip">{todayQuip(d.gross, d.net)}</p>
+              {edge && <p className="quip teaser">{teaserLine(edge)}</p>}
             </>
           )}
         </Loadable>

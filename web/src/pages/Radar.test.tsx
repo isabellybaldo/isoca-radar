@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
-import { episodeSummaryFixture, healthFixture, todayFixture } from '../test/fixtures';
+import { edgeFixture, episodeSummaryFixture, healthFixture, todayFixture } from '../test/fixtures';
 import { jsonResponse, mockApi } from '../test/mockApi';
 import { EMPTY_RADAR, NO_HEALTH, OPEN_STALE, Radar, msgsPerSecond, todayQuip } from './Radar';
 
@@ -111,5 +111,16 @@ describe('Radar', () => {
     await screen.findByText(EMPTY_RADAR);
     const names = screen.getAllByRole('button', { name: /^Help: / }).map((b) => b.getAttribute('aria-label'));
     expect(names).toEqual(['Help: What are the hearts?', 'Help: What is an episode?', 'Help: What does today count?']);
+  });
+
+  it('adds the Edge capture teaser to the today box when analyze has a today result', async () => {
+    mockApi({
+      '/api/health/now': { health: healthFixture() },
+      '/api/episodes/open': { now_ms: 0, items: [] },
+      '/api/today': todayFixture(3, 1),
+      '/api/cards': { win: 'today', cards: [edgeFixture()] },
+    });
+    renderRadar();
+    expect(await screen.findByText('Edge on the table today: +$12.50 · captured at 145 ms: 3.2%.')).toBeInTheDocument();
   });
 });

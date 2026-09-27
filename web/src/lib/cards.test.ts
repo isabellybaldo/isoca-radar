@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cardFixture, CARD_NOW } from '../test/fixtures';
-import { STALE_MS, fmtValue, shortHash, statusLabel, statusTone, updatedText, warmingText } from './cards';
+import { cardFixture, CARD_NOW, edgeFixture } from '../test/fixtures';
+import { STALE_MS, fmtValue, shortHash, statusLabel, statusTone, teaserLine, updatedText, warmingText } from './cards';
 import { isoDay } from './time';
 
 describe('card helpers', () => {
@@ -43,5 +43,19 @@ describe('card helpers', () => {
     expect(updatedText(null, CARD_NOW)).toEqual({ text: 'analyze has not run yet', stale: true });
     expect(updatedText(CARD_NOW - 5 * 60_000, CARD_NOW)).toEqual({ text: 'updated 5 min ago', stale: false });
     expect(updatedText(CARD_NOW - STALE_MS - 60_000, CARD_NOW)).toEqual({ text: 'updated 46 min ago', stale: true });
+  });
+});
+
+describe('teaserLine', () => {
+  it('says the Radar line in the spec voice', () => {
+    expect(teaserLine(edgeFixture())).toBe('Edge on the table today: +$12.50 · captured at 145 ms: 3.2%.');
+  });
+
+  it('shows — for the rate when nothing was on the table, and $0.00 unsigned', () => {
+    const zero = edgeFixture({
+      columns: [{ label: 'edge on the table', unit: 'USD', paper: null, their: null, ours: '0' }],
+      series: { decay: [{ scenario: 'sp-idle', latency_ms: 300, net_ms: 145, captured: '0', rate_pct: null, headline: true }] },
+    });
+    expect(teaserLine(zero)).toBe('Edge on the table today: $0.00 · captured at 145 ms: —.');
   });
 });

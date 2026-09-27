@@ -132,6 +132,12 @@ svg.histo { display: block; width: 100%; height: 60px; background: var(--bg); }
 .stale { color: var(--salmon); }
 ul.plain { list-style: none; display: grid; gap: 6px; }
 @media (max-width: 760px) { .cardgrid { grid-template-columns: minmax(0, 1fr); } }
+svg.decay { height: 120px; }
+.decay .pt { fill: var(--teal); }
+.decay .pt.head { fill: var(--salmon); }
+/* F8 (controller ruling): the decay legend's "scenario · latency → rate" lines are data, not tags
+   or axis labels, so they stay at the 15 px body size (no smaller font-size override here). */
+.teaser { color: var(--teal); }
 @media (prefers-reduced-motion: reduce) { .toggle.wiggle, .blink { animation: none; } }
 @media (max-width: 640px) {
   body { padding: 8px; }

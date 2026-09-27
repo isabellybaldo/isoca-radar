@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type { LedgerEntry, PaperAccount, Position } from '../api/types';
 import { useApi, type ApiState } from '../api/useApi';
 import { Box } from '../components/Box';
+import { EdgeCapture } from '../components/EdgeCapture';
 import { EmptyState } from '../components/EmptyState';
 import { LineChart, type Series } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
@@ -217,16 +218,19 @@ export function Paper() {
   const accounts = useApi((s) => api.paperAccounts(s), []);
   const positions = useApi((s) => api.paperPositions(s), []);
   return (
-    <Loadable state={accounts} what="paper accounts">
-      {(d) =>
-        d.items.length === 0 ? (
-          <Box title="PAPER" help="paper">
-            <EmptyState text={PAPER_EMPTY} />
-          </Box>
-        ) : (
-          <PaperBody accounts={d.items} positions={positions} />
-        )
-      }
-    </Loadable>
+    <>
+      <EdgeCapture />
+      <Loadable state={accounts} what="paper accounts">
+        {(d) =>
+          d.items.length === 0 ? (
+            <Box title="PAPER" help="paper">
+              <EmptyState text={PAPER_EMPTY} />
+            </Box>
+          ) : (
+            <PaperBody accounts={d.items} positions={positions} />
+          )
+        }
+      </Loadable>
+    </>
   );
 }

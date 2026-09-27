@@ -110,6 +110,33 @@ export function cardFixture(o: Partial<CardBody> = {}): CardBody {
   };
 }
 
+export function edgeFixture(o: Partial<CardBody> = {}): CardBody {
+  return cardFixture({
+    card: 'EDGE', paper: 'edge', title: 'Edge capture', win: 'today',
+    columns: [
+      { label: 'edge on the table', unit: 'USD', paper: null, their: null, ours: '12.5' },
+      { label: 'NO side, cashable before settlement', unit: 'USD', paper: null, their: null, ours: '9.25' },
+      { label: 'YES side, locked until resolution', unit: 'USD', paper: null, their: null, ours: '3.25' },
+      { label: 'captured at sp-idle (145 ms)', unit: 'USD', paper: null, their: null, ours: '0.4' },
+      { label: 'capture rate, sp-idle', unit: '%', paper: null, their: null, ours: '3.2' },
+      { label: 'capital needed at once', unit: 'USD', paper: null, their: null, ours: '180' },
+      { label: 'biggest single opportunity', unit: 'USD', paper: null, their: null, ours: '1.25' },
+      { label: 'measured latency (estimate)', unit: 'ms', paper: null, their: null, ours: '200' },
+    ],
+    series: {
+      decay: [
+        { scenario: 'colo-idle', latency_ms: 52, net_ms: 1, captured: '3.1', rate_pct: '24.8', headline: false },
+        { scenario: 'sp-idle', latency_ms: 300, net_ms: 145, captured: '0.4', rate_pct: '3.2', headline: true },
+        { scenario: 'sp-burst', latency_ms: 450, net_ms: 145, captured: null, rate_pct: null, headline: false },
+      ],
+      measured: { latency_ms: 200, host: 'vps-kvm2' },
+    },
+    notes: ['upper bound: assumes first-in-line execution; CLOB queue ignored'],
+    episode_link: 'live-9-00000042',
+    ...o,
+  });
+}
+
 export function metaFixture(o: Partial<CardsMeta> = {}): CardsMeta {
   return {
     tick: { last_tick_ms: CARD_NOW - 5 * 60_000, analyze_version: 'abc1234', tick_ms: 42 },

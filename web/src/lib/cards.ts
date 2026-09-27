@@ -53,6 +53,14 @@ export function fmtValue(v: string | null, unit: string): string {
   }
 }
 
+/** Spec §6.2: "Edge on the table today: +$X · captured at 145 ms: Y%." (string operations only). */
+export function teaserLine(card: CardBody): string {
+  const onTable = card.columns.find((r) => r.label === ON_TABLE)?.ours ?? null;
+  const head = card.series.decay?.find((p) => p.headline);
+  const rate = head?.rate_pct ?? null;
+  return `Edge on the table today: ${formatMoney(onTable, { signed: true })} · captured at ${head ? head.net_ms : 145} ms: ${rate === null ? '—' : `${rate}%`}.`;
+}
+
 export function updatedText(lastTickMs: number | null, nowMs: number): { text: string; stale: boolean } {
   if (lastTickMs === null) return { text: 'analyze has not run yet', stale: true };
   const age = Math.max(0, nowMs - lastTickMs);
