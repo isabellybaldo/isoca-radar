@@ -43,4 +43,26 @@ describe('Help (?)', () => {
     expect(HELP.g2.title).toBe('What is Kaplan–Meier?');
     expect(HELP.status.title).toBe('What does warming mean?');
   });
+
+  it('closes on a click or tap outside it; a click inside the popover keeps it open', async () => {
+    render(
+      <div>
+        <p>elsewhere on the page</p>
+        <Help id="g3" />
+      </div>,
+    );
+    const btn = screen.getByRole('button', { name: /^Help: / });
+    const pop = document.getElementById(btn.getAttribute('aria-controls') ?? 'missing');
+    await userEvent.click(btn);
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(pop as HTMLElement);
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(screen.getByText('elsewhere on the page'));
+    expect(btn).toHaveAttribute('aria-expanded', 'false');
+    expect(pop).not.toBeVisible();
+    await userEvent.click(btn);
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(btn);
+    expect(btn).toHaveAttribute('aria-expanded', 'false');
+  });
 });

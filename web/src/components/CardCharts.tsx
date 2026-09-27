@@ -52,6 +52,9 @@ export function xOfTime(grid: number[], t: number): number {
  * marked, per spec §5.2 — a vertical marker sits at each curve's own median duration, on that same
  * shared axis. Axis-range text goes through `fmtDuration`, never a raw number.
  */
+/** The shared axis places grid points one step apart, whatever their durations: say so. */
+export const SURVIVAL_AXIS_NOTE = 'time axis: evenly spaced grid steps, not linear in time';
+
 export function Survival({ curves }: { curves: NonNullable<CardSeries['curves']> }) {
   const grid = sharedTimeGrid(curves);
   const series: Series[] = curves.map((c, i) => ({
@@ -64,15 +67,18 @@ export function Survival({ curves }: { curves: NonNullable<CardSeries['curves']>
     .map((c) => (c.median_ms === null ? null : xOfTime(grid, Number(c.median_ms))))
     .filter((m): m is number => m !== null);
   return (
-    <LineChart
-      label="survival by duration, both sides, both methods, medians marked"
-      xMin={0}
-      xMax={Math.max(1, grid.length - 1)}
-      series={series}
-      markers={markers}
-      xLabels={grid.length > 0 ? { left: fmtDuration(grid[0]), right: fmtDuration(grid[grid.length - 1]) } : undefined}
-      yLabels={{ bottom: '0', top: '1' }}
-    />
+    <>
+      <LineChart
+        label="survival by duration, both sides, both methods, medians marked"
+        xMin={0}
+        xMax={Math.max(1, grid.length - 1)}
+        series={series}
+        markers={markers}
+        xLabels={grid.length > 0 ? { left: fmtDuration(grid[0]), right: fmtDuration(grid[grid.length - 1]) } : undefined}
+        yLabels={{ bottom: '0', top: '1' }}
+      />
+      <p className="note">{SURVIVAL_AXIS_NOTE}</p>
+    </>
   );
 }
 

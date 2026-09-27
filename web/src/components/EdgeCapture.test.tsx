@@ -1,8 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
-import { edgeFixture } from '../test/fixtures';
+import { edgeFixture, metaFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { EDGE_EMPTY, EDGE_SUBTITLE, EdgeCapture } from './EdgeCapture';
 
@@ -37,5 +37,25 @@ describe('EdgeCapture', () => {
     await userEvent.click(screen.getByRole('button', { name: '7D' }));
     expect(fetch.mock.calls.some((c) => String(c[0]) === '/api/cards?win=7d')).toBe(true);
     expect(screen.getByRole('button', { name: '7D' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('dims the Edge rows when the last tick is stale, as the Papers page does', async () => {
+    mockApi({
+      '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [edgeFixture({ win: '24h' })] }),
+      '/api/cards/meta': metaFixture({ tick: { last_tick_ms: Date.now() - 2 * 3_600_000, analyze_version: 'abc1234', tick_ms: 42 } }),
+    });
+    renderBox();
+    await waitFor(() => expect(screen.getByText('edge on the table').closest('tr')).toHaveClass('dim'));
+  });
+
+  it('keeps the Edge rows undimmed when the last tick is fresh', async () => {
+    mockApi({
+      '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [edgeFixture({ win: '24h' })] }),
+      '/api/cards/meta': metaFixture({ tick: { last_tick_ms: Date.now() - 60_000, analyze_version: 'abc1234', tick_ms: 42 } }),
+    });
+    renderBox();
+    expect(await screen.findByText('edge on the table')).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20)); // let the meta response land
+    expect(screen.getByText('edge on the table').closest('tr')).not.toHaveClass('dim');
   });
 });

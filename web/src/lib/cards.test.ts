@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cardFixture, CARD_NOW, edgeFixture } from '../test/fixtures';
-import { STALE_MS, fmtValue, shortHash, statusLabel, statusTone, teaserLine, updatedText, warmingText } from './cards';
+import { STALE_MS, computedText, fmtValue, shortHash, statusLabel, statusTone, teaserLine, updatedText, warmingText } from './cards';
 import { isoDay } from './time';
 
 describe('card helpers', () => {
@@ -57,5 +57,13 @@ describe('teaserLine', () => {
       series: { decay: [{ scenario: 'sp-idle', latency_ms: 300, net_ms: 145, captured: '0', rate_pct: null, headline: true }] },
     });
     expect(teaserLine(zero)).toBe('Edge on the table today: $0.00 · captured at 145 ms: —.');
+  });
+});
+
+describe('computedText', () => {
+  it('says how old a card body is, in whole minutes, never negative', () => {
+    expect(computedText(CARD_NOW - 2 * 3_600_000, CARD_NOW)).toBe('computed 120 min ago');
+    expect(computedText(CARD_NOW - 59_999, CARD_NOW)).toBe('computed 0 min ago');
+    expect(computedText(CARD_NOW + 5_000, CARD_NOW)).toBe('computed 0 min ago');
   });
 });

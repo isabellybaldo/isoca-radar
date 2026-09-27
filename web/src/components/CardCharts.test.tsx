@@ -1,4 +1,4 @@
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import type { CardSeries } from '../api/types';
 import { Survival, sharedTimeGrid, xOfTime } from './CardCharts';
@@ -62,5 +62,10 @@ describe('Survival chart shared time axis (fix round 1)', () => {
   it('renders one marker per curve with a median, on the shared axis', () => {
     const { container } = render(<Survival curves={[km, empirical]} />);
     expect(container.querySelectorAll('rect.marker')).toHaveLength(2);
+  });
+
+  it('says under the chart that the time axis is spaced by grid step, not linear in time', () => {
+    render(<Survival curves={[km, empirical]} />);
+    expect(screen.getByText('time axis: evenly spaced grid steps, not linear in time')).toBeInTheDocument();
   });
 });

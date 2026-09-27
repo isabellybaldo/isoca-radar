@@ -1,11 +1,15 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { HELP, type HelpId } from '../help';
 
-/** The (?) button (spec §8.3): click, Enter or Space toggles; Escape closes and returns focus. */
+/**
+ * The (?) button (spec §8.3): click, Enter or Space toggles; Escape closes and returns focus; a
+ * click or tap outside the button and its popover closes it too.
+ */
 export function Help({ id }: { id: HelpId }) {
   const [open, setOpen] = useState(false);
   const popId = useId();
   const btn = useRef<HTMLButtonElement>(null);
+  const root = useRef<HTMLSpanElement>(null);
   const h = HELP[id];
   useEffect(() => {
     if (!open) return;
@@ -15,11 +19,19 @@ export function Help({ id }: { id: HelpId }) {
         btn.current?.focus();
       }
     };
+    const onPointer = (e: Event) => {
+      if (e.target instanceof Node && root.current?.contains(e.target)) return;
+      setOpen(false);
+    };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onPointer);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onPointer);
+    };
   }, [open]);
   return (
-    <span className="help">
+    <span className="help" ref={root}>
       <button
         ref={btn}
         type="button"

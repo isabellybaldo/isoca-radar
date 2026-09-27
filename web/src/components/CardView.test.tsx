@@ -2,6 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { UNDER_REVIEW } from '../lib/cards';
+import { fmtLocal, fmtUtcDateTime } from '../lib/time';
 import { cardFixture, CARD_NOW } from '../test/fixtures';
 import type { CardBody } from '../api/types';
 import { CardView } from './CardView';
@@ -85,5 +86,22 @@ describe('CardView', () => {
     expect(premise).toHaveClass('meta', 'premise');
     // "next to": the premise line immediately follows the n/hash line in the footer.
     expect(nLine.nextElementSibling).toBe(premise);
+  });
+
+  it('dims the rows while the premises are under review, so a catch-up 0 never reads as a result', () => {
+    renderCard(cardFixture({ status: 'under_review' }));
+    expect(screen.getByText('YES-side episodes').closest('tr')).toHaveClass('dim');
+  });
+
+  it('says how long ago its own body was computed, UTC on the page and local time on hover', () => {
+    const computed = CARD_NOW - 2 * 3_600_000; // a 30d/all body re-renders at most hourly
+    render(
+      <MemoryRouter>
+        <CardView card={cardFixture({ computed_ms: computed })} now={CARD_NOW + 7 * 60_000} />
+      </MemoryRouter>,
+    );
+    const age = screen.getByText(/^computed 127 min ago/);
+    expect(age).toHaveTextContent(`computed 127 min ago (${fmtUtcDateTime(computed)})`);
+    expect(age).toHaveAttribute('title', fmtLocal(computed));
   });
 });

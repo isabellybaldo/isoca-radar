@@ -232,7 +232,7 @@ pgrep -af 'find /data/capture'
 Then stop them and check again a few seconds later:
 ```bash
 pkill -f 'find /data/capture'; sleep 3; pgrep -af 'find /data/capture' || echo trim-loops-gone
-docker ps --format '{{.Names}} {{.Image}} {{.Command}}' | grep -F 'find /data/capture' || echo no-trim-containers
+docker ps --no-trunc --format '{{.Names}} {{.Image}} {{.Command}}' | grep -F 'find /data/capture' || echo no-trim-containers
 ```
 Expect `trim-loops-gone` and `no-trim-containers`. If a loop respawned, run the `pkill` once more.
 Capture can grow for the few minutes until §12: about 2 GB an hour, well inside the budget.
@@ -293,12 +293,14 @@ migrate`). 0006 runs in one transaction, so a failure leaves nothing half-applie
 Migration 0006 creates `analyze_rw` NOLOGIN, because a migration can't carry a secret. This gives it
 the password from `.env`. The shell reads the password into a variable. The bash builtin `printf`
 feeds it to psql on stdin as a psql variable, so it never appears on a command line, in `ps` or on
-screen. `:'pw'` quotes it as a literal.
+screen. `:'pw'` quotes it as a literal. `SET log_min_error_statement = panic` comes first, for
+this session only, so that a failing `ALTER ROLE` is not written to the Postgres log with its
+statement (and the password) attached.
 ```bash
 cd /home/isoca/projects/cute-trading
 PW="$(grep -E '^ANALYZE_RW_DB_PASSWORD=' .env | cut -d= -f2-)"
 case "$PW" in ''|*[!0-9a-f]*) echo "pw-bad: not an openssl rand -hex value; stop"; PW= ;; *) echo pw-read ;; esac
-[ -n "$PW" ] && printf '\\set pw %s\nALTER ROLE analyze_rw LOGIN PASSWORD :'"'"'pw'"'"';\n' "$PW" | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U ct_owner -d cute_trading && echo role-set
+[ -n "$PW" ] && printf '\\set pw %s\nSET log_min_error_statement = panic;\nALTER ROLE analyze_rw LOGIN PASSWORD :'"'"'pw'"'"';\n' "$PW" | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U ct_owner -d cute_trading && echo role-set
 unset PW
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'analyze_rw'"
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT setconfig FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'analyze_rw'"
@@ -559,6 +561,8 @@ Expect the newest run on version `2c5b84d`. Then:
   nohup sh -c 'while :; do docker run --rm -v cute-trading_data:/data alpine find /data/capture -name "*.jsonl.zst" -mmin +120 -delete; sleep 600; done' >/dev/null 2>&1 &
   pgrep -af 'find /data/capture'
   ```
+- **Episodes written by the rollback scanner** keep `updated_ms = 0` (it doesn't know the
+  column). That is harmless: its runs write no `run_premises`, so no card counts them.
 - **The old compose files** are in `/root/ct-rollback/`. They are not needed to run the old image:
   the new `compose.yml` runs it too, and `SCANNER_HOST` is simply ignored by it.
 

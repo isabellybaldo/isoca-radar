@@ -1,7 +1,9 @@
 import { Link } from 'react-router';
 import type { CardBody, CardRow } from '../api/types';
 import type { HelpId } from '../help';
-import { UNDER_REVIEW, fmtValue, shortHash, statusLabel, statusTone, warmingText } from '../lib/cards';
+import { UNDER_REVIEW, computedText, fmtValue, shortHash, statusLabel, statusTone, warmingText } from '../lib/cards';
+import { useNow } from '../lib/hooks';
+import { fmtLocal, fmtUtcDateTime } from '../lib/time';
 import { CardChart } from './CardCharts';
 import { Help } from './Help';
 import { Tag } from './Tag';
@@ -15,9 +17,14 @@ const COLS: { key: Col; label: string }[] = [
   { key: 'ours', label: 'OUR METHOD' },
 ];
 
-/** One card (spec §5, §8.2): status in words, the three columns, n, notes and the short hash. */
-export function CardView({ card, stale = false }: { card: CardBody; stale?: boolean }) {
-  const dim = card.status === 'thin' || stale;
+/**
+ * One card (spec §5, §8.2): status in words, the three columns, n, notes, the short hash and the
+ * body's own age. Rows dim when thin, stale, or under review (interim catch-up bodies).
+ */
+export function CardView({ card, stale = false, now }: { card: CardBody; stale?: boolean; now?: number }) {
+  const ticking = useNow(30_000);
+  const nowMs = now ?? ticking;
+  const dim = card.status === 'thin' || card.status === 'under_review' || stale;
   const used = COLS.filter((c) => card.columns.some((r: CardRow) => r[c.key] !== null));
   const cols = used.length > 0 ? used : COLS.slice(2);
   return (
@@ -55,7 +62,10 @@ export function CardView({ card, stale = false }: { card: CardBody; stale?: bool
         </table>
       </div>
       <p className="meta">
-        n = {card.n} · <span title={card.hash}>#{shortHash(card.hash)}</span>
+        n = {card.n} · <span title={card.hash}>#{shortHash(card.hash)}</span> ·{' '}
+        <span title={fmtLocal(card.computed_ms)}>
+          {computedText(card.computed_ms, nowMs)} ({fmtUtcDateTime(card.computed_ms)})
+        </span>
       </p>
       <p className="meta premise">{card.premise_key}</p>
       {card.episode_link && (

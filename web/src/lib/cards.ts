@@ -66,3 +66,9 @@ export function updatedText(lastTickMs: number | null, nowMs: number): { text: s
   const age = Math.max(0, nowMs - lastTickMs);
   return { text: `updated ${Math.floor(age / 60_000)} min ago`, stale: age > STALE_MS };
 }
+
+/** A card body's own age (its `computed_ms`): 30d and `all` bodies re-render at most hourly, so they
+ *  can be older than the tick the page's "updated n min ago" reports. */
+export function computedText(computedMs: number, nowMs: number): string {
+  return `computed ${Math.floor(Math.max(0, nowMs - computedMs) / 60_000)} min ago`;
+}

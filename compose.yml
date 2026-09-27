@@ -67,8 +67,10 @@ services:
     logging: *logging
     networks: [internal, egress]
 
-  # Phase 5a live cards (spec 2026-09-26-phase5a-cards-design.md §2, §7): no network egress, writes
-  # only card_cells/card_results/card_meta as analyze_rw, 0.25 CPU and 128 MB like the api.
+  # Phase 5a live cards (spec 2026-09-26-phase5a-cards-design.md §2, §7): no network client in the
+  # binary (arch test) and only the `internal` network, which is NOT `internal: true`, so the
+  # container itself is not egress-blocked (follow-up: harden that network). Writes only
+  # card_cells/card_results/card_meta as analyze_rw, 0.25 CPU and 128 MB like the api.
   analyze:
     image: cute-trading/rust:dev
     profiles: ["core"]
