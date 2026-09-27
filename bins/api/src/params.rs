@@ -89,6 +89,18 @@ pub fn range(q: &Params, now_ms: i64) -> Result<(i64, i64), ApiError> {
     }
 }
 
+/// `win` of /api/cards: one of cards::WINS; missing or empty is 7d. Anything else is a 400.
+pub fn win(q: &Params) -> Result<&'static str, ApiError> {
+    match q.get("win").map(String::as_str) {
+        None | Some("") => Ok("7d"),
+        Some(w) => crate::cards::WINS
+            .iter()
+            .find(|x| **x == w)
+            .copied()
+            .ok_or_else(|| bad("bad_win", "win must be 24h, 7d, 30d, all or today.")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

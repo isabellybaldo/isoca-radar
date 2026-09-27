@@ -2,6 +2,7 @@
 //! `store`, as analyze_ro, on read-only sessions; exposes no write endpoint; paper only (spec §16).
 #![forbid(unsafe_code)]
 
+pub mod cards;
 pub mod config;
 pub mod dto;
 pub mod episodes;
@@ -96,6 +97,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/paper/equity", get(paper::equity))
         .route("/api/paper/positions", get(paper::positions))
         .route("/api/paper/ledger", get(paper::ledger))
+        .route("/api/cards", get(cards::list))
+        .route("/api/cards/meta", get(cards::meta))
         .route("/api/stream", get(stream::sse))
         .method_not_allowed_fallback(error::method_not_allowed)
         .fallback(error::not_found)
