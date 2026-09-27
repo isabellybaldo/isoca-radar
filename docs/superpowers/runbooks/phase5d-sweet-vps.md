@@ -35,18 +35,21 @@ print a container's environment, `docker compose config` only as
 
 ## 1. Benchmark (on the PC, Git Bash)
 
-Debug build (spec §9, Phase 5d ruling 2026-09-27: these are debug-build regression guards, not the
-real cap — the real check is VPS `docker stats` in §6). Write both totals in Results:
+Debug build (spec §9). Write both totals in Results:
 ```bash
 cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH"
 cargo test -p cards --test bench_sweet -- --ignored --nocapture
 cargo test -p cards --test bench_tick -- --ignored --nocapture
 ```
-`bench_sweet` (< 50 ms, < 16 MB held): a SWEET tick over a 30-day history prints `sweet tick: N ms`
-and `sweet held: N KB`, then `test result: ok. 1 passed`.
+`bench_sweet` (SWEET alone < 75 ms, held < 16 MB): a SWEET tick over a 30-day history prints
+`sweet tick: N ms` and `sweet held: N KB`, then `test result: ok. 1 passed`.
 
-`bench_tick` (< 200 ms): the 5a tick with SWEET included prints `tick total at 30 days: tick1 N ms,
-tick2 N ms …` and the same for `90 days`, then `test result: ok. 1 passed`.
+`bench_tick` (30- and 90-day ticks incl. SWEET < 300 ms; the 90-day tick that renders `all` < 400
+ms): prints `tick total at 30 days: tick1 N ms, tick2 N ms …` and the same for `90 days`, then
+`test result: ok. 1 passed`.
+
+These are debug-build regression guards only (Phase 5d ruling 2026-09-27): the real check is the
+VPS `docker stats` step in §6.
 
 ## 2. Build (on the PC, Git Bash)
 
