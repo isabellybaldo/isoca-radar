@@ -21,6 +21,15 @@ pub fn load(path: &str) -> anyhow::Result<Vec<ScenarioLat>> {
     parse(&std::fs::read_to_string(path).with_context(|| format!("read {path}"))?)
 }
 
+/// P1's thresholds from the same frozen policies.toml: SWEET's YES hurdle (min_annualized) and
+/// the days edge its bucket closes on (Phase 5d spec §5, §7.5).
+pub fn p1(path: &str) -> anyhow::Result<sim::config::P1Params> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+    let sim: sim::config::SimConfig = toml::from_str(&text).context("parse policies")?;
+    sim.validate().context("validate policies")?;
+    Ok(sim.p1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,6 +53,21 @@ mod tests {
                 ("sp-burst", 145, 450),
                 ("sp-idle-nodelay", 145, 300)
             ]
+        );
+    }
+
+    #[test]
+    fn the_repo_policies_give_the_sweet_hurdle_and_days_edge() {
+        let p = p1(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/policies.toml"
+        ))
+        .unwrap();
+        assert_eq!(p.min_annualized, rust_decimal::Decimal::new(10, 2));
+        assert_eq!(
+            p.max_days_to_end,
+            rust_decimal::Decimal::from(cards::sweet::P1_MAX_DAYS),
+            "SWEET's days bucket closes at P1's max_days_to_end"
         );
     }
 }
