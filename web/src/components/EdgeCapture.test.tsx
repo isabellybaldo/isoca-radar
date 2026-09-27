@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
+import { UNDER_REVIEW } from '../lib/cards';
 import { edgeFixture, metaFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { EDGE_EMPTY, EDGE_SUBTITLE, EdgeCapture } from './EdgeCapture';
@@ -53,12 +54,20 @@ describe('EdgeCapture', () => {
       '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [edgeFixture({ win: '24h' })] }),
       '/api/cards/meta': metaFixture({ tick: { last_tick_ms: Date.now() - 2 * 3_600_000, analyze_version: 'abc1234', tick_ms: 42 } }),
     });
-    renderBox();
+    const { container } = renderBox();
     await waitFor(() => {
       const matches = screen.getAllByText('edge on the table');
       expect(matches).toHaveLength(2); // the tile's dt and the folded table's rowlabel cell
       expect(tableRowOf(matches)).toHaveClass('dim');
+      expect(container.querySelector('dl.tiles')).toHaveClass('dim');
     });
+  });
+
+  it('dims the tiles while the card is under review, not just the folded table', async () => {
+    mockApi({ '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [edgeFixture({ win: '24h', status: 'under_review' })] }) });
+    const { container } = renderBox();
+    await screen.findByText(UNDER_REVIEW);
+    expect(container.querySelector('dl.tiles')).toHaveClass('dim');
   });
 
   it('keeps the Edge rows undimmed when the last tick is fresh', async () => {
@@ -92,7 +101,7 @@ describe('EdgeCapture', () => {
     mockApi({ '/api/cards': { win: '24h', cards: [thin] }, '/api/cards/meta': metaFixture() });
     const { container } = renderBox();
     expect(await screen.findByText('sp-idle · 300 ms → —')).toBeInTheDocument();
-    expect(container.querySelectorAll('rect.dot.hollow')).toHaveLength(3);
+    expect(container.querySelectorAll('rect.lat-dot.hollow')).toHaveLength(3);
     expect(screen.getAllByRole('listitem').find((li) => li.textContent?.startsWith('capture rate, sp-idle'))?.textContent).toBe('capture rate, sp-idle—');
   });
 });

@@ -8,9 +8,9 @@ export interface Tile {
 }
 
 /** Big numbers with a small sentence-case label (spec §3.1): only where the number is the answer (§3.3). */
-export function Tiles({ items }: { items: Tile[] }) {
+export function Tiles({ items, dim }: { items: Tile[]; dim?: boolean }) {
   return (
-    <dl className="tiles" role="list">
+    <dl className={dim ? 'tiles dim' : 'tiles'} role="list">
       {items.map((t) => (
         <div key={t.label} className="tile" role="listitem">
           <dt>{t.label}</dt>

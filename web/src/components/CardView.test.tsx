@@ -38,6 +38,7 @@ describe('CardView', () => {
     const claim = card.querySelector('dl.claim') as HTMLElement;
     expect(within(claim).getByText('paper')).toBeInTheDocument();
     expect(within(claim).getByText('ours')).toBeInTheDocument();
+    expect(claim).not.toHaveClass('dim');
     expect(within(card).getByText('all numbers').closest('details')).not.toHaveAttribute('open');
     expect(within(card).getByText("how it's computed").closest('details')).not.toHaveAttribute('open');
   });
@@ -70,6 +71,9 @@ describe('CardView', () => {
     renderCard(cardFixture({ status: 'under_review' }));
     expect(screen.getByText('UNDER REVIEW')).toBeInTheDocument();
     expect(screen.getByText(UNDER_REVIEW)).toBeInTheDocument();
+    // so a catch-up 0 never reads as a result: the claim dims too, not just the folded table.
+    const card = screen.getByRole('article', { name: 'G1 · Side asymmetry' });
+    expect(card.querySelector('dl.claim')).toHaveClass('dim');
   });
 
   it('hides empty method columns and links the biggest opportunity', () => {
@@ -108,6 +112,8 @@ describe('CardView', () => {
   it('dims every number when the results are stale', () => {
     renderCard(cardFixture(), true);
     expect(tableRowFor('YES-side episodes', 2)).toHaveClass('dim');
+    const card = screen.getByRole('article', { name: 'G1 · Side asymmetry' });
+    expect(card.querySelector('dl.claim')).toHaveClass('dim');
   });
 
   it('shows the premise key in the footer, next to n and the hash, dim and wrapping', () => {

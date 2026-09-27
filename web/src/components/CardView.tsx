@@ -33,14 +33,19 @@ function usedCols(card: CardBody) {
   return used.length > 0 ? used : COLS.slice(2);
 }
 
+/** So a catch-up 0 (thin), a recompute (under_review) or a stale tick never reads as a live result. */
+export function isDim(card: CardBody, stale: boolean): boolean {
+  return card.status === 'thin' || card.status === 'under_review' || stale;
+}
+
 /** Redesign §4.3: the card's headline claim (its first row) in big type, PAPER / THEIRS / OURS. */
-export function Claim({ card }: { card: CardBody }) {
+export function Claim({ card, dim }: { card: CardBody; dim?: boolean }) {
   const r = card.columns[0];
   if (!r) return null;
   return (
     <div className="claim-wrap">
       <p className="dim">{r.label}</p>
-      <dl className="claim">
+      <dl className={dim ? 'claim dim' : 'claim'}>
         {usedCols(card).map((c) => (
           <div key={c.key}>
             <dt>{CLAIM_LABEL[c.key]}</dt>
@@ -55,7 +60,7 @@ export function Claim({ card }: { card: CardBody }) {
 }
 
 export function CardTable({ card, stale }: { card: CardBody; stale: boolean }) {
-  const dim = card.status === 'thin' || card.status === 'under_review' || stale;
+  const dim = isDim(card, stale);
   const cols = usedCols(card);
   return (
     <div className="scroll">
@@ -125,7 +130,7 @@ export function CardView({ card, stale = false, now }: { card: CardBody; stale?:
       {card.status === 'warming' && <p className="dim">{warmingText(card)}</p>}
       {card.status === 'under_review' && <p className="dim">{UNDER_REVIEW}</p>}
       <CardChart card={card} />
-      <Claim card={card} />
+      <Claim card={card} dim={isDim(card, stale)} />
       <Fold id={`card:${card.card}:numbers`} label="all numbers">
         <CardTable card={card} stale={stale} />
       </Fold>

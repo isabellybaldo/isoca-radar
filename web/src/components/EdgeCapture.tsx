@@ -7,7 +7,7 @@ import { ON_TABLE, UNDER_REVIEW, fmtValue, statusLabel, statusTone, updatedText,
 import { useNow, useTicker } from '../lib/hooks';
 import { formatMoney, formatMoneyCents, signOf } from '../lib/money';
 import { Box } from './Box';
-import { CardMeta, CardTable } from './CardView';
+import { CardMeta, CardTable, isDim } from './CardView';
 import { EmptyState } from './EmptyState';
 import { Fold } from './Fold';
 import { LatencyAxis } from './LatencyAxis';
@@ -36,11 +36,15 @@ function tile(r: CardRow | undefined): Tile[] {
 
 function EdgeBody({ card, stale }: { card: CardBody; stale: boolean }) {
   const nowMs = useNow(30_000);
+  const dim = isDim(card, stale);
   return (
     <>
       {card.status === 'warming' && <p className="dim">{warmingText(card)}</p>}
       {card.status === 'under_review' && <p className="dim">{UNDER_REVIEW}</p>}
-      <Tiles items={[...tile(row(card, ON_TABLE)), ...tile(row(card, 'captured at')), ...tile(row(card, 'capture rate')), ...tile(row(card, 'measured latency'))]} />
+      <Tiles
+        items={[...tile(row(card, ON_TABLE)), ...tile(row(card, 'captured at')), ...tile(row(card, 'capture rate')), ...tile(row(card, 'measured latency'))]}
+        dim={dim}
+      />
       {card.series.decay && card.series.decay.length > 0 && <LatencyAxis points={card.series.decay} measured={card.series.measured ?? null} />}
       <SplitBar
         label="on the table, by side"

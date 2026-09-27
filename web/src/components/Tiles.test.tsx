@@ -13,4 +13,9 @@ describe('Tiles', () => {
     expect(neg).toHaveClass('neg');
     expect(neg).toHaveAttribute('title', '−$462.8712');
   });
+
+  it('adds class dim on the tiles element when dim is set, so interim values do not read as a result', () => {
+    render(<Tiles items={[{ label: 'on the table', value: '$258.01' }]} dim />);
+    expect(screen.getByRole('list')).toHaveClass('tiles', 'dim');
+  });
 });
