@@ -70,6 +70,10 @@ describe('Health', () => {
     expect(await screen.findByText('PAUSED')).toBeInTheDocument();
     expect(screen.getByText('top_mismatch')).toBeInTheDocument();
     await waitFor(() => expect(container.querySelectorAll('rect.marker')).toHaveLength(1));
+    expect(screen.getByRole('heading', { level: 1, name: 'HEALTH' })).toBeInTheDocument();
+    const tiles = screen.getAllByRole('listitem').filter((li) => li.classList.contains('tile')).map((li) => li.textContent);
+    expect(tiles[1]).toBe('shards40/40');
+    expect(screen.getByRole('list', { name: 'integrity by kind' })).toBeInTheDocument();
   });
 
   it('keeps the window in the URL', async () => {

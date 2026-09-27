@@ -230,3 +230,10 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
   .eptable .c-s { grid-area: s; } .eptable .c-dur { grid-area: dur; } .eptable .c-flags { grid-area: flags; justify-self: end; }
   .eptable .c-gross, .eptable .c-q { display: none; }
 }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.grid3 .subhead-row { margin-top: 0; border-top: 0; padding-top: 0; }
+@media (max-width: 900px) { .grid3 { grid-template-columns: minmax(0, 1fr); } }
+.countbars { gap: 4px; }
+.countbars li { display: grid; grid-template-columns: minmax(min(100%, 120px), 200px) minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.cb-track { display: block; height: 12px; background: var(--bg); }
+.cb-bar { display: block; height: 100%; background: var(--accent); }
