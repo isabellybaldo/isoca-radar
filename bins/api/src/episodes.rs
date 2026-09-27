@@ -51,6 +51,8 @@ pub struct EpisodeSummaryDto {
     pub q_star: Dec,
     pub net: Dec,
     pub gross: Dec,
+    /// Net profit at the peak with at most $100 spent (null: not sized).
+    pub net_budget100: Option<Dec>,
     pub suspect: bool,
     pub stale: bool,
     pub censored: bool,
@@ -73,6 +75,7 @@ impl From<EpisodeSummary> for EpisodeSummaryDto {
             q_star: Dec(e.peak_max_size),
             net: Dec(e.peak_pnl_net_usd),
             gross: Dec(e.peak_pnl_gross_usd),
+            net_budget100: opt(e.pnl_net_budget100_usd),
             suspect: e.engine_suspect,
             stale: e.stale_transport,
             censored: e.censored,
@@ -263,15 +266,17 @@ pub struct DetailDto {
 #[derive(Debug, Serialize)]
 pub struct HourDto {
     pub hour: i64,
-    pub gross: i64,
-    pub net: i64,
+    pub arb: i64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TodayDto {
     pub day_start_ms: i64,
-    pub gross: i64,
-    pub net: i64,
+    pub arb: i64,
+    pub no: i64,
+    pub yes: i64,
+    /// Sum of the $100-capped net edge over today's arbitrage episodes (null: none measured).
+    pub edge_budget100: Option<Dec>,
     pub hourly: Vec<HourDto>,
 }
 
@@ -279,11 +284,13 @@ impl From<Today> for TodayDto {
     fn from(t: Today) -> Self {
         Self {
             day_start_ms: t.day_start_ms,
-            gross: t.gross,
-            net: t.net,
+            arb: t.arb,
+            no: t.no,
+            yes: t.yes,
+            edge_budget100: opt(t.edge_budget100),
             hourly: (0i64..)
                 .zip(t.hourly)
-                .map(|(hour, (gross, net))| HourDto { hour, gross, net })
+                .map(|(hour, arb)| HourDto { hour, arb })
                 .collect(),
         }
     }

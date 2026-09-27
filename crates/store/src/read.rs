@@ -23,8 +23,8 @@ const LATEST_HEALTH_RUN: &str = "(SELECT r.run_id FROM runs r WHERE r.mode = 'li
 const SUMMARY_COLS: &str = "e.episode_id, e.kind, e.realization, e.event_title, e.event_slug, e.n_legs, \
     (SELECT count(*) FROM episode_legs l WHERE l.episode_id = e.episode_id AND l.in_s) AS s_legs, \
     e.opened_server_ms, e.closed_server_ms, e.duration_ms, e.peak_edge_top, e.peak_max_size, \
-    e.peak_pnl_net_usd, e.peak_pnl_gross_usd, e.engine_suspect, e.stale_transport, \
-    (e.censor_left OR e.censor_right OR e.censor_gap) AS censored";
+    e.peak_pnl_net_usd, e.peak_pnl_gross_usd, e.pnl_net_budget100_usd, e.engine_suspect, \
+    e.stale_transport, (e.censor_left OR e.censor_right OR e.censor_gap) AS censored";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthNow {
@@ -50,6 +50,8 @@ pub struct EpisodeSummary {
     pub peak_max_size: Decimal,
     pub peak_pnl_net_usd: Decimal,
     pub peak_pnl_gross_usd: Decimal,
+    /// Net profit at the peak with at most $100 spent; None when the scanner could not size it.
+    pub pnl_net_budget100_usd: Option<Decimal>,
     pub engine_suspect: bool,
     pub stale_transport: bool,
     pub censored: bool,
@@ -82,10 +84,14 @@ pub struct EpisodePage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Today {
     pub day_start_ms: i64,
-    pub gross: i64,
-    pub net: i64,
-    /// Exactly 24 entries, hour 0..=23 UTC: (gross-positive, net-positive) episodes opened then.
-    pub hourly: Vec<(i64, i64)>,
+    /// Live complete-basket episodes (`yes_basket` + `no_basket`) opened today (UTC).
+    pub arb: i64,
+    pub no: i64,
+    pub yes: i64,
+    /// Sum of `pnl_net_budget100_usd` over those episodes, NULLs excluded; None when none had one.
+    pub edge_budget100: Option<Decimal>,
+    /// Exactly 24 entries, hour 0..=23 UTC: arbitrage episodes opened then.
+    pub hourly: Vec<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,37 +288,42 @@ impl Store {
             .await?)
     }
 
-    /// Today (UTC) in live episodes that could be arbitrage (realization ≠ not_arbitrage):
-    /// gross = peak gross Π > 0, net = peak net Π > 0.
+    /// Today (UTC) in live complete baskets (`yes_basket`, `no_basket`): counts per kind and per
+    /// hour, and the $100-capped net edge they offered. Incomplete sets and implications are not
+    /// arbitrage and never count. ROLLUP adds the whole-day row (hour NULL), even on an empty day.
     pub async fn today(&self, now_ms: i64) -> Result<Today, StoreError> {
         let day_start_ms = now_ms - now_ms.rem_euclid(DAY_MS);
-        let rows: Vec<(i64, i64, i64)> = sqlx::query_as(
-            "SELECT ((opened_server_ms - $1) / 3600000)::int8 AS hour, \
-                    count(*) FILTER (WHERE peak_pnl_gross_usd > 0) AS gross, \
-                    count(*) FILTER (WHERE peak_pnl_net_usd > 0) AS net \
-             FROM episodes \
-             WHERE source = 'live' AND realization <> 'not_arbitrage' \
-               AND opened_server_ms >= $1 AND opened_server_ms < $2 \
-             GROUP BY 1 ORDER BY 1",
+        let rows: Vec<(Option<i64>, i64, i64, Option<Decimal>)> = sqlx::query_as(
+            "SELECT ((opened_server_ms - $1) / 3600000)::int8 AS hour,                     count(*) FILTER (WHERE kind = 'no_basket') AS no,                     count(*) FILTER (WHERE kind = 'yes_basket') AS yes,                     sum(pnl_net_budget100_usd) AS edge              FROM episodes              WHERE source = 'live' AND kind IN ('yes_basket', 'no_basket')                AND opened_server_ms >= $1 AND opened_server_ms < $2              GROUP BY ROLLUP (1) ORDER BY 1 NULLS LAST LIMIT 25",
         )
         .bind(day_start_ms)
         .bind(day_start_ms + DAY_MS)
         .fetch_all(self.pool())
         .await?;
-        let mut hourly = vec![(0i64, 0i64); 24];
-        for (hour, gross, net) in rows {
-            if let Some(slot) = usize::try_from(hour).ok().and_then(|i| hourly.get_mut(i)) {
-                *slot = (gross, net);
+        let mut t = Today {
+            day_start_ms,
+            arb: 0,
+            no: 0,
+            yes: 0,
+            edge_budget100: None,
+            hourly: vec![0; 24],
+        };
+        for (hour, no, yes, edge) in rows {
+            match hour {
+                None => {
+                    t.no = no;
+                    t.yes = yes;
+                    t.arb = no.saturating_add(yes);
+                    t.edge_budget100 = edge;
+                }
+                Some(h) => {
+                    if let Some(slot) = usize::try_from(h).ok().and_then(|i| t.hourly.get_mut(i)) {
+                        *slot = no.saturating_add(yes);
+                    }
+                }
             }
         }
-        let gross = hourly.iter().map(|h| h.0).sum();
-        let net = hourly.iter().map(|h| h.1).sum();
-        Ok(Today {
-            day_start_ms,
-            gross,
-            net,
-            hourly,
-        })
+        Ok(t)
     }
 
     /// Live integrity events in [from_ms, to_ms) by kind, plus the per-million-messages rate.

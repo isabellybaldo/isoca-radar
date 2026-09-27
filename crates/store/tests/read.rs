@@ -282,6 +282,7 @@ async fn open_episodes_come_only_from_the_newest_live_run() {
     assert_eq!(rows[0].episode_id, "live-2-00000001");
     assert_eq!(rows[0].s_legs, 2);
     assert_eq!(rows[0].peak_pnl_net_usd, dec!(0.41));
+    assert_eq!(rows[0].pnl_net_budget100_usd, Some(dec!(0.33)));
     assert!(!rows[0].censored);
     analyze.close().await;
     db.drop(owner).await;
@@ -510,29 +511,62 @@ async fn episode_detail_round_trips_and_a_missing_one_is_none() {
 }
 
 #[tokio::test]
-async fn today_counts_gross_and_net_per_utc_hour_excluding_not_arbitrage() {
+async fn today_counts_live_complete_baskets_per_kind_and_sums_budget100() {
     let Some((owner, db)) = common::fresh().await else {
         return;
     };
     let live = run(&owner, "live").await;
     let t = now();
     let day = t - t.rem_euclid(DAY_MS);
-    let a = ep("live-1-a", live, day + 1_000); // hour 0: gross and net
-    let mut b = ep("live-1-b", live, day + 3_600_000 + 5); // hour 1: gross only
-    b.peak_pnl_net_usd = dec!(-0.2);
-    let mut c = ep("live-1-c", live, day + 2_000); // not arbitrage: never counted
+    let a = ep("live-1-a", live, day + 1_000); // hour 0: NO, budget 0.33
+    let mut b = ep("live-1-b", live, day + 3_600_000 + 5); // hour 1: YES, budget 1.10
+    b.kind = "yes_basket".into();
+    b.pnl_net_budget100_usd = Some(dec!(1.10));
+    let mut c = ep("live-1-c", live, day + 2_000); // incomplete set: never counted
     c.realization = "not_arbitrage".into();
     c.kind = "yes_basket_incomplete".into();
     let d = ep("live-1-d", live, day - 1_000); // yesterday
-    write_eps(&owner, vec![a, b, c, d]).await;
+    let mut e = ep("live-1-e", live, day + 3_000); // hour 0: NO, budget NULL (counted, not summed)
+    e.pnl_net_budget100_usd = None;
+    let mut f = ep("replay-1-f", live, day + 4_000); // replay: never counted
+    f.source = "replay".into();
+    let mut g = ep("live-1-g", live, day + 5_000); // implication: not a complete basket
+    g.kind = "implication".into();
+    write_eps(&owner, vec![a, b, c, d, e, f, g]).await;
     let analyze = ro(&db).await;
     let today = analyze.today(t).await.unwrap();
-    assert_eq!((today.day_start_ms, today.gross, today.net), (day, 2, 1));
+    assert_eq!(
+        (today.day_start_ms, today.arb, today.no, today.yes),
+        (day, 3, 2, 1)
+    );
+    assert_eq!(today.edge_budget100, Some(dec!(1.43)));
     assert_eq!(today.hourly.len(), 24);
     assert_eq!(
         (today.hourly[0], today.hourly[1], today.hourly[2]),
-        ((1, 1), (1, 0), (0, 0))
+        (2, 1, 0)
     );
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn today_with_nothing_is_zero_counts_and_a_null_edge() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    let t = now();
+    let day = t - t.rem_euclid(DAY_MS);
+    let mut only_null = ep("live-1-n", live, day + 1_000);
+    only_null.pnl_net_budget100_usd = None;
+    let analyze = ro(&db).await;
+    let empty = analyze.today(t).await.unwrap();
+    assert_eq!((empty.arb, empty.no, empty.yes), (0, 0, 0));
+    assert_eq!(empty.edge_budget100, None);
+    assert_eq!(empty.hourly, vec![0; 24]);
+    write_eps(&owner, vec![only_null]).await;
+    let one = analyze.today(t).await.unwrap();
+    assert_eq!((one.arb, one.edge_budget100), (1, None));
     analyze.close().await;
     db.drop(owner).await;
 }

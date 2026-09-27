@@ -56,6 +56,7 @@ async fn open_lists_open_live_episodes_with_money_as_strings() {
         ("gross", "1.37"),
         ("q_star", "83"),
         ("edge", "0.0049"),
+        ("net_budget100", "0.33"),
     ] {
         assert!(e[k].is_string(), "{k} must be a JSON string: {e}");
         assert_eq!(e[k], want);
@@ -298,27 +299,47 @@ async fn today_counts_via_the_api() {
     let live = common::run(&owner, "live").await;
     let n = common::now();
     let day = n - n.rem_euclid(DAY_MS);
-    let mut gross_only = common::ep("live-1-g", live, day + 2_000);
-    gross_only.peak_pnl_net_usd = dec!(0);
+    let mut yes = common::ep("live-1-y", live, day + 2_000);
+    yes.kind = "yes_basket".into();
+    yes.pnl_net_budget100_usd = Some(dec!(1.2));
+    let mut incomplete = common::ep("live-1-i", live, day + 3_000);
+    incomplete.kind = "yes_basket_incomplete".into();
     seed(
         &owner,
-        vec![w(common::ep("live-1-n", live, day + 1_000)), w(gross_only)],
+        vec![
+            w(common::ep("live-1-n", live, day + 1_000)),
+            w(yes),
+            w(incomplete),
+        ],
     )
     .await;
     let (app, _st) = common::app(&db).await;
     let (status, v) = common::get(&app, "/api/today").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!((v["gross"].as_i64(), v["net"].as_i64()), (Some(2), Some(1)));
+    assert_eq!(
+        (v["arb"].as_i64(), v["no"].as_i64(), v["yes"].as_i64()),
+        (Some(2), Some(1), Some(1))
+    );
+    assert_eq!(v["edge_budget100"], "1.53", "money is a string: {v}");
     assert_eq!(v["day_start_ms"], day);
     let hourly = v["hourly"].as_array().unwrap();
     assert_eq!(hourly.len(), 24);
     assert_eq!(
-        (
-            hourly[0]["hour"].as_i64(),
-            hourly[0]["gross"].as_i64(),
-            hourly[0]["net"].as_i64()
-        ),
-        (Some(0), Some(2), Some(1))
+        (hourly[0]["hour"].as_i64(), hourly[0]["arb"].as_i64()),
+        (Some(0), Some(2))
     );
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn today_edge_is_null_not_zero_when_nothing_was_measured() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (app, _st) = common::app(&db).await;
+    let (status, v) = common::get(&app, "/api/today").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["arb"], 0);
+    assert!(v["edge_budget100"].is_null(), "{v}");
     db.drop(owner).await;
 }
