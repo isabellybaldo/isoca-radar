@@ -6,6 +6,7 @@ pub mod clob;
 pub mod error;
 pub mod gamma;
 mod http;
+mod retry;
 pub mod routes;
 pub mod wire;
 pub mod ws;

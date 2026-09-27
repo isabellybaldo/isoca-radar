@@ -24,14 +24,24 @@ pub(crate) async fn send_timed(
     resp
 }
 
-pub(crate) fn http_client() -> Result<reqwest::Client, ApiError> {
+/// Connect timeout shared by both clients.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request timeout for CLOB calls (spec F2): real-time market data, fail fast.
+pub(crate) const CLOB_TIMEOUT: Duration = Duration::from_secs(15);
+/// Whole-request timeout for Gamma calls. Gamma is intermittently slow: most `/events/keyset`
+/// pages return in well under a second, but some take tens of seconds (measured on the VPS
+/// 2026-09-27). Generous on purpose; pm-api's own per-page retry (`retry::with_retry`) is what
+/// actually survives the slow pages, this just keeps a single attempt from being cut off mid-page.
+pub(crate) const GAMMA_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub(crate) fn http_client(timeout: Duration) -> Result<reqwest::Client, ApiError> {
     crate::init_tls();
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .https_only(true)
         .user_agent("isoca-radar-research/0.1 (read-only)")
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|e| ApiError::field("http_client", e.to_string()))
 }
