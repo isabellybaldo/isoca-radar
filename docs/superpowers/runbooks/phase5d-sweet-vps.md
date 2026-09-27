@@ -129,6 +129,18 @@ docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT wi
 Expect `24h`, `7d`, `30d` and `all`, each `under_review` while catch-up runs, then `live` or
 `warming`.
 
+**The 30-cluster minimum, re-checked against real volumes (spec §12 D5):** the review suggested a
+50-cluster minimum instead of 30; the plan deferred that until real volumes were known and put this
+re-check in the deploy step. Once the `30d` window has caught up (same wait as the checks below),
+compare how many rows would clear each threshold:
+```bash
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*) FILTER (WHERE (r->>'clusters')::int >= 30) AS ge30, count(*) FILTER (WHERE (r->>'clusters')::int >= 50) AS ge50, count(*) AS total FROM card_results, jsonb_array_elements(body->'series'->'sweet'->'rows') r WHERE card = 'SWEET' AND win = '30d'"
+```
+Record `ge30`, `ge50`, `total` and today's date (UTC) in Results. This is a data point, not a
+pass/fail gate: a `ge50` far below `ge30` means 50 would have thinned out most rows this early and
+30 is still the right call for now; if they're close, raise it with the owner before the next
+deploy rather than changing it here.
+
 **No 5a card restarted:**
 ```bash
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT card, win, premise_key FROM card_results WHERE card <> 'SWEET' ORDER BY 1, 2" | diff - ~/pre5d_keys.txt && echo keys-unchanged
@@ -136,13 +148,22 @@ docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT ca
 Expect `keys-unchanged`. A diff in `premise_key` only would mean a 5a family's key moved: **stop
 and roll back** (§8).
 
-**Memory and CPU (the real check, spec §9):** wait until an `analyze` tick line shows `0 catch-up
-hours`, then:
+**Memory (docker stats) and CPU (the tick's own time, spec §9):** wait until an `analyze` tick line
+shows `0 catch-up hours`, then:
 ```bash
-docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' | grep '^cute-trading-analyze'
+docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep '^cute-trading-analyze'
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT value FROM card_meta WHERE key = 'tick'"
 ```
-Record both numbers in Results. Pass: memory below 96 MB (75% of the 128 MB cap) and CPU within
-its 0.25-CPU cap. Run it twice, a minute apart — `analyze` idles between its 15-minute ticks.
+Record the memory number and the second query's `tick_ms` in Results. Pass: memory below 96 MB
+(75% of the 128 MB cap). Run the memory read twice, a minute apart — `analyze` idles between its
+15-minute ticks.
+
+`docker stats`' `CPUPerc` samples one instant of a container that is idle 14 of every 15 minutes:
+it reads near 0% whether the tick that just ran took 50 ms or 50 s, so it is dropped as a CPU check
+(Phase 5d ruling 2026-09-27). The real CPU check is the release-build tick time the second query
+just read, against the 0.25-CPU cap's per-tick budget (900 s × 0.25 = 225 s): pass is `tick_ms`
+well under that — a healthy tick prints **`tick_ms` under 5000** (5 s). A tick anywhere near 225 s
+means the cap will throttle it; stop and investigate rather than deploying past that line.
 
 **In the browser (signed in):**
 - the Paper page shows **SWEET SPOTS** directly below Edge capture, `30d` selected by default,
@@ -156,8 +177,8 @@ its 0.25-CPU cap. Run it twice, a minute apart — `analyze` idles between its 1
 ## 7. Exit (spec §1)
 
 On the VPS: the Sweet spots box shows 7d / 30d / all, every row carries n, C (clusters), a label
-and the card hash, and `analyze` stays inside its CPU cap and memory cap (§1 benchmark and §6's
-`docker stats`). Record the date (UTC) in Results.
+and the card hash, and `analyze` stays inside its memory cap (§6's `docker stats`) and its CPU cap
+(§6's `tick_ms`, well under 225 s). Record the date (UTC) in Results.
 
 ## 8. Rollback
 
@@ -183,7 +204,9 @@ image tags recorded in pre-flight; `docker compose --profile core stop analyze s
 - the tag counts (§6, GO check);
 - the SWEET statuses per window (§6);
 - `keys-unchanged` (§6);
-- `analyze`'s `docker stats` memory and CPU after catch-up (§6), taken twice;
+- `analyze`'s `docker stats` memory after catch-up (§6), taken twice;
+- `analyze`'s release-build `tick_ms` from `card_meta` after catch-up (§6; pass under 5000);
+- the 30-cluster minimum re-check against the first 30 days: `ge30`, `ge50`, `total` and its date (§6, D5);
 - the browser checks: SWEET SPOTS box present, YES-side `NOT TESTED`/`DEAD ON PAPER`, 360 px
   `scrollWidth === 360`;
 - the exit date (UTC).)
