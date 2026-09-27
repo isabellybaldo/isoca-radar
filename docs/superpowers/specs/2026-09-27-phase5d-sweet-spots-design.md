@@ -121,7 +121,7 @@ The `[7, 30]` bucket is closed on the right to match P1's `days > max_days_to_en
   - A property test checks merge(cells) equals the direct computation, as in 5a.
 - **Dirty hours.** The tick runs every 900 s. The existing `updated_ms` cursor already re-dirties an episode's hours from its open to now whenever it changes, including at close (`bins/analyze/src/tick.rs:271-277`). Every tick also rebuilds the current hour and every hour since the last tick. An attempt that stays `in_flight` at one tick is inside one of those hours at the next.
 - **Windows:** `24h`, `7d`, `30d`, `all`, as 5a. `today` does not include `SWEET`. The box defaults to **30d**, because shorter windows are mostly `thin`.
-- **Memory.** A sweet cell is far larger than a 5a cell: up to ~160 entries an hour (each side-scenario pair touches at most 9 + 7 + 5 + 1 + 1 buckets in one hour), each about 30 numbers. Holding 720 of them in `Windows.recent` for the 30d span could take tens of MB of `analyze`'s 128 MB. So **SWEET keeps only 24h and 7d in memory**. 30d is recomputed at the hourly 30d/all re-render (5a already limits those to at most hourly) by streaming the stored cells from Postgres in hour order, adding each into one accumulator, then dropping it. `all` stays a running sum. The §9 benchmark checks peak RSS.
+- **Memory.** A sweet cell is far larger than a 5a cell: up to ~160 entries an hour (each side-scenario pair touches at most 9 + 7 + 5 + 1 + 1 buckets in one hour), each about 30 numbers. The 5a `Windows` already bounds this: it keeps only `RECENT_HOURS = 48` cells in memory (`crates/cards/src/window.rs:37`), the 24h/7d/30d spans and `all` are running sums, and the cells leaving a span are loaded from `card_cells` when needed (`needed_ranges`, `advance`). `Max` for SWEET is the unit type, so the per-hour `maxes` map costs next to nothing. Peak memory is therefore about 48 cells plus 4 sums, a few MB. The §9 benchmark checks peak RSS anyway.
 - **Status:** the 5a statuses (`live`, `warming`, `under_review`) apply to the card. `thin` applies per row (§7.1), not to the whole card.
 
 ## 7. Statistical honesty
@@ -183,7 +183,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
 
 - **Reads per dirty hour:** the hour's episodes (existing), then for its episodes and the known (run, account) pairs: `paper_intents`, `paper_execs`, `paper_ledger` and 30 s `paper_markouts` by primary-key prefix; `episode_legs` by primary key; `events.tags` by primary key.
 - **CPU:** the 5a benchmark (a tick over a synthetic 30-day history, < 200 ms CPU in a debug build) is re-run with `SWEET` included and must still pass. `SWEET` alone should add < 50 ms.
-- **Memory:** the same benchmark records peak RSS of the analyze process, including an hourly 30d re-render. It must stay **< 96 MB** (75% of the 128 MB cap).
+- **Memory:** the same benchmark records peak RSS of the analyze process, including a 30d/all re-render. It must stay **< 96 MB** (75% of the 128 MB cap).
 - **Disk:** at most ~160 entries an hour, each a few hundred bytes of JSON: under ~60 KB an hour at the cap, so well under 1 GB a year even at the cap, and far less in practice. That is inside the 50 GB VPS budget.
 
 ## 10. Testing
@@ -204,7 +204,7 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
   - m counting excludes `thin`;
   - effective n and the "few trades" label;
   - every label rule, including all three P1 skip reasons → `not_tested`, `dead_on_paper`, the annualized lower-bound hurdle, and the NULL annualized case.
-- **Merge property:** random attempts → merged hourly cells equal the direct computation for every window, including the streamed 30d path.
+- **Merge property:** random attempts → merged hourly cells equal the direct computation for every window, including hours expiring out of the 30d span.
 - **Parameters:** changing `SWEET_PARAMS` changes the family key and triggers catch-up; the hash includes it.
 - **Store (real Postgres):**
   - migration 0007 is idempotent;
@@ -232,7 +232,6 @@ A fixed note, shown under the box title and never collapsed: *"Captured is paper
 - **D9. The box lives on the Paper page below Edge capture,** with no new nav tab, and defaults to 30d.
 - **D10. Default headline scenario `sp-idle`,** the same as Edge capture, with the 10 bips figure beside it.
 - **D11. Parameters are versioned card-side** (key suffix plus hash), not as a premise area.
-- **D12. 30d for SWEET is streamed from stored cells** at the hourly re-render instead of held in memory.
 
 ## 13. Review record (2026-09-27)
 
@@ -242,4 +241,4 @@ An independent review raised 3 blockers, 8 should-fix items and nits. All were c
 - **B3:** missed attempts count in the mean (§4).
 - **S1–S8 and the nits:** cluster SE (§7.2), no max or min and effective n (§6, §7.2), the lower-bound hurdle (§7.4), days split at 30 and all three P1 skips (§5, §7.4), frozen tags (§3), the go/no-go (§3), no new indexes (§2), net-positive attempts only (§4), plus the nits (the z table ends at 500, the `maths` feature, D7's wording, the 900 s tick and re-dirty, the 10 bips figure, the equity note, the disk estimate, the extra tests).
 - **One point was only partly taken:** the minimum-cluster threshold stays at 30, not 50 (D5).
-- **One addition of our own:** a memory limit for `analyze` and the streamed 30d path (§6, §9). The review did not raise it, but the size of the cells made it necessary.
+- **One addition of our own:** a peak-RSS limit for `analyze` in the benchmark (§9), because sweet cells are larger than 5a's. The existing 48-hour `recent` bound already keeps memory small (§6).
