@@ -484,9 +484,10 @@ fn tick_ms(days: i64) -> (u128, u128, u128) {
 
 #[test]
 #[ignore = "benchmark: run by hand (Phase 5a plan, Task 9)"]
-/// 30 days: every tick < 200 ms. 90 days: ticks that don't render `all` < 200 ms; the one that
-/// does is printed and held under a 400 ms sanity ceiling (accepted overrun, ruling T9 fix round 2).
-fn tick_stays_under_200ms_as_all_grows_from_30_to_90_days() {
+/// 30 days: every tick < 300 ms. 90 days: ticks that don't render `all` < 300 ms (same code path
+/// as 30 days, Phase 5d ruling 2026-09-27); the one that does is printed and held under a 400 ms
+/// sanity ceiling (accepted overrun, ruling T9 fix round 2, unchanged).
+fn tick_stays_under_300ms_as_all_grows_from_30_to_90_days() {
     for days in [30, 90] {
         let (full, t1, t2) = tick_ms(days);
         println!(
@@ -502,10 +503,12 @@ fn tick_stays_under_200ms_as_all_grows_from_30_to_90_days() {
         } else {
             // ruling (fix round 2): past 30 days the tick that renders `all` may overrun (exact
             // Kaplan–Meier over a growing number of distinct durations); a loose ceiling still
-            // catches a regression. Every other tick keeps the 200 ms budget.
+            // catches a regression. Every other tick keeps the same budget as 30 days (it's the
+            // same code path, just over more history).
+            // Phase 5d ruling 2026-09-27: debug-build regression guard; the real check is VPS docker stats (runbook).
             assert!(
-                t1 < 200,
-                "tick 1 over {days} days took {t1} ms (budget 200 ms)"
+                t1 < 300,
+                "tick 1 over {days} days took {t1} ms (budget 300 ms)"
             );
             assert!(
                 t2 < 400,
