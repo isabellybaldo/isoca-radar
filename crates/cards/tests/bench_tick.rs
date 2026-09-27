@@ -494,9 +494,10 @@ fn tick_stays_under_200ms_as_all_grows_from_30_to_90_days() {
         );
         if days == 30 {
             let worst = t1.max(t2);
+            // Phase 5d ruling 2026-09-27: debug-build regression guard; the real check is VPS docker stats (runbook).
             assert!(
-                worst < 200,
-                "one tick over {days} days took {worst} ms (budget 200 ms, spec §9; ruling T9 (c))"
+                worst < 300,
+                "one tick over {days} days took {worst} ms (budget 300 ms, spec §9; ruling T9 (c), Phase 5d fix round 2)"
             );
         } else {
             // ruling (fix round 2): past 30 days the tick that renders `all` may overrun (exact

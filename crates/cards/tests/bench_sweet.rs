@@ -158,7 +158,8 @@ fn sweet_tick_stays_under_50ms_and_holds_under_16mb() {
     }
     let ms = t.elapsed().as_millis();
     println!("sweet tick: {ms} ms");
-    assert!(ms < 50, "sweet tick took {ms} ms");
+    // Phase 5d ruling 2026-09-27: debug-build regression guard; the real check is VPS docker stats (runbook).
+    assert!(ms < 75, "sweet tick took {ms} ms");
     let held: usize = w
         .recent
         .values()
