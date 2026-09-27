@@ -1,10 +1,11 @@
 import type { SweetLabel, SweetRow, SweetSeries } from '../api/types';
-import { formatMoney } from './money';
+import { compareDecimal, formatMoney } from './money';
+import { fmtUtcHm } from './time';
 
 /** Spec 5d §7.6, verbatim. */
 export const SWEET_CAVEAT =
   "Captured is paper: first in line at t_x against the recorded book, minus our own taken liquidity. Real bots compete for the same depth; a friend's bot filled 6 of 24 signals. A candidate is a question for real small orders, not an answer.";
-export const NOTHING_PAYS = "Nothing here pays at 300 ms. Don't trade this, or get closer.";
+export const NOTHING_PAYS = "Nothing pays at sp-idle yet. Don't trade this, or get closer.";
 export const SWEET_EMPTY = 'No sweet spots yet. analyze has not finished a tick under these premises.';
 export const FEW_TRADES = 'few trades carry this row';
 export const HEADLINE_SCENARIO = 'sp-idle';
@@ -128,4 +129,37 @@ export function interval(r: SweetRow): string {
   const m = formatMoney(r.mean, { signed: true });
   if (r.lo === null || r.hi === null) return m;
   return `${m} [${formatMoney(r.lo, { signed: true })}, ${formatMoney(r.hi, { signed: true })}]`;
+}
+
+export const ONE_LINE_CAVEAT = 'Paper, first in line. A candidate is a question for real small orders, not an answer.';
+
+/** One scenario's rows for a side and slice, fee 0, canonical bucket order (redesign §5.1). */
+export function rowsFor(s: SweetSeries, side: SweetSide, dim: SweetDim, scenario: string): SweetRow[] {
+  const g = grid(s, side, dim);
+  return g.buckets.map((b) => g.cell(b, scenario)).filter((r): r is SweetRow => r !== undefined);
+}
+
+const headlineCandidates = (s: SweetSeries) =>
+  s.rows.filter((r) => r.label === 'candidate' && r.scenario === HEADLINE_SCENARIO && r.fee_bips === 0);
+
+export function candidateCount(s: SweetSeries, side: SweetSide): number {
+  return headlineCandidates(s).filter((r) => r.side === side).length;
+}
+
+/** Radar card (redesign §5.2): the candidate whose interval sits furthest above zero. */
+export function bestCandidate(s: SweetSeries): SweetRow | null {
+  let best: SweetRow | null = null;
+  for (const r of headlineCandidates(s)) {
+    if (r.lo === null) continue;
+    if (best === null || best.lo === null || compareDecimal(r.lo, best.lo) > 0) best = r;
+  }
+  return best;
+}
+
+export function rowName(r: SweetRow): string {
+  return r.dimension === 'all' ? `whole ${r.side.toUpperCase()} side` : bucketText(r.dimension, r.bucket);
+}
+
+export function recomputingText(computedMs: number): string {
+  return `Recomputing after a premise change. The last result was ${fmtUtcHm(computedMs)} UTC; new numbers appear when it finishes.`;
 }
