@@ -1501,3 +1501,56 @@ async fn a_restart_seeds_last_tick_ms_so_the_late_rule_still_reaches_the_episode
     rw2.close().await;
     db.drop(owner).await;
 }
+
+#[tokio::test]
+async fn a_sweet_only_read_failure_never_stops_the_5a_families() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let r = run(&owner, T0 - 2 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+ab"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep("e1", r, "no_basket", T0 + M, Some(T0 + 2 * M))],
+    )
+    .await;
+    owner
+        .write_batch(&Batch {
+            paper_accounts: vec![p0_account(r)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    owner
+        .write_batch(&no_attempt(r, "e1", T0 + H + 30_000, dec!(0.5), 1))
+        .await
+        .unwrap();
+    // Phase 5d ruling 2026-09-27: simulate a missing grant on a SWEET-only table (analyze_rw reads
+    // paper_intents only for SWEET; G1/EDGE never touch it) so SWEET's own read fails while every
+    // other family's tables stay readable.
+    owner
+        .raw_exec("REVOKE SELECT ON paper_intents FROM analyze_rw")
+        .await
+        .unwrap();
+    let rw = rw(&db).await;
+    let mut a = Analyzer::new(rw.clone(), Duration::ZERO, "t", scenarios())
+        .await
+        .unwrap();
+    a.tick(T0 + H + 45_000)
+        .await
+        .expect("SWEET's own read failure must not fail the whole tick");
+    let g1 = body(&rw, "24h", "G1").await;
+    assert_eq!(cell(&g1, "NO-side episodes", "ours"), "1");
+    let edge = body(&rw, "24h", "EDGE").await;
+    assert_eq!(cell(&edge, "edge on the table", "ours"), "0.33");
+    // SWEET itself never got past its first (catching-up) read, so it stays under_review — but it
+    // did not take G1/EDGE down with it, and the tick as a whole reported success above.
+    let sweet = body(&rw, "24h", "SWEET").await;
+    assert_eq!(sweet["status"], "under_review");
+    assert!(rw.card_meta_get("fam:sweet").await.unwrap().is_none());
+    rw.close().await;
+    db.drop(owner).await;
+}

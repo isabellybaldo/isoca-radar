@@ -354,6 +354,7 @@ fn the_key_suffix_is_a_semicolon_segment_over_every_parameter() {
         "markout_ms=30000",
         "few_eff_n=5",
         "p1_max_days=30",
+        "annualize_days_floor=7",
         "1:1960",
         "500:3891",
         "days=lt1,1-7,7-30,30-90,90-365,ge365,unknown",
@@ -476,6 +477,34 @@ fn a_cell_counts_the_table_the_attempts_and_the_clusters_per_row() {
     );
     // YES scenario: no YES episode, so no YES row at all
     assert!(c.rows.keys().all(|k| !k.starts_with("yes|")));
+}
+
+#[test]
+fn yes_annualization_floors_days_at_seven_per_attempt() {
+    // Phase 5d ruling 2026-09-27: cost_days uses max(days, ANNUALIZE_DAYS_FLOOR), the same floor
+    // P1's own lock-up figure uses (arb_core::stats::annualized), so a same-day episode doesn't
+    // blow the rate up.
+    let mut e = sep("y1", "ev1", Side::Yes, T + 1);
+    e.days = Some(dec!(2)); // below the floor
+    let mut a = attempt(
+        Side::Yes,
+        dec!(10),
+        2,
+        vec![
+            buy("a", "yes", dec!(10), dec!(-4.00)),
+            buy("b", "yes", dec!(10), dec!(-5.00)),
+        ],
+        &[],
+    );
+    a.episode_id = "y1".into();
+    let c = build(T + H, &[e], &[a], &scen());
+    let all = &c.rows[&row_key(Side::Yes, "sp-idle", "all", "all")];
+    assert_eq!(all.cost.0, dec!(9.00));
+    assert_eq!(
+        all.cost_days.0,
+        dec!(9.00) * Decimal::from(ANNUALIZE_DAYS_FLOOR),
+        "days=2 floors to {ANNUALIZE_DAYS_FLOOR}"
+    );
 }
 
 #[test]
@@ -638,6 +667,11 @@ fn clusters_widen_the_se_when_one_event_repeats() {
         ("c", dec!(-1)),
     ]));
     assert!(clumped.se.unwrap() > spread.se.unwrap());
+    assert_eq!(
+        clumped.se,
+        Some(dec!(1)),
+        "n=4, clusters a{{2}}=2,c{{-2}}=2: ssr = 8 - 0 + 0 = 8; se = sqrt(2/1 * 8) / 4 = 1"
+    );
     assert_eq!(
         row_stats(&acc_with(&[("a", dec!(1))])).se,
         None,

@@ -237,7 +237,16 @@ impl Analyzer {
                 .map(|a| (a.account_id, a.bankroll))
                 .collect(),
         };
-        let sweet_accts = sweet_accounts(&self.store).await?;
+        // Phase 5d ruling 2026-09-27: a SWEET-only read failure (missing grant, statement
+        // timeout, TooManyRows) must not stop the 5a families from updating; log it and carry on
+        // with no accounts, so this tick's SWEET sync sees nothing to build.
+        let sweet_accts = match sweet_accounts(&self.store).await {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("analyze: SWEET accounts read failed, skipping SWEET this tick: {e:#}");
+                SweetAccounts::default()
+            }
+        };
         let env = Env {
             store: &self.store,
             now_ms,
@@ -261,7 +270,11 @@ impl Analyzer {
         sync(&env, &mut self.dur, &mut results, &mut meta, &mut report).await?;
         sync(&env, &mut self.g4, &mut results, &mut meta, &mut report).await?;
         sync(&env, &mut self.edge, &mut results, &mut meta, &mut report).await?;
-        sync(&env, &mut self.sweet, &mut results, &mut meta, &mut report).await?;
+        // Same ruling: SWEET's own sync (its reads happen inside build_hours) is isolated the same
+        // way, so the 5a families above still get their results written this tick.
+        if let Err(e) = sync(&env, &mut self.sweet, &mut results, &mut meta, &mut report).await {
+            eprintln!("analyze: SWEET sync failed, skipping SWEET this tick: {e:#}");
+        }
         report.ms = started.elapsed().as_millis();
         meta.push((
             "tick".to_string(),
@@ -785,14 +798,10 @@ async fn sweet_inputs(
         let exec = i.exec_ms.zip(i.q_eff);
         let (skip, pending) =
             classify_intent(i.skip_reason, i.planned_exec_ms, exec.is_some(), env.now_ms);
-        // Every intent's episode comes from the same SWEET_EPS-bounded range `eps` does, so this
-        // is always found; skip (never guess a leg count) if it somehow isn't (fix round 1).
+        // Usually found (intents and episodes come from the same SWEET_EPS-bounded range), but
+        // episodes and intents are separate statements, so a concurrent commit can legitimately
+        // race between them; skip (never guess a leg count) and let the hour rebuild next tick.
         let Some(s_legs) = eps_s_legs.get(i.episode_id.as_str()).copied() else {
-            debug_assert!(
-                false,
-                "sweet_inputs: intent on episode {} has no matching SweetEp in range",
-                i.episode_id
-            );
             continue;
         };
         let k = (i.run_id, i.account_id, i.episode_id);

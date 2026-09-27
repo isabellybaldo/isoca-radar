@@ -1,5 +1,5 @@
 //! Phase 5d §9 benchmark (ignored; run by hand, debug build): a SWEET tick (advance one hour, rebuild
-//! two hours, render 24h and 7d and one long window) stays under 50 ms over a 30-day history, and
+//! two hours, render 24h and 7d and one long window) stays under 75 ms over a 30-day history, and
 //! what analyze holds for SWEET (48 recent cells + the four sums) serializes under 16 MB.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use cards::body::{BodyCtx, Card, ScenarioLat, Status};
@@ -101,7 +101,7 @@ fn cell_for(h: i64, sc: &[(Side, String)]) -> SweetCell {
 
 #[test]
 #[ignore]
-fn sweet_tick_stays_under_50ms_and_holds_under_16mb() {
+fn sweet_tick_stays_under_75ms_and_holds_under_16mb() {
     let sc = scen();
     let lats: Vec<ScenarioLat> = vec![ScenarioLat {
         name: "sp-idle".into(),

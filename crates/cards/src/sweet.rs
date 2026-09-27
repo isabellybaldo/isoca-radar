@@ -33,6 +33,11 @@ pub const MARKOUT_MS: i64 = 30_000;
 pub const FEW_TRADES_EFF_N: i64 = 5;
 /// P1's `max_days_to_end` in config/policies.toml (the days bucket closes here; analyze checks it).
 pub const P1_MAX_DAYS: i64 = 30;
+/// Phase 5d ruling 2026-09-27: YES annualization floors days at 7 before accumulating
+/// `cost_days`, the same floor P1's own lock-up figure uses (`arb_core::stats::annualized`), so a
+/// handful of same-day episodes don't blow the rate up. The formula stays simple (Σx/Σ(cost·days) ×
+/// 365, not compounding).
+pub const ANNUALIZE_DAYS_FLOOR: i64 = 7;
 /// The headline scenario (the same as Edge capture's).
 pub const HEADLINE: &str = "sp-idle";
 /// The fee-sensitivity P0 accounts at the headline scenario.
@@ -231,6 +236,7 @@ pub fn params_text() -> String {
     let mut s = format!(
         "v={SWEET_VERSION};min_exec={MIN_EXEC};min_clusters={MIN_CLUSTERS};in_flight_ms={IN_FLIGHT_MS};\
          late_ms={LATE_MS};markout_ms={MARKOUT_MS};few_eff_n={FEW_TRADES_EFF_N};p1_max_days={P1_MAX_DAYS};\
+         annualize_days_floor={ANNUALIZE_DAYS_FLOOR};\
          headline={HEADLINE};category={CATEGORY_AVAILABLE};days={};s={};hour={};z=",
         DAYS_BUCKETS.join(","),
         S_BUCKETS.join(","),
@@ -749,7 +755,10 @@ impl CellData for SweetCell {
                     acc.pooled += cp.pooled;
                     if e.side == Side::Yes {
                         match e.days {
-                            Some(d) => acc.cost_days.0 += cp.cost * d,
+                            Some(d) => {
+                                acc.cost_days.0 +=
+                                    cp.cost * d.max(Decimal::from(ANNUALIZE_DAYS_FLOOR))
+                            }
                             None => acc.nodays += 1,
                         }
                     }
@@ -953,6 +962,10 @@ pub struct SweetRow {
     pub on_table_eligible: String,
     pub captured: String,
     pub captured_leftover0: String,
+    /// Σx0 / n_exec (spec §13 hover fix, Phase 5d ruling 2026-09-27): the at-0 mean beside
+    /// `captured_leftover0`'s total, so the leftovers-at-0 hover compares like with like against
+    /// `mean` (the at-30s per-attempt mean). None only when n_exec = 0.
+    pub mean_leftover0: Option<String>,
     pub mean: Option<String>,
     pub lo: Option<String>,
     pub hi: Option<String>,
@@ -1060,6 +1073,7 @@ pub fn sweet_parts(c: &SweetCell, ctx: &BodyCtx<'_>) -> Parts {
                 on_table_eligible: dec(a.on_table_elig.0),
                 captured: dec(a.sx.0),
                 captured_leftover0: dec(a.sx0.0),
+                mean_leftover0: (a.n_exec() > 0).then(|| d6(a.sx0.0 / Decimal::from(a.n_exec()))),
                 mean: v.st.mean.map(d6),
                 lo: v.lo.map(d6),
                 hi: v.hi.map(d6),

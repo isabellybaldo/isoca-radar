@@ -455,9 +455,15 @@ fn sweet_family_tick_ms(days: i64, sc_lat: &[ScenarioLat]) -> (u128, u128, u128)
     (full, t1, t2)
 }
 
-/// Every family's (full, tick1, tick2) summed: analyze ticks every family together, SWEET
-/// included (fix round 1, spec §9).
-fn tick_ms(days: i64) -> (u128, u128, u128) {
+fn sum3(parts: &[(u128, u128, u128)]) -> (u128, u128, u128) {
+    parts
+        .iter()
+        .fold((0, 0, 0), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2))
+}
+
+/// The 5a families' sum (G1/Dur/G4/Edge) and every family's sum with SWEET added (fix round 1,
+/// spec §9: analyze ticks every family together, SWEET included), both as (full, tick1, tick2).
+fn tick_ms(days: i64) -> ((u128, u128, u128), (u128, u128, u128)) {
     let sc = vec![
         ScenarioLat {
             name: "colo-idle".into(),
@@ -470,16 +476,15 @@ fn tick_ms(days: i64) -> (u128, u128, u128) {
             latency_ms: 300,
         },
     ];
-    let parts = [
+    let five_a = [
         family_tick_ms::<G1Cell>(days, &sc),
         family_tick_ms::<DurCell>(days, &sc),
         family_tick_ms::<G4Cell>(days, &sc),
         family_tick_ms::<EdgeCell>(days, &sc),
-        sweet_family_tick_ms(days, &sc),
     ];
-    parts
-        .iter()
-        .fold((0, 0, 0), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2))
+    let sweet = sweet_family_tick_ms(days, &sc);
+    let combined: Vec<(u128, u128, u128)> = five_a.iter().copied().chain([sweet]).collect();
+    (sum3(&five_a), sum3(&combined))
 }
 
 #[test]
@@ -489,9 +494,10 @@ fn tick_ms(days: i64) -> (u128, u128, u128) {
 /// sanity ceiling (accepted overrun, ruling T9 fix round 2, unchanged).
 fn tick_stays_under_300ms_as_all_grows_from_30_to_90_days() {
     for days in [30, 90] {
-        let (full, t1, t2) = tick_ms(days);
+        let (five_a, (full, t1, t2)) = tick_ms(days);
         println!(
-            "tick total at {days} days: tick1 {t1} ms, tick2 {t2} ms (every window at once: {full} ms)"
+            "tick total at {days} days: tick1 {t1} ms, tick2 {t2} ms (every window at once: {full} ms); 5a alone: tick1 {} ms, tick2 {} ms",
+            five_a.1, five_a.2
         );
         if days == 30 {
             let worst = t1.max(t2);
@@ -499,6 +505,13 @@ fn tick_stays_under_300ms_as_all_grows_from_30_to_90_days() {
             assert!(
                 worst < 300,
                 "one tick over {days} days took {worst} ms (budget 300 ms, spec §9; ruling T9 (c), Phase 5d fix round 2)"
+            );
+            // Phase 5d ruling 2026-09-27: keep a 5a-only CPU guard beside the combined ceiling, so a
+            // SWEET regression alone can't hide inside the wider combined budget.
+            let five_a_worst = five_a.1.max(five_a.2);
+            assert!(
+                five_a_worst < 200,
+                "the 5a families alone took {five_a_worst} ms at {days} days (budget 200 ms)"
             );
         } else {
             // ruling (fix round 2): past 30 days the tick that renders `all` may overrun (exact
@@ -513,6 +526,12 @@ fn tick_stays_under_300ms_as_all_grows_from_30_to_90_days() {
             assert!(
                 t2 < 400,
                 "the all-rendering tick over {days} days took {t2} ms (ceiling 400 ms)"
+            );
+            // Phase 5d ruling 2026-09-27: keep a 5a-only CPU guard beside the combined ceiling.
+            assert!(
+                five_a.1 < 200,
+                "the 5a families alone took {} ms at {days} days (budget 200 ms)",
+                five_a.1
             );
         }
     }
