@@ -76,13 +76,13 @@ If replay code needs to move into a library so both binaries can use it, that mo
 | Table | One row = | Columns |
 |---|---|---|
 | `tokens` | one token seen that day | `token_idx u32, token_id str, market_id str, event_id str, outcome str ("yes"/"no"), neg_risk bool` |
-| `tob` | a change of best bid or best ask | `ts_ms i64, recv_ms i64, token_idx u32, bid i64?, bid_sz i64?, ask i64?, ask_sz i64?` (null when that side is empty) |
+| `tob` | a change of best bid or best ask, or a token's first row of the day | `ts_ms i64, recv_ms i64, token_idx u32, bid i64?, bid_sz i64?, ask i64?, ask_sz i64?` (null when that side is empty) |
 | `depth` | one level of a periodic snapshot | `ts_ms i64, token_idx u32, side u8 (0 bid, 1 ask), level u16 (0 = best), price i64, size i64` |
 | `l2` | an exact level change inside an episode window | `ts_ms i64, recv_ms i64, token_idx u32, side u8, price i64, new_size i64, snapshot bool, episode_id str` |
 | `gaps` | a stretch with missing or untrustworthy data | `start_ms i64, end_ms i64, shard i32?, reason str ("down", "raw_hour_lost", "no_book_yet", "scanner_stopped")` |
 
 **Sizing and frequencies (config, `config/compact.toml`):**
-- **`depth`:** the top **10** levels per side, every **300 s**, only for tokens whose book changed since their last snapshot.
+- **`depth`:** the top **10** levels per side, every **300 s**, only for tokens whose book changed since their last snapshot (the day's first snapshot: every trusted token).
 - **`l2` windows:**
   - They cover every **net-positive arbitrage** episode (`kind IN ('yes_basket','no_basket')`, `peak_pnl_net_usd > 0`, live runs), from **300 s before it opens to 300 s after it closes**, capped at **1800 s** in total and flagged as truncated in the manifest.
   - Each window starts with a `snapshot = true` row per level of each token in the episode's group, followed by the exact changes.
@@ -96,12 +96,15 @@ If replay code needs to move into a library so both binaries can use it, that mo
 - the truncated windows;
 - totals.
 
+**Each day stands alone** (owner decision, 2026-09-28): at a UTC day's first line (after it applies) every trusted token gets a day-opening `tob` row with its current top, even one unchanged since the previous day's last row, so it is in that day's `tokens`; the day's first depth boundary snapshots every trusted token. A token's first `tob` row of a day is always written, so a token untrusted at midnight (its gap covers it) opens the day at its next snapshot. That row's `ts_ms` is the book's server ts, never before the token's previous row's and raised to the day's start if earlier; `recv_ms` is the line's. Within a day a token never repeats its top in two rows in a row. A reader of one day needs no earlier day.
+
 A day can be verified, or rebuilt while its raw hours still exist.
 
 ## 4. Processing and reliability
 
 ### 4.1 Order and carried state
 - **Order:** hours are processed strictly in order, and the compactor keeps every token's `Book` in memory (about 4k tokens, estimated 50–100 MB, inside 256 MB).
+- **Carried across days:** books, trust and each token's last top (for `ts_ms` order), not rows: each day opens with a `tob` row and a depth snapshot per trusted token (§3).
 - **Checkpoints:** after each hour, all books, the token dictionary, the day's `token_idx` map, and each token's `l2` state (its latest `l2` `ts_ms`, so `ts_ms` never goes back across hours) are written to `archive/_state/checkpoint-<hour>.bin.zst`, via a temporary name and an atomic rename. Two checkpoints are kept. Open `l2` windows are not carried: each hour re-reads its windows from the episodes and restarts every window's streams with snapshot rows (ruling R5), which gives the same rows.
 - **Restart:** the compactor resumes from the newest checkpoint.
 - **Discontinuity:** a missing hour, a `Down` control line, or a stretch where the scanner was stopped (no hour file) marks the affected tokens' books **unknown**. `tob`, `depth` and `l2` rows for them resume only after the next full book snapshot in the feed, and the stretch is written to `gaps`. No row is ever invented from a stale book.

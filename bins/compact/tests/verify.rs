@@ -2,6 +2,7 @@
 mod fixture;
 use compact::archive::*;
 use compact::pq::{PartWriter, Table, read_all};
+use compact::reduce::Reducer;
 use compact::rows::*;
 use compact::verify::verify_day;
 use fixture::*;
@@ -233,6 +234,95 @@ fn verify_checks_the_l2_stream_restarts_with_a_snapshot_after_a_whole_feed_gap()
         })
     });
     fails(&arch, "does not start with a snapshot");
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[test]
+fn verify_passes_on_two_days_and_the_second_stands_alone() {
+    use compact::hour::{HourJob, Source, process_hour};
+    let (raw, arch) = (tmp("v2day-raw"), tmp("v2day-arch"));
+    let d = T0 + 24 * H;
+    let h23 = d - H;
+    let r = rec("u1", T0, &[("e1", &["y1", "y2"])], &[("e1", 0)]);
+    write_record(&raw, &r);
+    write_hour(
+        &raw,
+        h23,
+        &[
+            uni(h23 + 1_000, &r),
+            frame(
+                h23 + 2_000,
+                0,
+                book("y1", h23 + 1_990, &[("0.40", "1")], &[("0.45", "3")]),
+            ),
+            frame(
+                h23 + 3_000,
+                0,
+                book("y2", h23 + 2_990, &[("0.20", "1")], &[]),
+            ),
+            frame(
+                d - 30_000,
+                0,
+                change("y1", d - 30_005, "BUY", "0.41", "1", "0.41", "0.45"),
+            ),
+        ],
+    );
+    write_hour(
+        &raw,
+        d,
+        &[frame(
+            d + 1_000,
+            0,
+            change("y1", d + 995, "BUY", "0.42", "1", "0.42", "0.45"),
+        )],
+    );
+    let mut red = Reducer::new(rcfg());
+    for i in 0..48 {
+        let hour_ms = T0 + i * H;
+        let source = if hour_ms == h23 || hour_ms == d {
+            Source::File(tape::files::hour_path(&raw, hour_ms))
+        } else {
+            Source::Stopped
+        };
+        let job = HourJob {
+            hour_ms,
+            raw_dir: raw.clone(),
+            archive_dir: arch.clone(),
+            source,
+            windows: vec![],
+            stop_before_publish: false,
+        };
+        process_hour(&mut red, &job).unwrap().unwrap();
+    }
+    let merged = merge_ready(&arch, &cfg(&raw, &arch), "s", ALL);
+    assert!(merged.failed.is_empty(), "{:?}", merged.failed);
+    for day in ["2026-09-23", "2026-09-24"] {
+        assert_eq!(
+            verify_day(&arch, day).unwrap(),
+            Vec::<String>::new(),
+            "{day}"
+        );
+    }
+    let day2 = day_dir(&arch, d);
+    let toks: Vec<TokenRow> = read_all(&daily_path(&day2, TokenRow::NAME)).unwrap();
+    let y2 = toks
+        .iter()
+        .find(|t| t.token_id == "y2")
+        .expect("y2 opens day 2");
+    let tob: Vec<TobRow> = read_all(&daily_path(&day2, TobRow::NAME)).unwrap();
+    assert!(
+        tob.iter()
+            .any(|t| t.token_idx == y2.token_idx && t.ts_ms == d && t.bid == Some(m("0.20"))),
+        "{tob:?}"
+    );
+    let depth: Vec<DepthRow> = read_all(&daily_path(&day2, DepthRow::NAME)).unwrap();
+    assert!(
+        depth
+            .iter()
+            .any(|x| x.token_idx == y2.token_idx && x.ts_ms == d),
+        "{depth:?}"
+    );
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
 }

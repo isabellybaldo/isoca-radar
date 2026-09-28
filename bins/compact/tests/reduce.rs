@@ -1219,3 +1219,205 @@ fn a_checkpoint_round_trip_keeps_l2_windows_that_span_hours() {
         ]
     );
 }
+
+/// Two hours across midnight (day D = T0 + 24 h): y1 and y2 (shard 0) trusted at midnight, y3
+/// (shard 1) disconnected before it. After 00:00 only y1 changes.
+fn midnight_hours() -> (
+    Vec<(i64, Vec<tape::line::Line>)>,
+    Vec<tape::universe_view::RecordView>,
+) {
+    let d = T0 + 24 * H;
+    let r = rec(
+        "u1",
+        T0,
+        &[("e1", &["y1", "y2"]), ("e2", &["y3"])],
+        &[("e1", 0), ("e2", 1)],
+    );
+    let h23 = T0 + 23 * H;
+    let hours = vec![
+        (
+            h23,
+            vec![
+                uni(h23 + 1_000, &r),
+                frame(
+                    h23 + 2_000,
+                    0,
+                    book("y1", h23 + 1_990, &[("0.40", "1")], &[("0.45", "3")]),
+                ),
+                frame(
+                    h23 + 3_000,
+                    0,
+                    book("y2", h23 + 2_990, &[("0.20", "1")], &[]),
+                ),
+                frame(
+                    h23 + 4_000,
+                    1,
+                    book("y3", h23 + 3_990, &[("0.30", "1")], &[("0.35", "1")]),
+                ),
+                down(d - 60_000, 1),
+                frame(
+                    d - 30_000,
+                    0,
+                    change("y1", d - 30_005, "BUY", "0.41", "1", "0.41", "0.45"),
+                ),
+            ],
+        ),
+        (
+            d,
+            vec![
+                frame(
+                    d + 1_000,
+                    0,
+                    change("y1", d + 995, "BUY", "0.42", "1", "0.42", "0.45"),
+                ),
+                frame(
+                    d + 400_000,
+                    0,
+                    change("y1", d + 399_995, "BUY", "0.43", "1", "0.43", "0.45"),
+                ),
+            ],
+        ),
+    ];
+    (hours, vec![r])
+}
+
+fn run_midnight(split: bool, hours: &[(i64, Vec<tape::line::Line>)]) -> Vec<HourOut> {
+    let (_, recs) = midnight_hours();
+    let mut red = Reducer::new(rcfg());
+    let mut out = Vec::new();
+    for (hour, lines) in hours {
+        if split {
+            let json = serde_json::to_string(&red.state()).unwrap();
+            red = Reducer::from_state(rcfg(), serde_json::from_str(&json).unwrap()).unwrap();
+        }
+        let mut s = VecSink::default();
+        red.begin_hour(*hour, vec![]);
+        run(&mut red, lines, &recs, &mut s);
+        let st = red.end_hour(&mut s).unwrap();
+        out.push((s, red.tokens().to_vec(), st));
+    }
+    out
+}
+
+#[test]
+fn a_new_utc_day_opens_with_a_row_and_a_depth_snapshot_for_every_trusted_token() {
+    let d = T0 + 24 * H;
+    let (hours, _) = midnight_hours();
+    let out = run_midnight(false, &hours);
+    let (s, toks, _) = &out[1];
+    let ids: Vec<&str> = toks.iter().map(|t| t.token_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["y1", "y2"],
+        "the trusted tokens open the new day's dictionary; y3 (disconnected) does not"
+    );
+    assert_eq!(
+        s.tob,
+        vec![
+            tob(
+                d + 995,
+                d + 1_000,
+                0,
+                Some(("0.42", "1")),
+                Some(("0.45", "3"))
+            ),
+            // y2 unchanged since yesterday: its opening row, stamped at the day's start
+            tob(d, d + 1_000, 1, Some(("0.20", "1")), None),
+            tob(
+                d + 399_995,
+                d + 400_000,
+                0,
+                Some(("0.43", "1")),
+                Some(("0.45", "3"))
+            ),
+        ]
+    );
+    assert_eq!(
+        s.depth,
+        vec![
+            // the day's first boundary (00:00): every trusted token, changed or not
+            depth(d, 0, SIDE_BID, 0, "0.41", "1"),
+            depth(d, 0, SIDE_BID, 1, "0.40", "1"),
+            depth(d, 0, SIDE_ASK, 0, "0.45", "3"),
+            depth(d, 1, SIDE_BID, 0, "0.20", "1"),
+            // then only the changed ones again
+            depth(d + 300_000, 0, SIDE_BID, 0, "0.42", "1"),
+            depth(d + 300_000, 0, SIDE_BID, 1, "0.41", "1"),
+            depth(d + 300_000, 0, SIDE_ASK, 0, "0.45", "3"),
+        ]
+    );
+    assert_eq!(
+        s.gaps,
+        vec![gap(d, d + H, Some(1), reason::DOWN)],
+        "y3's gap covers it in the new day"
+    );
+    // yesterday: y2's last row has the same top, and no row repeats a top within a day
+    assert!(out[0].0.tob.contains(&tob(
+        T0 + 23 * H + 2_990,
+        T0 + 23 * H + 3_000,
+        1,
+        Some(("0.20", "1")),
+        None
+    )));
+}
+
+#[test]
+fn a_checkpoint_round_trip_across_midnight_gives_the_same_rows_as_one_run() {
+    let (hours, _) = midnight_hours();
+    assert_eq!(run_midnight(false, &hours), run_midnight(true, &hours));
+    // an hour 00 with no line: the day opens at hour 01's first line, from the checkpoint too
+    let d = T0 + 24 * H;
+    let mut quiet = hours.clone();
+    quiet[1].1.clear();
+    quiet.push((
+        d + H,
+        vec![frame(
+            d + H + 1_000,
+            0,
+            change("y1", d + H + 995, "BUY", "0.42", "1", "0.42", "0.45"),
+        )],
+    ));
+    let whole = run_midnight(false, &quiet);
+    assert_eq!(whole, run_midnight(true, &quiet));
+    assert_eq!(
+        whole[2]
+            .0
+            .tob
+            .iter()
+            .map(|t| t.token_idx)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "y1's change, then y2's opening row"
+    );
+}
+
+#[test]
+fn a_checkpoint_from_before_day_opening_rows_does_not_repeat_a_top() {
+    let (hours, recs) = midnight_hours();
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(hours[0].0, vec![]);
+    run(&mut red, &hours[0].1, &recs, &mut s);
+    red.end_hour(&mut s).unwrap();
+    // the same state without the fields added for day-opening rows
+    let mut v = serde_json::to_value(red.state()).unwrap();
+    v.as_object_mut().unwrap().remove("day_open");
+    for t in v["last_top"].as_object_mut().unwrap().values_mut() {
+        t.as_object_mut().unwrap().remove("day_ms");
+    }
+    let mut red = Reducer::from_state(rcfg(), serde_json::from_value(v).unwrap()).unwrap();
+    // an hour later the same day: y2's top again is no row
+    let mut s = VecSink::default();
+    red.begin_hour(hours[0].0, vec![]);
+    run(
+        &mut red,
+        &[frame(
+            hours[0].0 + 3_500_000,
+            0,
+            book("y2", hours[0].0 + 3_499_995, &[("0.20", "1")], &[]),
+        )],
+        &recs,
+        &mut s,
+    );
+    assert!(s.tob.is_empty(), "{:?}", s.tob);
+}

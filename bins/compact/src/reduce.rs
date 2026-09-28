@@ -14,6 +14,17 @@
 //! rows sharing one `recv_ms` can be zeros then a snapshot set (a restart that first clears the
 //! levels written before) or a snapshot set then a diff (a restart and its change on one line), so
 //! a reader never re-sorts one token's rows by `recv_ms` or `ts_ms`.
+//!
+//! Each UTC day stands alone (owner decision 2026-09-28). At the day's first line, after it
+//! applies, every trusted token gets a day-opening `tob` row with its current top, even one
+//! unchanged since the previous day's last row, so it is in the new day's dictionary; and the
+//! first depth boundary of the day snapshots every trusted token, not only the changed ones.
+//! Untrusted tokens get neither: their gap covers them, and a token's first `tob` row of a day
+//! is always written (whatever its previous day's last top), so one trusted later that day opens
+//! then. A token's first `tob` row of a day has `ts_ms` = its book's server ts, kept at or after
+//! its previous row's and raised to the day's start if earlier (a quiet book's last update was
+//! yesterday), and `recv_ms` = the line's receive time. Within a day a token never repeats its
+//! top in two rows in a row.
 use crate::rows::{
     DepthRow, GapRow, L2Row, SIDE_ASK, SIDE_BID, Sink, TobRow, TokenRow, micros, reason,
 };
@@ -41,6 +52,14 @@ pub type TopMicros = (Option<(i64, i64)>, Option<(i64, i64)>);
 pub struct LastTop {
     pub top: TopMicros,
     pub ts_ms: i64,
+    /// The UTC day (ms) of the row: a token's first row of a day is written even if unchanged.
+    /// Missing in a checkpoint written before day-opening rows: taken as the checkpoint's day.
+    #[serde(default = "unknown_day")]
+    pub day_ms: i64,
+}
+
+fn unknown_day() -> i64 {
+    i64::MIN
 }
 
 /// A shard's tokens waiting for a snapshot since `since_ms`.
@@ -82,6 +101,9 @@ pub struct ReducerState {
     /// Each token's latest l2 ts_ms: its l2 rows never go back, across hours too.
     #[serde(default)]
     pub l2_ts: BTreeMap<String, i64>,
+    /// A new UTC day began and its first line has not come yet: that line opens the day.
+    #[serde(default)]
+    pub day_open: bool,
 }
 
 pub struct Reducer {
@@ -101,6 +123,7 @@ pub struct Reducer {
     last_conn: BTreeMap<String, usize>,
     universe_lost: Option<i64>,
     l2_ts: BTreeMap<String, i64>,
+    day_open: bool,
     // per hour, never checkpointed
     hour_ms: i64,
     windows: Vec<Window>,
@@ -203,6 +226,7 @@ impl Reducer {
             last_conn: BTreeMap::new(),
             universe_lost: None,
             l2_ts: BTreeMap::new(),
+            day_open: false,
             hour_ms: 0,
             windows: Vec::new(),
             owner: HashMap::new(),
@@ -227,6 +251,11 @@ impl Reducer {
             .collect();
         r.dict = s.dict;
         r.last_top = s.last_top;
+        for t in r.last_top.values_mut() {
+            if t.day_ms == unknown_day() {
+                t.day_ms = s.dict_day_ms; // an older checkpoint: its rows are the current day's
+            }
+        }
         r.changed = s.changed;
         r.next_depth_ms = s.next_depth_ms;
         r.clock_ms = s.clock_ms;
@@ -235,6 +264,7 @@ impl Reducer {
         r.last_conn = s.last_conn;
         r.universe_lost = s.universe_lost;
         r.l2_ts = s.l2_ts;
+        r.day_open = s.day_open;
         Ok(r)
     }
 
@@ -254,6 +284,7 @@ impl Reducer {
             last_conn: self.last_conn.clone(),
             universe_lost: self.universe_lost,
             l2_ts: self.l2_ts.clone(),
+            day_open: self.day_open,
         }
     }
 
@@ -278,6 +309,7 @@ impl Reducer {
             self.dict.clear();
             self.idx.clear();
             self.dict_day_ms = day;
+            self.day_open = true;
         }
         windows.sort_by(|a, b| {
             a.opened_ms
@@ -312,6 +344,14 @@ impl Reducer {
             gap(self.hour_ms, since, r, None, &why, sink)?;
             self.wait_for_untrusted(r);
         }
+        if self.day_open {
+            // The day's first depth boundary snapshots every trusted token. A boundary still
+            // pending from the previous day (a quiet feed around midnight) keeps its own tokens.
+            if self.next_depth_ms.is_some_and(|at| at < self.dict_day_ms) {
+                self.depth_due(r, sink)?;
+            }
+            self.changed.extend(self.trusted.iter().cloned());
+        }
         self.depth_due(r, sink)?;
         // A universe line can hand a still-visible token a different (empty) book: a token live
         // in two groups, or one moving between canary and a group leg. FeedBooks reports neither
@@ -333,6 +373,15 @@ impl Reducer {
         }
         self.on_event(&ap, r, sink)?;
         self.rows(&ap, r, sink)?;
+        if std::mem::take(&mut self.day_open) {
+            // day-opening rows: the tops after this line (a touched token already has its row)
+            let open: Vec<String> = self.trusted.iter().cloned().collect();
+            for t in open {
+                if self.trusted.contains(&t) {
+                    self.tob(&t, r, sink)?;
+                }
+            }
+        }
         if self.unfit && ap.event != LineEvent::BadLine {
             self.stats.bad_lines += 1;
         }
@@ -537,8 +586,10 @@ impl Reducer {
             self.mark_unfit(t, r);
             return Ok(());
         };
+        let day = self.dict_day_ms;
         let prev = self.last_top.get(t).copied();
-        if prev.is_some_and(|p| p.top == top) {
+        let today = prev.filter(|p| p.day_ms == day);
+        if today.is_some_and(|p| p.top == top) {
             return Ok(());
         }
         let ts_ms = match prev {
@@ -547,6 +598,12 @@ impl Reducer {
                 p.ts_ms
             }
             _ => ts,
+        };
+        // the day's first row for the token is stamped inside the day
+        let ts_ms = if today.is_none() {
+            ts_ms.max(day)
+        } else {
+            ts_ms
         };
         let token_idx = self.index(t)?;
         sink.tob(TobRow {
@@ -558,7 +615,14 @@ impl Reducer {
             ask: top.1.map(|x| x.0),
             ask_sz: top.1.map(|x| x.1),
         })?;
-        self.last_top.insert(t.to_string(), LastTop { top, ts_ms });
+        self.last_top.insert(
+            t.to_string(),
+            LastTop {
+                top,
+                ts_ms,
+                day_ms: day,
+            },
+        );
         Ok(())
     }
 
