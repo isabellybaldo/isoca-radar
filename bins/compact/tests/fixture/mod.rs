@@ -290,3 +290,83 @@ pub fn day_files(archive: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     v.sort();
     v
 }
+
+/// A whole day in the archive, unmerged: hour 0 from a real raw hour (two tokens, an l2 window),
+/// the hours in `lost` as Lost, every other hour Stopped.
+pub fn build_day(
+    raw: &Path,
+    archive: &Path,
+    day_ms: i64,
+    lost: &[u32],
+) -> Vec<compact::hour::HourReport> {
+    use compact::hour::{HourJob, Source, process_hour};
+    let r = rec(
+        &format!("u-{day_ms}"),
+        day_ms,
+        &[("e1", &["y1", "y2"])],
+        &[("e1", 0)],
+    );
+    write_record(raw, &r);
+    write_hour(
+        raw,
+        day_ms,
+        &[
+            uni(day_ms + 1_000, &r),
+            frame(
+                day_ms + 2_000,
+                0,
+                book("y1", day_ms + 1_990, &[("0.40", "10")], &[("0.45", "5")]),
+            ),
+            frame(
+                day_ms + 2_100,
+                0,
+                book("y2", day_ms + 2_090, &[("0.20", "3")], &[]),
+            ),
+            frame(
+                day_ms + 200_000,
+                0,
+                change("y1", day_ms + 199_995, "BUY", "0.41", "1", "0.41", "0.45"),
+            ),
+            frame(
+                day_ms + 400_000,
+                0,
+                change("y1", day_ms + 399_995, "BUY", "0.42", "1", "0.42", "0.45"),
+            ),
+            frame(
+                day_ms + 500_000,
+                0,
+                change("y2", day_ms + 499_995, "BUY", "0.21", "1", "0.21", "1"),
+            ),
+        ],
+    );
+    let win = compact::windows::Window {
+        episode_id: format!("live-1-{day_ms}"),
+        event_id: "e1".into(),
+        opened_ms: day_ms + 450_000,
+        start_ms: day_ms + 150_000,
+        end_ms: day_ms + 1_950_000,
+        truncated: true,
+    };
+    let mut red = Reducer::new(rcfg());
+    (0..24u32)
+        .map(|hh| {
+            let hour_ms = day_ms + i64::from(hh) * H;
+            let source = if hh == 0 {
+                Source::File(tape::files::hour_path(raw, hour_ms))
+            } else if lost.contains(&hh) {
+                Source::Lost
+            } else {
+                Source::Stopped
+            };
+            let job = HourJob {
+                hour_ms,
+                raw_dir: raw.to_path_buf(),
+                archive_dir: archive.to_path_buf(),
+                source,
+                windows: if hh == 0 { vec![win.clone()] } else { vec![] },
+                stop_before_publish: false,
+            };
+            process_hour(&mut red, &job).unwrap().unwrap()
+        })
+        .collect()
+}
