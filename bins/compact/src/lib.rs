@@ -11,6 +11,7 @@ pub mod pq;
 pub mod reduce;
 pub mod rows;
 pub mod state;
+pub mod verify;
 pub mod windows;
 
 /// git sha baked in at image build time (the image's SCANNER_VERSION build arg), "dev" otherwise.
