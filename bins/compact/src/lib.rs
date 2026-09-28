@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod guard;
+pub mod pq;
 pub mod rows;
 
 /// git sha baked in at image build time (the image's SCANNER_VERSION build arg), "dev" otherwise.
