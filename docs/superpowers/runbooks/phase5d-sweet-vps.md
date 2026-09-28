@@ -129,7 +129,26 @@ Expect:
 - `t|f`: `analyze_rw` can now read `paper_ledger` but still cannot write it (0007 grants SELECT
   only; INSERT/UPDATE/DELETE stay on `card_cells`, `card_results`, `card_meta`).
 
-If `migrate` fails, stop and read its log
+**If `migrate` says `migration N was previously applied but has been modified`** (happened 2026-09-27
+for 6: it was applied from a CRLF build; content identical). STOP, do not start services.
+
+1. Compare stored checksums with the LF ones:
+   ```bash
+   docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT version, left(encode(checksum,'hex'),16) FROM _sqlx_migrations ORDER BY version"
+   ```
+   → each line equals the pin in `crates/store/tests/migration_checksums.rs` (first 16 hex), except N.
+2. On the PC, print N's LF and CRLF checksums:
+   ```bash
+   python -c "import hashlib;b=open('crates/store/migrations/000N_<name>.sql','rb').read().replace(b'\r\n',b'\n');print('LF  ',hashlib.sha384(b).hexdigest());print('CRLF',hashlib.sha384(b.replace(b'\n',b'\r\n')).hexdigest())"
+   ```
+   → the stored value from step 1 equals the start of `CRLF`. If it doesn't, STOP: the SQL really changed.
+3. Record the LF checksum (no-op unless the stored value is exactly the CRLF one):
+   ```bash
+   docker compose exec -T postgres psql -U ct_owner -d cute_trading -c "UPDATE _sqlx_migrations SET checksum = decode('<LF hex>','hex') WHERE version = N AND encode(checksum,'hex') = '<CRLF hex>'"
+   ```
+   → `UPDATE 1`. Then re-run `migrate` → `migrate exit=0`.
+
+If `migrate` fails any other way, stop and read its log
 (`docker compose --profile core logs --tail 50 migrate`) before deciding whether to roll back —
 0007 is additive (a nullable column plus grants), so a clean failure leaves nothing half-applied.
 

@@ -144,7 +144,7 @@ function AccountsChart({ accounts }: { accounts: PaperAccount[] }) {
                   xLabels={axis.xLabels}
                   series={series}
                   legend={false}
-                  yLabels={ext ? { bottom: formatMoney(ext.min), top: formatMoney(ext.max) } : undefined}
+                  yLabels={ext ? { bottom: formatMoneyCents(ext.min), top: formatMoneyCents(ext.max) } : undefined}
                 />
                 {ends.length > 0 && (
                   <ul className="plain endlegend" aria-label="equity now">

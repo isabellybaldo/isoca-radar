@@ -19,15 +19,18 @@ export function Table<T>({
   rows,
   rowKey,
   rowClass,
+  className,
 }: {
   columns: Column<T>[];
   rows: T[];
   rowKey: (row: T) => string;
   rowClass?: (row: T) => string | undefined;
+  /** Hook for a page's own layout of this table (e.g. Radar's phone cards). */
+  className?: string;
 }) {
   return (
     <div className="scroll">
-      <table>
+      <table className={className}>
         <thead>
           <tr>
             {columns.map((c) => (

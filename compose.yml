@@ -83,7 +83,11 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    restart: on-failure:5
+    # unless-stopped (not on-failure): a clean exit 0 at host shutdown must still come back at boot.
+    # analyze has no safe mode, so restarting whenever it wasn't deliberately stopped is correct.
+    # The scanner keeps on-failure (safe mode exits 0 on purpose) and is started at boot by
+    # deploy/systemd/isoca-radar-scanner.service instead.
+    restart: unless-stopped
     stop_grace_period: 10s
     read_only: true
     security_opt: ["no-new-privileges:true"]
