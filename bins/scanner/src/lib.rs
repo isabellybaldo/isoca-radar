@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod paper;
 pub mod premises;
 pub mod replay;
+pub mod retention;
 pub mod run;
 pub mod shards;
 pub mod universe;

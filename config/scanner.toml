@@ -43,8 +43,8 @@ resnapshot_reserved_per_sec = 3 # S3a: of rest_per_sec, only resnapshots (known-
 dir = "/data/capture"
 pause_below_gb = 10             # spec §8.1.2
 resume_above_gb = 15
-retention_hours = 48            # Phase 0: ~25–33 GB/day compressed
-max_capture_gb = 10             # hard cap: Docker's VM can't see the Windows drive filling up (smoke test 2026-09-25)
+retention_hours = 24            # spec 5b §4.3: kept ~a day, deleted by age only once compacted (compact_hours)
+max_capture_gb = 15             # hard cap: deletes the oldest hour whatever its status and marks it lost (spec 5b §4.3)
 
 [breaker]
 max_starts = 5                  # spec §8.1.2

@@ -608,7 +608,21 @@ async fn run_live(
             .await
             .context("writer gone")?;
     }
-    let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
+    // Spec 5b §4.3: raw hours wait for the compactor (compact_hours), except at the byte cap.
+    let guard_view = Arc::new(crate::retention::GuardView::default());
+    let (lost_tx, lost_rx) = mpsc::unbounded_channel::<i64>();
+    let guard_task = tokio::spawn(crate::retention::guard_task(
+        store.clone(),
+        guard_view.clone(),
+        lost_rx,
+    ));
+    let capture_thread = capture::spawn(
+        cfg.capture.clone(),
+        capture_rx,
+        metrics.clone(),
+        guard_view,
+        lost_tx,
+    );
     // Paper trader (S3c): restore the live accounts from paper_state, register this run's
     // accounts (pre-registration, spec §11) before any other paper row, start the resolver.
     // Replay never touches paper_state.
@@ -1053,6 +1067,7 @@ async fn run_live(
     };
     let _ = by_deadline(deadline, "writer flush", flush).await;
     health_task.abort();
+    guard_task.abort();
     rechecks_task.abort();
     resnapshots_task.abort();
     samplers_task.abort();

@@ -3,8 +3,9 @@
 //! rest_snapshot, suspect, resolved, shutdown), so replay reproduces the live engine exactly. Universe
 //! records live next to them, zstd-compressed, as universe-<taken_ms>-<seq>.json.zst (`<seq>` is
 //! a per-run counter so a warm start reusing `taken_ms` can never overwrite an earlier record).
-//! Capture never blocks the scanner: it pauses on low disk (hysteresis) and deletes hour files
-//! older than the retention window, and universe files older than the oldest remaining hour file.
+//! Capture never blocks the scanner: it pauses on low disk (hysteresis), deletes hour files past
+//! the retention window once compacted (retention.rs), always deletes the oldest at the byte cap,
+//! and deletes universe records no remaining hour can reference.
 use crate::config::CaptureCfg;
 use crate::metrics::Metrics;
 use crate::universe::{ConnMap, Universe};
@@ -249,39 +250,35 @@ pub fn spawn(
     cfg: CaptureCfg,
     mut rx: tokio::sync::mpsc::Receiver<CaptureMsg>,
     metrics: Arc<Metrics>,
+    guard: Arc<crate::retention::GuardView>,
+    lost: tokio::sync::mpsc::UnboundedSender<i64>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let dir = PathBuf::from(&cfg.dir);
         let mut writer = Writer::new(dir.clone());
-        let mut guard = DiskGuard::new(cfg.pause_below_gb, cfg.resume_above_gb);
+        let mut disk_guard = DiskGuard::new(cfg.pause_below_gb, cfg.resume_above_gb);
         let mut last_check: Option<i64> = None;
         while let Some(msg) = rx.blocking_recv() {
             let now = crate::now_ms();
             if housekeeping_due(last_check, now) {
                 last_check = Some(now);
                 if let Ok(free) = fs4::available_space(&dir) {
-                    let paused = guard.update(free);
+                    let paused = disk_guard.update(free);
                     if paused {
                         writer.finish();
                     }
                     metrics.capture_paused.store(paused, Ordering::Relaxed);
                 }
-                for p in expired_hours(&dir, now, cfg.retention_hours) {
-                    if std::fs::remove_file(p).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                let budget = cfg.max_capture_gb.saturating_mul(1_000_000_000);
-                for p in over_budget_hours(&dir, budget, writer.current_path()) {
-                    if std::fs::remove_file(p).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                for p in stale_universe_files(&dir) {
-                    if std::fs::remove_file(p).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+                let view = guard.get(now);
+                let n = crate::retention::housekeep(
+                    &dir,
+                    now,
+                    &cfg,
+                    view.as_ref(),
+                    &lost,
+                    writer.current_path(),
+                );
+                metrics.capture_deletes.fetch_add(n, Ordering::Relaxed);
             }
             if metrics.capture_paused.load(Ordering::Relaxed) {
                 metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
