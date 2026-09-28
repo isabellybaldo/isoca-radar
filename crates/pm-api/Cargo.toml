@@ -16,6 +16,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 rustls.workspace = true
+tape = { path = "../tape" }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

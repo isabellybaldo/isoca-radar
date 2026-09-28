@@ -1304,6 +1304,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "tape",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
@@ -1772,6 +1773,7 @@ dependencies = [
  "sha2",
  "sim",
  "store",
+ "tape",
  "tokio",
  "toml",
  "zstd",
@@ -2236,6 +2238,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "tape"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arb-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "zstd",
 ]
 
 [[package]]

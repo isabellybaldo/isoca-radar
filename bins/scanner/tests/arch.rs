@@ -34,7 +34,7 @@ fn crate_graph_matches_spec_9_2() {
         "pm-api",
         "store",
     ];
-    for pure in ["arb-core", "sim", "cards"] {
+    for pure in ["arb-core", "sim", "cards", "tape"] {
         for bad in io {
             assert!(!d[pure].contains(bad), "{pure} must stay pure (no {bad})");
         }
