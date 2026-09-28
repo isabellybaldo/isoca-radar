@@ -3,8 +3,10 @@
 //! only compact_hours and compact_status.
 #![forbid(unsafe_code)]
 
+pub mod archive;
 pub mod config;
 pub mod guard;
+pub mod hour;
 pub mod pq;
 pub mod reduce;
 pub mod rows;
