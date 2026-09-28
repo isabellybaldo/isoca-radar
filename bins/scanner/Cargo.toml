@@ -24,6 +24,7 @@ tape = { path = "../../crates/tape" }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
+compact = { path = "../compact" }
 
 [lints]
 workspace = true

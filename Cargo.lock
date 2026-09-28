@@ -2235,6 +2235,7 @@ dependencies = [
  "anyhow",
  "arb-core",
  "clap",
+ "compact",
  "fs4",
  "pm-api",
  "rust_decimal",
