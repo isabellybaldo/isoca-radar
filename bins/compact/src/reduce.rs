@@ -3,8 +3,13 @@
 //! books are trusted (untrusted from a disconnect, a restart, a missing or lost stretch, or a
 //! token's first appearance, until the feed sends it a full snapshot: no row is ever made from a
 //! stale book), the day's token dictionary, top-of-book changes, periodic depth, and the gaps.
-//! Every stretch in which a visible token is untrusted lies inside a gap row.
-use crate::rows::{DepthRow, GapRow, SIDE_ASK, SIDE_BID, Sink, TobRow, TokenRow, micros, reason};
+//! Every stretch in which a visible token is untrusted lies inside a gap row. Inside an episode
+//! window (spec §3) each token of the episode's event gets its exact level changes (`l2`) under
+//! the same trust rules: it starts with a full snapshot and restarts with one whenever it becomes
+//! trusted again or its owning episode changes.
+use crate::rows::{
+    DepthRow, GapRow, L2Row, SIDE_ASK, SIDE_BID, Sink, TobRow, TokenRow, micros, reason,
+};
 use crate::windows::Window;
 use anyhow::Context;
 use arb_core::book::Top;
@@ -88,6 +93,12 @@ pub struct Reducer {
     // per hour, never checkpointed
     hour_ms: i64,
     windows: Vec<Window>,
+    /// token → index in `windows` of the episode that owns its l2 rows now.
+    owner: HashMap<String, usize>,
+    /// Owned tokens whose owner has not had a non-empty snapshot from a trusted book yet.
+    needs_snap: BTreeSet<String>,
+    /// The next window start or end: owners are recomputed when the clock reaches it.
+    next_owner_ms: i64,
     stats: HourStats,
     /// This line carried a value that does not fit the archive (counted once as a bad line).
     unfit: bool,
@@ -125,6 +136,27 @@ fn gap(
     Ok(())
 }
 
+/// Levels whose size differs between two states of one book, bids then asks, prices ascending.
+/// `None` = the level is gone (written as new_size 0).
+fn diff(before: &Levels, now: &Levels) -> Vec<(u8, Price, Option<Shares>)> {
+    let mut out = Vec::new();
+    for (side, b, n) in [
+        (SIDE_BID, &before.bids, &now.bids),
+        (SIDE_ASK, &before.asks, &now.asks),
+    ] {
+        let bm: BTreeMap<Price, Shares> = b.iter().copied().collect();
+        let nm: BTreeMap<Price, Shares> = n.iter().copied().collect();
+        let prices: BTreeSet<Price> = bm.keys().chain(nm.keys()).copied().collect();
+        for p in prices {
+            let (x, y) = (bm.get(&p), nm.get(&p));
+            if x != y {
+                out.push((side, p, y.copied()));
+            }
+        }
+    }
+    out
+}
+
 impl Reducer {
     pub fn new(cfg: ReduceCfg) -> Reducer {
         Reducer {
@@ -145,6 +177,9 @@ impl Reducer {
             universe_lost: None,
             hour_ms: 0,
             windows: Vec::new(),
+            owner: HashMap::new(),
+            needs_snap: BTreeSet::new(),
+            next_owner_ms: i64::MIN,
             stats: HourStats::default(),
             unfit: false,
         }
@@ -219,6 +254,9 @@ impl Reducer {
                 .then_with(|| a.episode_id.cmp(&b.episode_id))
         });
         self.windows = windows;
+        self.owner.clear();
+        self.needs_snap.clear();
+        self.next_owner_ms = i64::MIN; // every hour restarts its windows with snapshots (ruling R5)
         self.stats = HourStats::default();
         if !self.started {
             // cold start: nothing is known until the first line (and books until snapshots)
@@ -254,7 +292,9 @@ impl Reducer {
         } else {
             Vec::new()
         };
-        let ap = self.feed.apply(line, load, &|_| false);
+        self.owners_due(r, sink)?;
+        let owner = &self.owner;
+        let ap = self.feed.apply(line, load, &|t| owner.contains_key(t));
         for (t, m) in marks {
             if self.mark(&t).as_ref() != Some(&m) {
                 self.trusted.remove(&t);
@@ -284,6 +324,10 @@ impl Reducer {
                 self.changed.insert(t.clone());
                 self.tob(t, r, sink)?;
             }
+            // after tob, which may have found an unfit value and untrusted the token
+            if self.trusted.contains(t) {
+                self.l2(t, ap, r, sink)?;
+            }
         }
         Ok(())
     }
@@ -298,6 +342,7 @@ impl Reducer {
             }
             LineEvent::Universe(ch) => {
                 self.close_universe_gap(r, sink)?;
+                self.next_owner_ms = i64::MIN; // an event's tokens may have changed
                 for t in &ch.gone {
                     self.forget(t, r, sink)?;
                 }
@@ -406,6 +451,8 @@ impl Reducer {
         self.trusted.remove(t);
         self.changed.remove(t);
         self.last_conn.remove(t);
+        self.owner.remove(t);
+        self.needs_snap.remove(t);
         self.stop_waiting(t, r, sink)
     }
 
@@ -535,6 +582,146 @@ impl Reducer {
                 level: u16::try_from(level)?,
                 price,
                 size,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Recompute which episode owns each token when a window starts or ends: the first window
+    /// (by open, then id) covering the clock whose event lists the token. A token that gets a new
+    /// owner starts with a snapshot under it, from a trusted book only: an untrusted one waits
+    /// for its next feed snapshot.
+    fn owners_due(&mut self, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
+        if self.clock_ms < self.next_owner_ms {
+            return Ok(());
+        }
+        let now = self.clock_ms;
+        let mut owner: HashMap<String, usize> = HashMap::new();
+        let mut next = i64::MAX;
+        for (i, w) in self.windows.iter().enumerate() {
+            if w.start_ms > now {
+                next = next.min(w.start_ms);
+                continue;
+            }
+            if w.end_ms <= now {
+                continue;
+            }
+            next = next.min(w.end_ms);
+            for t in self.feed.event_tokens(&w.event_id) {
+                owner.entry(t).or_insert(i);
+            }
+        }
+        self.next_owner_ms = next;
+        let mut handover: Vec<(String, usize)> = owner
+            .iter()
+            .filter(|(t, w)| self.owner.get(*t) != Some(*w))
+            .map(|(t, w)| (t.clone(), *w))
+            .collect();
+        handover.sort();
+        self.needs_snap.retain(|t| owner.contains_key(t));
+        self.owner = owner;
+        for (t, w) in handover {
+            if self.trusted.contains(&t) {
+                self.l2_snapshot(&t, w, r, sink)?;
+            } else {
+                self.needs_snap.insert(t);
+            }
+        }
+        Ok(())
+    }
+
+    /// A trusted, touched token's l2 rows: a snapshot when it just got a full book or still waits
+    /// for one under its owner, else the levels this line changed.
+    fn l2(&mut self, t: &str, ap: &Applied, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
+        let Some(&w) = self.owner.get(t) else {
+            return Ok(());
+        };
+        if ap.snapshotted.iter().any(|x| x == t) || self.needs_snap.contains(t) {
+            return self.l2_snapshot(t, w, r, sink);
+        }
+        let Some(before) = ap.before_of(t) else {
+            return Ok(());
+        };
+        let Some(book) = self.feed.book(t) else {
+            return Ok(());
+        };
+        let ts = book.server_ts_ms();
+        let mut rows = Vec::new();
+        for (side, p, s) in diff(before, &Levels::of(book)) {
+            let size = s.map_or(Ok(0), |x| micros(x.get()));
+            match (micros(p.get()), size) {
+                (Ok(price), Ok(new_size)) => rows.push((side, price, new_size)),
+                _ => {
+                    self.mark_unfit(t, r);
+                    return Ok(());
+                }
+            }
+        }
+        self.emit_l2(t, w, (ts, r, false), rows, sink)
+    }
+
+    /// One `snapshot = true` row per level under window `w`; an empty book waits for its first
+    /// level.
+    fn l2_snapshot(
+        &mut self,
+        t: &str,
+        w: usize,
+        r: i64,
+        sink: &mut dyn Sink,
+    ) -> anyhow::Result<()> {
+        let Some(book) = self.feed.book(t) else {
+            return Ok(());
+        };
+        let (lv, ts) = (Levels::of(book), book.server_ts_ms());
+        if lv.bids.is_empty() && lv.asks.is_empty() {
+            self.needs_snap.insert(t.to_string());
+            return Ok(());
+        }
+        let mut rows = Vec::new();
+        for (side, levels) in [(SIDE_BID, lv.bids), (SIDE_ASK, lv.asks)] {
+            for (p, s) in levels {
+                match (micros(p.get()), micros(s.get())) {
+                    (Ok(price), Ok(size)) => rows.push((side, price, size)),
+                    _ => {
+                        // no row: the token waits for its next feed snapshot, which restarts it
+                        self.mark_unfit(t, r);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        self.needs_snap.remove(t);
+        self.emit_l2(t, w, (ts, r, true), rows, sink)
+    }
+
+    /// `rows` = (side, price, new_size) under window `w`, stamped (server ts, recv, snapshot).
+    fn emit_l2(
+        &mut self,
+        t: &str,
+        w: usize,
+        (ts_ms, recv_ms, snapshot): (i64, i64, bool),
+        rows: Vec<(u8, i64, i64)>,
+        sink: &mut dyn Sink,
+    ) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let token_idx = self.index(t)?;
+        let episode_id = self
+            .windows
+            .get(w)
+            .map(|x| x.episode_id.clone())
+            .context("l2 owner is not a window of this hour")?;
+        for (side, price, new_size) in rows {
+            sink.l2(L2Row {
+                ts_ms,
+                recv_ms,
+                token_idx,
+                side,
+                price,
+                new_size,
+                snapshot,
+                episode_id: episode_id.clone(),
             })?;
         }
         Ok(())

@@ -1108,7 +1108,13 @@ fn three_hours() -> (
 type HourOut = (VecSink, Vec<TokenRow>, compact::reduce::HourStats);
 
 fn run_hours(split: bool) -> Vec<HourOut> {
+    run_hours_with(split, &[])
+}
+
+/// `eps`: the episodes whose l2 windows each hour gets (as the service reads them).
+fn run_hours_with(split: bool, eps: &[store::CompactEpisode]) -> Vec<HourOut> {
     let (hours, recs) = three_hours();
+    let c = cfg(std::path::Path::new("/r"), std::path::Path::new("/a"));
     let mut red = Reducer::new(rcfg());
     let mut out = Vec::new();
     for (i, lines) in hours.iter().enumerate() {
@@ -1117,7 +1123,8 @@ fn run_hours(split: bool) -> Vec<HourOut> {
             red = Reducer::from_state(rcfg(), serde_json::from_str(&json).unwrap()).unwrap();
         }
         let mut s = VecSink::default();
-        red.begin_hour(T0 + i as i64 * H, vec![]);
+        let hour = T0 + i as i64 * H;
+        red.begin_hour(hour, compact::windows::windows_for_hour(eps, hour, &c));
         run(&mut red, lines, &recs, &mut s);
         let st = red.end_hour(&mut s).unwrap();
         out.push((s, red.tokens().to_vec(), st));
@@ -1154,5 +1161,61 @@ fn a_checkpoint_round_trip_at_every_hour_gives_the_same_rows_as_one_run() {
             .any(|g| g.shard == Some(1) && g.reason == reason::DOWN),
         "{:?}",
         whole[1].0.gaps
+    );
+}
+
+#[test]
+fn a_checkpoint_round_trip_keeps_l2_windows_that_span_hours() {
+    let ep = |id: &str, event: &str, opened: i64, closed: Option<i64>| store::CompactEpisode {
+        episode_id: id.into(),
+        event_id: event.into(),
+        opened_ms: opened,
+        closed_ms: closed,
+    };
+    let eps = [
+        // [T0 + 3 000 000, T0 + H + 600 000): y3 is trusted in hour 0, lost to the missing
+        // universe record, and never snapshotted again inside the window
+        ep("a", "e2", T0 + H - 300_000, Some(T0 + H + 300_000)),
+        // [T0 + H − 200 000, T0 + H + 1 600 000), still open (capped): y1, y2 wait in hour 0
+        // (down), restart with snapshots in hour 1
+        ep("c", "e1", T0 + H + 100_000, None),
+        // [T0 + 2H − 500 000, …): y3 has no book in hour 1 (no connection), a snapshot in hour 2
+        ep("b", "e2", T0 + 2 * H - 200_000, None),
+    ];
+    let whole = run_hours_with(false, &eps);
+    let split = run_hours_with(true, &eps);
+    assert_eq!(whole, split);
+    let l2: Vec<Vec<(i64, u32, bool, &str)>> = whole
+        .iter()
+        .map(|(s, _, _)| {
+            s.l2.iter()
+                .map(|x| {
+                    (
+                        x.recv_ms - T0,
+                        x.token_idx,
+                        x.snapshot,
+                        x.episode_id.as_str(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let (y1, y2, y3) = (0, 1, 2);
+    assert_eq!(
+        l2,
+        vec![
+            vec![
+                (3_000_000, y3, true, "a"),
+                (3_000_000, y3, true, "a"),
+                (3_000_000, y3, false, "a"),
+            ],
+            vec![
+                (H + 3_000, y1, true, "c"),
+                (H + 3_000, y1, true, "c"),
+                (H + 4_000, y2, true, "c"),
+                (H + 400_000, y1, false, "c"),
+            ],
+            vec![(2 * H + 2_000, y3, true, "b")],
+        ]
     );
 }
