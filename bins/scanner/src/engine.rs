@@ -781,11 +781,8 @@ impl Engine {
                     // Polymarket reports an EMPTY side as "0" (live smoke test 2026-09-25), not as a
                     // missing field; no real order rests at price 0, so 0 means "no level".
                     // Likewise an EMPTY ask side arrives as "1": no real order rests at 1 either.
-                    let (ts, bb, ba) = (
-                        *server_ts_ms,
-                        best_bid.filter(|x| x.get() != Decimal::ZERO),
-                        best_ask.filter(|x| x.get() != Decimal::ONE),
-                    );
+                    let (bb, ba) = tape::feed::server_top(*best_bid, *best_ask);
+                    let ts = *server_ts_ms;
                     let (side, price, size) = (*side, *price, *size);
                     // A pending entry from an EARLIER server ts is for a DIFFERENT logical update
                     // (messages of the SAME update all share one ts): it's now definitely

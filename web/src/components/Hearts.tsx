@@ -12,6 +12,11 @@ export function troubles(h: HealthNow): string[] {
   if (h.capture_paused) t.push('capture paused');
   // 250 mirrors CLOCK_SKEW_MS in bins/scanner/src/clock.rs.
   if (h.clock_offset_ms !== null && Math.abs(h.clock_offset_ms) > 250) t.push(`clock off by ${h.clock_offset_ms} ms`);
+  // spec 5b §5: one heart for the compactor: behind (3 mirrors lag_alarm_hours), silent for 2 h, or
+  // never reported although hours are being recorded
+  if (h.compact_lag_hours !== null && h.compact_lag_hours > 3) t.push('compactor behind: raw at risk');
+  else if (h.compact_age_ms !== null && h.compact_age_ms > 7_200_000) t.push('compactor status older than 2 h');
+  else if (h.compact_age_ms === null && h.compact_started_ms !== null && h.now_ms - h.compact_started_ms > 7_200_000) t.push('compactor has never reported');
   return t;
 }
 

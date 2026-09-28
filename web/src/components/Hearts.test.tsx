@@ -7,6 +7,8 @@ const ok: HealthNow = {
   now_ms: 0, age_ms: 30_000, run_id: 3, minute_ms: 0, tokens: 4000, shards: 40, parked_shards: 0, msgs: 258_000,
   drops: 0, drops_5m: 0, reconnects: 0, lag_p50_ms: 78, lag_p99_ms: 1900, rest_p50_ms: 80, rest_p99_ms: 300,
   clock_offset_ms: 3, ok: true, capture_paused: false, dropped_groups: 0,
+  archive_bytes: 12_400_000_000, archive_oldest_day: '2026-09-28', compact_lag_hours: 1, compact_last_error: null,
+  compact_age_ms: 600_000, compact_started_ms: -36_000_000,
 };
 
 describe('Hearts', () => {
@@ -34,5 +36,16 @@ describe('Hearts', () => {
     expect(troubles({ ...ok, clock_offset_ms: -2_000 })).toEqual(['clock off by -2000 ms']);
     expect(troubles({ ...ok, clock_offset_ms: 250 })).toEqual([]);
     expect(troubles({ ...ok, clock_offset_ms: null })).toEqual([]);
+  });
+
+  it('costs one heart when the compactor is behind or silent, never two', () => {
+    expect(troubles({ ...ok, compact_lag_hours: 4 })).toEqual(['compactor behind: raw at risk']);
+    expect(troubles({ ...ok, compact_age_ms: 7_200_001 })).toEqual(['compactor status older than 2 h']);
+    expect(troubles({ ...ok, compact_lag_hours: 9, compact_age_ms: 9_000_000 })).toEqual(['compactor behind: raw at risk']);
+    expect(troubles({ ...ok, compact_lag_hours: 3, compact_age_ms: 7_200_000 })).toEqual([]);
+    expect(troubles({ ...ok, compact_lag_hours: null, compact_age_ms: null, compact_started_ms: null })).toEqual([]);
+    // no status row 2 h after the first compact_hours row (ok.now_ms is 0)
+    expect(troubles({ ...ok, compact_age_ms: null, compact_started_ms: -7_200_001 })).toEqual(['compactor has never reported']);
+    expect(troubles({ ...ok, compact_age_ms: null, compact_started_ms: -7_200_000 })).toEqual([]);
   });
 });

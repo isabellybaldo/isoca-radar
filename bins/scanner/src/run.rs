@@ -608,7 +608,21 @@ async fn run_live(
             .await
             .context("writer gone")?;
     }
-    let capture_thread = capture::spawn(cfg.capture.clone(), capture_rx, metrics.clone());
+    // Spec 5b §4.3: raw hours wait for the compactor (compact_hours), except at the byte cap.
+    let guard_view = Arc::new(crate::retention::GuardView::default());
+    let (lost_tx, lost_rx) = mpsc::unbounded_channel::<i64>();
+    let mut guard_task = tokio::spawn(crate::retention::guard_task(
+        store.clone(),
+        guard_view.clone(),
+        lost_rx,
+    ));
+    let capture_thread = capture::spawn(
+        cfg.capture.clone(),
+        capture_rx,
+        metrics.clone(),
+        guard_view,
+        lost_tx,
+    );
     // Paper trader (S3c): restore the live accounts from paper_state, register this run's
     // accounts (pre-registration, spec §11) before any other paper row, start the resolver.
     // Replay never touches paper_state.
@@ -845,34 +859,49 @@ async fn run_live(
     // Unique across runs AND within a run (F3): run ids are unique, so a warm start that reuses
     // an earlier `taken_ms` in a new process can never overwrite a previous run's record.
     let mut universe_seq: u64 = u64::try_from(run_id).unwrap_or(0).saturating_mul(1_000_000);
+    // Spec 5b §4.5: a new record only when the content changed; an unchanged refresh still
+    // captures its control line, naming the last record capture acknowledged, so replay sees the
+    // same inputs (ruling R16).
+    let mut dedup = capture::UniverseDedup::default();
     let mut apply =
         |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| {
-            universe_seq += 1;
-            let file = capture::universe_file_name(u.taken_ms, universe_seq);
-            let rec = UniverseRecord {
-                universe: (*u).clone(),
-                conn_of: conn_of
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect::<ConnMap>(),
-                file: file.clone(),
+            let conn_map: ConnMap = conn_of.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let st = capture::CaptureState::of(&io.metrics);
+            // A record that never reached the capture channel must never be named: `deliver`
+            // would also refuse a line naming an unacknowledged seq, but skipping the line here
+            // keeps a dropped record from ever being written to a hour file at all.
+            let ctl = match dedup.plan(&u, &conn_map, st) {
+                capture::UniversePlan::Reuse { taken_ms, file } => {
+                    Some(Ctl::Universe { taken_ms, file })
+                }
+                capture::UniversePlan::Write { hash } => {
+                    universe_seq += 1;
+                    let file = capture::universe_file_name(u.taken_ms, universe_seq);
+                    let rec = UniverseRecord {
+                        universe: (*u).clone(),
+                        conn_of: conn_map,
+                        file: file.clone(),
+                    };
+                    if io
+                        .capture
+                        .try_send(CaptureMsg::Universe(Box::new(rec)))
+                        .is_err()
+                    {
+                        io.metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+                        None
+                    } else {
+                        dedup.written(hash, u.taken_ms, file.clone(), universe_seq, st.drops);
+                        Some(Ctl::Universe {
+                            taken_ms: u.taken_ms,
+                            file,
+                        })
+                    }
+                }
             };
-            if io
-                .capture
-                .try_send(CaptureMsg::Universe(Box::new(rec)))
-                .is_err()
-            {
-                io.metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
-            }
             let t = now_ms();
-            io.ctl(
-                0,
-                Ctl::Universe {
-                    taken_ms: u.taken_ms,
-                    file,
-                },
-                t,
-            );
+            if let Some(ctl) = ctl {
+                io.ctl(0, ctl, t);
+            }
             engine.apply_universe(u, conn_of, t)
         };
     let outs = apply(&mut engine, universe.clone(), &plan.conn_of(), &io);
@@ -1062,8 +1091,17 @@ async fn run_live(
     let _ = by_deadline(deadline, "writer exit", writer_task).await;
     if wait_thread(&capture_thread, deadline).await {
         let _ = capture_thread.join();
+        // The capture thread dropped its lost-mark sender: guard_task records the last marks
+        // (a housekeeping pass may have just deleted hours) and ends.
+        if by_deadline(deadline, "lost marks", &mut guard_task)
+            .await
+            .is_none()
+        {
+            guard_task.abort();
+        }
     } else {
         eprintln!("shutdown: capture thread still busy at the deadline; exiting without it");
+        guard_task.abort();
     }
     result
 }

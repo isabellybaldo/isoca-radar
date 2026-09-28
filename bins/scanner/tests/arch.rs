@@ -34,7 +34,7 @@ fn crate_graph_matches_spec_9_2() {
         "pm-api",
         "store",
     ];
-    for pure in ["arb-core", "sim", "cards"] {
+    for pure in ["arb-core", "sim", "cards", "tape"] {
         for bad in io {
             assert!(!d[pure].contains(bad), "{pure} must stay pure (no {bad})");
         }
@@ -71,6 +71,20 @@ fn crate_graph_matches_spec_9_2() {
             !d["analyze"].contains(bad),
             "analyze reads Postgres only via store and has no network client ({bad})"
         );
+    }
+    for bad in ["reqwest", "tokio-tungstenite", "sqlx", "pm-api"] {
+        assert!(
+            !d["compact"].contains(bad),
+            "compact reads Postgres only via store and has no network client ({bad})"
+        );
+    }
+    for (name, ds) in &d {
+        for c in ["parquet", "arrow"] {
+            assert!(
+                name == "compact" || !ds.contains(c),
+                "{c} is compact-only (owner approval 2026-09-27), but {name} depends on it"
+            );
+        }
     }
     assert!(
         !d["cards"].contains("store"),
@@ -136,5 +150,20 @@ fn scanner_and_api_guard_denylists_are_identical() {
     assert_eq!(
         scanner_prefixes, api_prefixes,
         "PREFIXES denylist drifted between scanner and api guard.rs"
+    );
+    let compact_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../compact/src/guard.rs"
+    ))
+    .expect("compact guard.rs");
+    assert_eq!(
+        scanner_contains,
+        denylist(&compact_src, "CONTAINS"),
+        "CONTAINS drifted in compact"
+    );
+    assert_eq!(
+        scanner_prefixes,
+        denylist(&compact_src, "PREFIXES"),
+        "PREFIXES drifted in compact"
     );
 }

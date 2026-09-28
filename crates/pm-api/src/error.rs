@@ -26,6 +26,15 @@ impl From<tokio_tungstenite::tungstenite::Error> for ApiError {
     }
 }
 
+impl From<tape::frame::FrameError> for ApiError {
+    fn from(e: tape::frame::FrameError) -> Self {
+        match e {
+            tape::frame::FrameError::Json(j) => ApiError::Json(j),
+            tape::frame::FrameError::Field { field, detail } => ApiError::Field { field, detail },
+        }
+    }
+}
+
 impl ApiError {
     pub fn field(field: &'static str, detail: impl Into<String>) -> Self {
         ApiError::Field {

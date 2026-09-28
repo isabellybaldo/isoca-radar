@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use scanner::capture::{
     CaptureMsg, Ctl, DiskGuard, Line, UniverseRecord, Writer, civil, expired_hours, hour_path,
-    over_budget_hours, stale_universe_files, universe_file_name, universe_path,
+    over_budget_hours, universe_file_name, universe_path,
 };
 use scanner::engine::{EngineCtx, Out};
 use scanner::paper::push_sim;
@@ -310,26 +310,6 @@ fn a_universe_record_counts_toward_the_budget_but_is_never_returned_by_it() {
         vec![hour],
         "the universe bytes push the total over budget, but only the hour file is evicted"
     );
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn stale_universe_files_are_deleted_once_older_than_every_remaining_hour_file() {
-    let dir = tmp("stale-universe");
-    let t = 1_790_121_600_000_i64;
-    // no hour files at all yet: nothing to compare against, nothing deleted
-    let old = universe_path(&dir, t, &universe_file_name(t, 1));
-    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-    std::fs::write(&old, vec![0u8; 10]).unwrap();
-    assert!(stale_universe_files(&dir).is_empty());
-
-    let hour = hour_path(&dir, t + 3_600_000); // one hour later
-    std::fs::create_dir_all(hour.parent().unwrap()).unwrap();
-    std::fs::write(&hour, vec![0u8; 10]).unwrap();
-    let fresh = universe_path(&dir, t + 3_600_000, &universe_file_name(t + 3_600_000, 2));
-    std::fs::write(&fresh, vec![0u8; 10]).unwrap();
-    // `old` predates the oldest (only) hour file; `fresh` does not
-    assert_eq!(stale_universe_files(&dir), vec![old]);
     std::fs::remove_dir_all(&dir).ok();
 }
 

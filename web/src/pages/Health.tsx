@@ -13,12 +13,14 @@ import { PageHead } from '../components/PageHead';
 import { SubHead } from '../components/SubHead';
 import { Tag } from '../components/Tag';
 import { Tiles } from '../components/Tiles';
+import { fmtGb } from '../lib/bytes';
 import { useTicker } from '../lib/hooks';
 import { formatDecimal, groupThousands } from '../lib/money';
 import { fmtDuration, fmtLocal, fmtUtcDateTime } from '../lib/time';
 
 export const NO_HEALTH_ROWS = 'No health rows in this window. The scanner may be asleep.';
 export const NO_INTEGRITY = 'No integrity events in this window. Either the books agree, or nobody checked.';
+export const NO_ARCHIVE = 'No archive status yet. The compactor has not reported.';
 const WINDOWS = [6, 24, 168];
 
 function CaptureStatus({ h }: { h: HealthNow }) {
@@ -43,6 +45,28 @@ function CaptureStatus({ h }: { h: HealthNow }) {
         </dl>
       </Fold>
     </>
+  );
+}
+
+function ArchiveStatus({ h }: { h: HealthNow }) {
+  if (h.archive_bytes === null || h.compact_age_ms === null) return <EmptyState text={NO_ARCHIVE} />;
+  const behind = h.compact_lag_hours !== null && h.compact_lag_hours > 3;
+  return (
+    <dl className="kv">
+      <dt>archive</dt>
+      <dd>{fmtGb(h.archive_bytes)}</dd>
+      <dt>oldest day</dt>
+      <dd>{h.archive_oldest_day ?? '—'}</dd>
+      <dt>compactor lag</dt>
+      <dd>
+        <span>{h.compact_lag_hours === null ? '—' : `${h.compact_lag_hours} h`}</span>
+        {behind ? <> <Tag tone="flag">BEHIND</Tag></> : null}
+      </dd>
+      <dt>last report</dt>
+      <dd>{`${fmtDuration(h.compact_age_ms)} ago`}</dd>
+      <dt>last error</dt>
+      <dd className="trunc" title={h.compact_last_error ?? undefined}>{h.compact_last_error ?? '—'}</dd>
+    </dl>
   );
 }
 
@@ -120,6 +144,11 @@ export function Health() {
       <Box title="CAPTURE" help="capture">
         <Loadable state={now} what="capture status">
           {(d) => (d.health === null ? <EmptyState text={NO_HEALTH_ROWS} /> : <CaptureStatus h={d.health} />)}
+        </Loadable>
+      </Box>
+      <Box title="ARCHIVE" help="archive">
+        <Loadable state={now} what="archive status">
+          {(d) => (d.health === null ? <EmptyState text={NO_HEALTH_ROWS} /> : <ArchiveStatus h={d.health} />)}
         </Loadable>
       </Box>
       <Loadable state={series} what="the health series">

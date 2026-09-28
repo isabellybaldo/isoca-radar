@@ -1,0 +1,11 @@
+# compact: raw capture hours → the Parquet archive (spec 2026-09-27-phase5b-tiered-storage-design.md §3, §7).
+# Integers only. None of these is a premise input. Its sha256 goes into every day's manifest.json.
+raw_dir = "/data/capture"       # the scanner's capture folder, mounted read-only
+archive_dir = "/archive"        # YYYY-MM-DD/{tokens,tob,depth,l2,gaps}.parquet + manifest.json, _state/
+depth_every_secs = 300          # D3: a depth snapshot every 5 min (must divide 3600)
+depth_levels = 10               # D3: top 10 levels per side, only tokens whose book changed
+l2_before_secs = 300            # D2: l2 from 5 min before a net-positive arbitrage episode opens
+l2_after_secs = 300             # … to 5 min after it closes
+l2_max_window_secs = 1800       # … capped at 30 min (flagged as truncated in the manifest)
+archive_budget_gb = 40          # §4.4: 40 GB archive + ~30 GB raw + ~0.6 GB database < 75 GB
+lag_alarm_hours = 3             # §5: the compactor logs (and the dashboard loses a heart) above this

@@ -20,9 +20,11 @@ anyhow.workspace = true
 zstd.workspace = true
 sha2.workspace = true
 fs4.workspace = true
+tape = { path = "../../crates/tape" }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
+compact = { path = "../compact" }
 
 [lints]
 workspace = true

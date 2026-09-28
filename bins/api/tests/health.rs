@@ -121,6 +121,63 @@ async fn an_unknown_route_is_a_json_404() {
 }
 
 #[tokio::test]
+async fn health_now_carries_the_archive_status_once_the_compactor_reports() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = common::run(&owner, "live").await;
+    let n = common::now();
+    let t = n - n % 60_000;
+    owner
+        .write_batch(&Batch {
+            health: vec![common::health(live, t, 0)],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+    let (app, _st) = common::app(&db).await;
+    let (_, v) = common::get(&app, "/api/health/now").await;
+    for k in [
+        "archive_bytes",
+        "archive_oldest_day",
+        "compact_lag_hours",
+        "compact_last_error",
+        "compact_age_ms",
+        "compact_started_ms",
+    ] {
+        assert!(
+            v["health"][k].is_null(),
+            "{k} before any compact_status: {v}"
+        );
+    }
+    owner
+        .mark_hours_lost(&[t - 7_200_000], n - 10_800_000)
+        .await
+        .unwrap();
+    owner
+        .compact_status_put(&CompactStatusRow {
+            updated_ms: n - 600_000,
+            archive_bytes: 12_345_678_901,
+            oldest_day: Some("2026-09-28".into()),
+            lag_hours: 4,
+            last_error: Some("read episodes: timeout".into()),
+        })
+        .await
+        .unwrap();
+    let (status, v) = common::get(&app, "/api/health/now").await;
+    assert_eq!(status, StatusCode::OK);
+    let h = &v["health"];
+    assert_eq!(h["archive_bytes"], 12_345_678_901_i64);
+    assert_eq!(h["archive_oldest_day"], "2026-09-28");
+    assert_eq!(h["compact_lag_hours"], 4);
+    assert_eq!(h["compact_last_error"], "read episodes: timeout");
+    let age = h["compact_age_ms"].as_i64().unwrap();
+    assert!((600_000..700_000).contains(&age), "{age}");
+    assert_eq!(h["compact_started_ms"], n - 10_800_000);
+    db.drop(owner).await;
+}
+
+#[tokio::test]
 async fn the_api_role_cannot_write_and_a_writer_role_is_refused() {
     let Some((owner, db)) = common::fresh().await else {
         return;

@@ -3,58 +3,23 @@
 //! rest_snapshot, suspect, resolved, shutdown), so replay reproduces the live engine exactly. Universe
 //! records live next to them, zstd-compressed, as universe-<taken_ms>-<seq>.json.zst (`<seq>` is
 //! a per-run counter so a warm start reusing `taken_ms` can never overwrite an earlier record).
-//! Capture never blocks the scanner: it pauses on low disk (hysteresis) and deletes hour files
-//! older than the retention window, and universe files older than the oldest remaining hour file.
+//! Capture never blocks the scanner: it pauses on low disk (hysteresis), deletes hour files past
+//! the retention window once compacted (retention.rs), always deletes the oldest at the byte cap,
+//! and deletes universe records no remaining hour can reference.
 use crate::config::CaptureCfg;
 use crate::metrics::Metrics;
 use crate::universe::{ConnMap, Universe};
-use arb_core::book::Book;
-use arb_core::money::{Price, Shares};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Line {
-    pub recv_ts_us: i64,
-    pub shard: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctl: Option<Ctl>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Ctl {
-    Down,
-    Universe {
-        taken_ms: i64,
-        /// The exact universe record file name (no directory), e.g. `universe-<taken_ms>-<seq>.json.zst`.
-        file: String,
-    },
-    RestSnapshot {
-        token: String,
-        server_ts_ms: i64,
-        bids: Vec<(String, String)>,
-        asks: Vec<(String, String)>,
-    },
-    Suspect {
-        event_id: String,
-        until_ms: i64,
-    },
-    /// A market resolution the live resolver found (S3c), with the recv instant the engine got.
-    /// Payouts are exact decimal strings, like `RestSnapshot` levels.
-    Resolved {
-        market_id: String,
-        payout_yes: String,
-        payout_no: String,
-    },
-    Shutdown,
-}
+pub use tape::files::{hour_path, universe_file_name, universe_path};
+use tape::files::{hour_start_ms, universe_taken_ms};
+pub use tape::line::{Ctl, Line, book_ctl, ctl_book};
+pub use tape::time::civil;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniverseRecord {
@@ -70,79 +35,144 @@ pub enum CaptureMsg {
     Universe(Box<UniverseRecord>),
 }
 
-/// UTC (year, month, day, hour) of a millisecond timestamp (Howard Hinnant's civil_from_days).
-pub fn civil(ms: i64) -> (i64, u32, u32, u32) {
-    let secs = ms.div_euclid(1000);
-    let days = secs.div_euclid(86_400);
-    let hour = u32::try_from(secs.rem_euclid(86_400) / 3600).unwrap_or(0);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
-    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d, hour)
+/// What to capture for a universe refresh (spec 5b §4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UniversePlan {
+    /// The content changed: write a new record (then call `UniverseDedup::written`).
+    Write { hash: String },
+    /// Same content as the last record written: capture only a control line naming it.
+    Reuse { taken_ms: i64, file: String },
 }
 
-fn day_dir(dir: &Path, ms: i64) -> PathBuf {
-    let (y, m, d, _) = civil(ms);
-    dir.join(format!("{y:04}-{m:02}-{d:02}"))
+/// sha256 of the content a replay uses: the groups, the canary pairs and the connection map.
+/// `taken_ms` is left out on purpose: it changes every refresh, the content often does not.
+pub fn universe_hash(u: &Universe, conn_of: &ConnMap) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(&(&u.groups, &u.canary, conn_of))?;
+    Ok(Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
-pub fn hour_path(dir: &Path, ms: i64) -> PathBuf {
-    let (_, _, _, h) = civil(ms);
-    day_dir(dir, ms).join(format!("{h:02}.jsonl.zst"))
+/// What the dedup needs to know about the capture thread (spec 5b §4.5, ruling R16).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureState {
+    /// Seq of the newest universe record the capture thread wrote to disk.
+    pub acked_seq: u64,
+    pub paused: bool,
+    /// Capture messages dropped so far.
+    pub drops: u64,
 }
 
-/// `<dir>/<day>/<file>`, where `file` is the exact name from `Ctl::Universe`/`UniverseRecord`
-/// (e.g. `universe-<taken_ms>-<seq>.json.zst`); the day is derived from `taken_ms` alone.
-pub fn universe_path(dir: &Path, taken_ms: i64, file: &str) -> PathBuf {
-    day_dir(dir, taken_ms).join(file)
-}
-
-pub fn universe_file_name(taken_ms: i64, seq: u64) -> String {
-    format!("universe-{taken_ms}-{seq}.json.zst")
-}
-
-/// Parse `<taken_ms>` out of a `universe-<taken_ms>-<seq>.json.zst` file name.
-fn universe_taken_ms(name: &str) -> Option<i64> {
-    let rest = name.strip_prefix("universe-")?.strip_suffix(".json.zst")?;
-    let (taken, _seq) = rest.rsplit_once('-')?;
-    taken.parse().ok()
-}
-
-pub fn book_ctl(token: &str, book: &Book) -> Ctl {
-    let lv = |v: Vec<(Price, Shares)>| -> Vec<(String, String)> {
-        v.into_iter()
-            .map(|(p, s)| (p.get().to_string(), s.get().to_string()))
-            .collect()
-    };
-    Ctl::RestSnapshot {
-        token: token.to_string(),
-        server_ts_ms: book.server_ts_ms(),
-        bids: lv(book.bids_best_first()),
-        asks: lv(book.asks_best_first()),
+impl CaptureState {
+    pub fn of(m: &Metrics) -> CaptureState {
+        CaptureState {
+            acked_seq: m.universe_acked_seq.load(Ordering::Acquire),
+            paused: m.capture_paused.load(Ordering::Relaxed),
+            drops: m.capture_drops.load(Ordering::Relaxed),
+        }
     }
 }
 
-pub fn ctl_book(
-    bids: &[(String, String)],
-    asks: &[(String, String)],
-    ts: i64,
-) -> anyhow::Result<Book> {
-    let parse = |v: &[(String, String)]| -> anyhow::Result<Vec<(Price, Shares)>> {
-        v.iter()
-            .map(|(p, s)| -> anyhow::Result<(Price, Shares)> {
-                Ok((Price::parse(p)?, Shares::parse(s)?))
-            })
-            .collect()
-    };
-    let mut b = Book::default();
-    b.apply_snapshot(&parse(bids)?, &parse(asks)?, ts);
-    Ok(b)
+#[derive(Debug, Clone)]
+struct LastRecord {
+    hash: String,
+    taken_ms: i64,
+    file: String,
+    seq: u64,
+    drops: u64,
+}
+
+/// The last universe record handed to the capture thread.
+#[derive(Debug, Clone, Default)]
+pub struct UniverseDedup {
+    last: Option<LastRecord>,
+}
+
+impl UniverseDedup {
+    /// Reuse the last record only when its content is the same AND capture really wrote it
+    /// (acknowledged), is not paused, and dropped nothing since; otherwise write a new record.
+    pub fn plan(&self, u: &Universe, conn_of: &ConnMap, st: CaptureState) -> UniversePlan {
+        match universe_hash(u, conn_of) {
+            Ok(h) => match &self.last {
+                Some(l)
+                    if l.hash == h
+                        && st.acked_seq >= l.seq
+                        && !st.paused
+                        && st.drops == l.drops =>
+                {
+                    UniversePlan::Reuse {
+                        taken_ms: l.taken_ms,
+                        file: l.file.clone(),
+                    }
+                }
+                _ => UniversePlan::Write { hash: h },
+            },
+            // Can't hash it: always write (an empty hash is never remembered).
+            Err(_) => UniversePlan::Write {
+                hash: String::new(),
+            },
+        }
+    }
+
+    /// Call once record `seq` was handed to the capture thread (`drops`: the drop count then).
+    pub fn written(&mut self, hash: String, taken_ms: i64, file: String, seq: u64, drops: u64) {
+        self.last = (!hash.is_empty()).then_some(LastRecord {
+            hash,
+            taken_ms,
+            file,
+            seq,
+            drops,
+        });
+    }
+}
+
+/// `<seq>` of a `universe-<taken_ms>-<seq>.json.zst` file name.
+fn universe_seq(name: &str) -> Option<u64> {
+    name.strip_prefix("universe-")?
+        .strip_suffix(".json.zst")?
+        .rsplit_once('-')?
+        .1
+        .parse()
+        .ok()
+}
+
+/// Write one capture message unless capture is paused. A universe record that reaches disk is
+/// acknowledged (`metrics.universe_acked_seq`), so the dedup never names a record that was
+/// dropped. Returns whether it was written.
+pub fn deliver(writer: &mut Writer, msg: &CaptureMsg, metrics: &Metrics) -> bool {
+    if metrics.capture_paused.load(Ordering::Relaxed) {
+        metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    // A control line naming a universe record whose seq is newer than the newest one capture has
+    // acknowledged names a record that was never (yet) written: within a run seqs only increase,
+    // so a reused record's seq is always <= acked_seq. This happens when the record was dropped
+    // (paused, or a write error) but its control line was queued right after and delivered once
+    // capture caught up. Drop the line too, or replay would abort on the missing record file.
+    if let CaptureMsg::Line(line) = msg
+        && let Some(Ctl::Universe { file, .. }) = &line.ctl
+        && let Some(seq) = universe_seq(file)
+        && seq > metrics.universe_acked_seq.load(Ordering::Acquire)
+    {
+        metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    match writer.write(msg) {
+        Ok(()) => {
+            if let CaptureMsg::Universe(rec) = msg
+                && let Some(seq) = universe_seq(&rec.file)
+            {
+                metrics.universe_acked_seq.fetch_max(seq, Ordering::Release);
+            }
+            true
+        }
+        Err(e) => {
+            metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+            eprintln!("capture: write failed: {e}");
+            false
+        }
+    }
 }
 
 /// zstd level for hour files and universe records. Ruling S3a-2 (2026-09-25): it stays 3. Phase 0
@@ -180,7 +210,14 @@ impl Writer {
                 }
                 let mut enc = zstd::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
                 enc.write_all(&serde_json::to_vec(rec.as_ref())?)?;
-                std::fs::write(&p, enc.finish()?)
+                let bytes = enc.finish()?;
+                std::fs::write(&p, bytes).inspect_err(|_| {
+                    // Never leave a partial (e.g. ENOSPC mid-write) universe record on disk: a
+                    // half-written file would be named by `Ctl::Universe` but fail to parse on
+                    // replay, aborting hours later. This record was never acknowledged, so the
+                    // dedup will write a fresh one on the next refresh.
+                    let _ = std::fs::remove_file(&p);
+                })
             }
             CaptureMsg::Line(line) => {
                 self.last_ms = self.last_ms.max(line.recv_ts_us.div_euclid(1000));
@@ -241,26 +278,6 @@ impl DiskGuard {
         }
         self.paused
     }
-}
-
-/// Parse "<dir>/YYYY-MM-DD/HH.jsonl.zst" back to the hour's start in ms.
-fn hour_start_ms(day: &str, file: &str) -> Option<i64> {
-    let hh: i64 = file.strip_suffix(".jsonl.zst")?.parse().ok()?;
-    let mut it = day.split('-');
-    let (y, m, d): (i64, i64, i64) = (
-        it.next()?.parse().ok()?,
-        it.next()?.parse().ok()?,
-        it.next()?.parse().ok()?,
-    );
-    // days_from_civil (inverse of civil)
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some((days * 86_400 + hh * 3600) * 1000)
 }
 
 pub fn expired_hours(dir: &Path, now_ms: i64, retention_hours: i64) -> Vec<PathBuf> {
@@ -328,35 +345,24 @@ pub fn over_budget_hours(dir: &Path, max_bytes: u64, keep: Option<&Path>) -> Vec
     out
 }
 
-/// Universe record files older than the oldest hour file still on disk. Once the retention/
-/// budget housekeeping has decided which hour files survive, any universe record whose
-/// `taken_ms` predates all of them documents a universe no replay can reach anymore.
-/// `None` (no hour files at all) deletes nothing: there is nothing yet to be "older than".
+/// Universe records no remaining hour can name (spec 5b §4.5). A control line names the record in
+/// force when it was captured: one written during or after the oldest remaining hour, or the newest
+/// one written before it (an unchanged refresh keeps naming that older record). So every record
+/// written (mtime) at or after the oldest hour's start is kept, plus the newest one before it; the
+/// rest are returned. A record whose write time can't be read is kept. No hour files: nothing.
 pub fn stale_universe_files(dir: &Path) -> Vec<PathBuf> {
-    let mut hour_starts: Vec<i64> = Vec::new();
-    let mut universes: Vec<(PathBuf, i64)> = Vec::new();
-    let Ok(days) = std::fs::read_dir(dir) else {
+    let l = tape::files::listing(dir);
+    let Some(oldest) = l.hours.iter().map(|h| h.start_ms).min() else {
         return Vec::new();
     };
-    for day in days.flatten() {
-        let day_name = day.file_name().to_string_lossy().to_string();
-        let Ok(entries) = std::fs::read_dir(day.path()) else {
-            continue;
-        };
-        for f in entries.flatten() {
-            let name = f.file_name().to_string_lossy().to_string();
-            if let Some(start) = hour_start_ms(&day_name, &name) {
-                hour_starts.push(start);
-            } else if let Some(taken_ms) = universe_taken_ms(&name) {
-                universes.push((f.path(), taken_ms));
-            }
-        }
-    }
-    let Some(oldest_hour) = hour_starts.into_iter().min() else {
-        return Vec::new();
-    };
-    universes.retain(|(_, taken_ms)| *taken_ms < oldest_hour);
-    let mut out: Vec<PathBuf> = universes.into_iter().map(|(p, _)| p).collect();
+    let mut before: Vec<(i64, PathBuf)> = l
+        .universes
+        .into_iter()
+        .filter_map(|u| u.mtime_ms.filter(|m| *m < oldest).map(|m| (m, u.path)))
+        .collect();
+    before.sort();
+    before.pop(); // the newest record written before the oldest hour is still in force
+    let mut out: Vec<PathBuf> = before.into_iter().map(|(_, p)| p).collect();
     out.sort();
     out
 }
@@ -381,48 +387,37 @@ pub fn spawn(
     cfg: CaptureCfg,
     mut rx: tokio::sync::mpsc::Receiver<CaptureMsg>,
     metrics: Arc<Metrics>,
+    guard: Arc<crate::retention::GuardView>,
+    lost: tokio::sync::mpsc::UnboundedSender<i64>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let dir = PathBuf::from(&cfg.dir);
         let mut writer = Writer::new(dir.clone());
-        let mut guard = DiskGuard::new(cfg.pause_below_gb, cfg.resume_above_gb);
+        let mut disk_guard = DiskGuard::new(cfg.pause_below_gb, cfg.resume_above_gb);
         let mut last_check: Option<i64> = None;
         while let Some(msg) = rx.blocking_recv() {
             let now = crate::now_ms();
             if housekeeping_due(last_check, now) {
                 last_check = Some(now);
                 if let Ok(free) = fs4::available_space(&dir) {
-                    let paused = guard.update(free);
+                    let paused = disk_guard.update(free);
                     if paused {
                         writer.finish();
                     }
                     metrics.capture_paused.store(paused, Ordering::Relaxed);
                 }
-                for p in expired_hours(&dir, now, cfg.retention_hours) {
-                    if std::fs::remove_file(p).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                let budget = cfg.max_capture_gb.saturating_mul(1_000_000_000);
-                for p in over_budget_hours(&dir, budget, writer.current_path()) {
-                    if std::fs::remove_file(p).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                for p in stale_universe_files(&dir) {
-                    if std::fs::remove_file(p).is_ok() {
-                        metrics.capture_deletes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+                let view = guard.get(now);
+                let n = crate::retention::housekeep(
+                    &dir,
+                    now,
+                    &cfg,
+                    &view,
+                    &lost,
+                    writer.current_path(),
+                );
+                metrics.capture_deletes.fetch_add(n, Ordering::Relaxed);
             }
-            if metrics.capture_paused.load(Ordering::Relaxed) {
-                metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if let Err(e) = writer.write(&msg) {
-                metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
-                eprintln!("capture: write failed: {e}");
-            }
+            deliver(&mut writer, &msg, &metrics);
         }
         writer.finish();
     })

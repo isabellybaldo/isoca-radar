@@ -21,6 +21,15 @@ export interface HealthNow {
   ok: boolean | null;
   capture_paused: boolean;
   dropped_groups: number;
+  /** Phase 5b archive (compact_status); null until the compactor first reports. */
+  archive_bytes: number | null;
+  archive_oldest_day: string | null;
+  compact_lag_hours: number | null;
+  compact_last_error: string | null;
+  /** now − the compactor's last report, server clock. */
+  compact_age_ms: number | null;
+  /** When the first hour was recorded in compact_hours (done or lost). */
+  compact_started_ms: number | null;
 }
 export interface HealthEnvelope {
   health: HealthNow | null;

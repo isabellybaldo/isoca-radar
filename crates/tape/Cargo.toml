@@ -1,0 +1,23 @@
+[package]
+name = "tape"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The raw capture format and the scanner's book rules, shared by scanner and compact (spec 5b §2).
+# Pure: files and parsing only, no network, no database, no async (bins/scanner/tests/arch.rs).
+[dependencies]
+arb-core = { path = "../arb-core" }
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+
+[lints]
+workspace = true

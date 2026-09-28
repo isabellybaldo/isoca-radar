@@ -13,6 +13,8 @@ async fn migrations_apply_from_empty_and_are_idempotent() {
         "card_cells",
         "card_meta",
         "card_results",
+        "compact_hours",
+        "compact_status",
         "episode_legs",
         "episodes",
         "events",
