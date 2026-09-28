@@ -997,3 +997,65 @@ async fn a_gap_hour_23_without_its_checkpoint_is_redone_before_the_day_merges() 
 async fn a_raw_hour_23_without_its_checkpoint_is_redone_before_the_day_merges() {
     hour_23_published_without_its_checkpoint(true).await;
 }
+
+/// The day merged, then checkpoint 23 turns out corrupt: the restart falls back to checkpoint 22
+/// and redoes gap hour 23 (no raw file, marked lost) inside the merged day. The merged day stays
+/// as it was, byte for byte, and verifies clean.
+#[tokio::test]
+async fn a_gap_hour_23_redone_on_a_merged_day_leaves_the_daily_files_alone() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch) = (tmp("h23m-raw"), tmp("h23m-arch"));
+    raw_from(&raw, 13, 25);
+    std::fs::remove_file(tape::files::hour_path(&raw, T0 + 23 * H)).unwrap();
+    owner
+        .mark_hours_lost(&[T0 + 23 * H], T0 + 24 * H)
+        .await
+        .unwrap();
+    let c = compact_store(&db).await;
+    let stop = AtomicBool::new(false);
+    let day = day_dir(&arch, T0);
+    let st = service(&raw, &arch).poll(&c, || T0 + 26 * H, &stop).await;
+    assert_eq!(st.last_error, None);
+    assert!(merged(&day));
+    let daily = |d: &Path| -> Vec<(String, Vec<u8>)> {
+        names_in(d)
+            .into_iter()
+            .filter(|n| n.split('.').count() == 2) // not HH.<table>.parquet, HH.hour.json
+            .map(|n| (n.clone(), std::fs::read(d.join(&n)).unwrap()))
+            .collect()
+    };
+    let before = daily(&day);
+    assert_eq!(before.len(), 6, "{:?}", names_in(&day));
+    let cps = compact::state::list(&arch);
+    assert_eq!(
+        cps.iter().map(|(h, _)| *h).collect::<Vec<_>>(),
+        vec![T0 + 22 * H, T0 + 23 * H]
+    );
+    std::fs::write(&cps[1].1, b"not zstd").unwrap();
+    let mut again = service(&raw, &arch);
+    let st = again.poll(&c, || T0 + 26 * H, &stop).await;
+    assert_eq!(st.last_error, None);
+    assert_eq!(again.next_hour(), Some(T0 + 24 * H), "hour 23 was redone");
+    assert!(
+        sidecar_path(&day, 23).exists(),
+        "the redo published hour 23 again (it lingers until a restart's recover)"
+    );
+    assert_eq!(daily(&day), before, "the daily files are untouched");
+    assert_eq!(
+        compact::verify::verify_day(&arch, "2026-09-23").unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        owner
+            .compact_hour_statuses(T0 + 23 * H, T0 + 24 * H)
+            .await
+            .unwrap(),
+        vec![(T0 + 23 * H, "lost".to_string())]
+    );
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}

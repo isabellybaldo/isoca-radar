@@ -158,7 +158,15 @@ fn verify_fails_on_an_l2_ts_that_goes_back() {
             .unwrap();
         rows[i].ts_ms = rows[0].ts_ms - 1;
     });
-    fails(&arch, "l2");
+    let rows = read_all::<L2Row>(&daily_path(&day_dir(&arch, T0), "l2")).unwrap();
+    fails(
+        &arch,
+        &format!(
+            "l2: token_idx {} ts_ms goes back at {}",
+            rows[0].token_idx,
+            rows[0].ts_ms - 1
+        ),
+    );
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
 }
@@ -170,6 +178,61 @@ fn verify_fails_on_a_tob_token_idx_outside_the_dictionary() {
         rows[0].token_idx = 9_999;
     });
     fails(&arch, "is not in tokens");
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[test]
+fn verify_checks_every_hours_l2_stream_starts_with_a_snapshot() {
+    // Every hour restarts its windows with snapshots (R5): an hour whose stream for a token
+    // starts with a change (here the day's last l2 row, moved to hour 1 in the manifest) fails.
+    let (raw, arch) = good_day("vl2hour");
+    let l2 = read_all::<L2Row>(&daily_path(&day_dir(&arch, T0), "l2")).unwrap();
+    let last = l2.last().unwrap();
+    assert!(!last.snapshot && last.new_size > 0, "{l2:?}");
+    assert_eq!(
+        verify_day(&arch, "2026-09-23").unwrap(),
+        Vec::<String>::new()
+    );
+    let mp = day_dir(&arch, T0).join(MANIFEST);
+    let mut m: Manifest = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();
+    m.hours[0].rows.l2 -= 1;
+    m.hours[1].rows.l2 += 1;
+    std::fs::write(&mp, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    fails(
+        &arch,
+        &format!(
+            "l2: episode {} token_idx {} does not start with a snapshot",
+            last.episode_id, last.token_idx
+        ),
+    );
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[test]
+fn verify_checks_the_l2_stream_restarts_with_a_snapshot_after_a_whole_feed_gap() {
+    let (raw, arch) = good_day("vl2gap");
+    let l2 = read_all::<L2Row>(&daily_path(&day_dir(&arch, T0), "l2")).unwrap();
+    let last = l2.last().unwrap().clone();
+    let prev = l2
+        .iter()
+        .rev()
+        .skip(1)
+        .find(|r| r.token_idx == last.token_idx)
+        .unwrap()
+        .recv_ms;
+    assert!(last.recv_ms - prev > 2, "{l2:?}");
+    // a whole-feed gap between the token's last two rows: the last one must be a snapshot
+    rewrite::<GapRow>(&arch, |rows| {
+        rows.push(GapRow {
+            start_ms: prev + 1,
+            end_ms: last.recv_ms - 1,
+            shard: None,
+            reason: reason::RAW_HOUR_LOST.into(),
+        })
+    });
+    fails(&arch, "does not start with a snapshot");
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
 }

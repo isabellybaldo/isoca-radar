@@ -137,18 +137,51 @@ pub fn verify_day(archive: &Path, day: &str) -> anyhow::Result<Vec<String>> {
         Ok(())
     })?;
 
-    // Per (episode_id, token_idx): the first row with size > 0 must be preceded by (or be) a
-    // snapshot row. A stream that restarts onto an empty book zeroes the levels shown earlier
-    // (snapshot = false, new_size = 0) before its next real snapshot, so leading size-0 rows are
-    // allowed (reduce.rs: `l2_restart`).
+    // Per (episode_id, token_idx) and stream segment: the first row with size > 0 must be
+    // preceded by (or be) a snapshot row. A stream that restarts onto an empty book zeroes the
+    // levels shown earlier (snapshot = false, new_size = 0) before its next real snapshot, so
+    // leading size-0 rows are allowed (reduce.rs: `l2_restart`). A new segment starts with each
+    // hour (every hour restarts its windows, ruling R5; the daily file is the hours' parts in
+    // order, so the manifest's per-hour counts say where each hour starts) and after each
+    // whole-feed gap (every book is untrusted in it). A restart after a shard's own break (a
+    // disconnect, an unfit value) can't be told from the rows, which carry no shard: not checked.
+    let mut hour_ends: Vec<u64> = m
+        .hours
+        .iter()
+        .scan(0u64, |n, h| {
+            *n += h.rows.l2;
+            Some(*n)
+        })
+        .collect();
+    hour_ends.reverse(); // popped from the back: the first hour's end first
+    let mut row_n = 0u64;
     let mut saw_snapshot: HashSet<(String, u32)> = HashSet::new();
+    let mut last_recv: HashMap<(String, u32), i64> = HashMap::new();
+    let gap_between = |a: i64, b: i64| {
+        let i = global.partition_point(|(s, _)| *s < a);
+        global[i..]
+            .iter()
+            .take_while(|(s, _)| *s <= b)
+            .any(|(_, e)| *e <= b)
+    };
     let mut l2_ts: HashMap<u32, i64> = HashMap::new();
     for_each_batch(&daily_path(&dir, L2Row::NAME), |b| {
         for r in L2Row::rows(b)? {
             if !known(r.token_idx) {
                 p.add(format!("l2: token_idx {} is not in tokens", r.token_idx));
             }
+            while hour_ends.last().is_some_and(|e| row_n >= *e) {
+                hour_ends.pop();
+                saw_snapshot.clear();
+            }
+            row_n += 1;
             let key = (r.episode_id.clone(), r.token_idx);
+            if last_recv
+                .insert(key.clone(), r.recv_ms)
+                .is_some_and(|prev| gap_between(prev, r.recv_ms))
+            {
+                saw_snapshot.remove(&key);
+            }
             if r.snapshot {
                 saw_snapshot.insert(key);
             } else if r.new_size > 0 && !saw_snapshot.contains(&key) {
@@ -159,8 +192,8 @@ pub fn verify_day(archive: &Path, day: &str) -> anyhow::Result<Vec<String>> {
             }
             if l2_ts.get(&r.token_idx).is_some_and(|t| r.ts_ms < *t) {
                 p.add(format!(
-                    "l2: token_idx {} ts_ms goes back at recv_ms {}",
-                    r.token_idx, r.recv_ms
+                    "l2: token_idx {} ts_ms goes back at {}",
+                    r.token_idx, r.ts_ms
                 ));
             }
             l2_ts.insert(r.token_idx, r.ts_ms);
