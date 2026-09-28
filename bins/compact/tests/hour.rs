@@ -168,6 +168,99 @@ fn a_truncated_hour_keeps_its_rows_and_gaps_the_rest() {
     std::fs::remove_dir_all(&arch).ok();
 }
 
+fn encoded(lines: &[tape::line::Line]) -> Vec<u8> {
+    let mut plain = Vec::new();
+    for l in lines {
+        plain.extend(serde_json::to_vec(l).unwrap());
+        plain.push(b'\n');
+    }
+    zstd::encode_all(plain.as_slice(), 3).unwrap()
+}
+
+#[test]
+fn a_frame_after_a_truncated_one_is_still_read() {
+    let (raw, arch) = (tmp("resync-raw"), tmp("resync-arch"));
+    let (r, h) = three_hours(&raw);
+    let p = tape::files::hour_path(&raw, T0);
+    // frame A (the fixture's hour), then frame B cut short by an unclean exit, a stray frame
+    // magic (a false positive: not a frame), then frame C from the restarted scanner
+    let mut bytes = std::fs::read(&p).unwrap();
+    let b = encoded(&[
+        uni(T0 + 500_000, &r),
+        frame(
+            T0 + 501_000,
+            0,
+            book("y1", T0 + 500_995, &[("0.30", "1")], &[]),
+        ),
+    ]);
+    bytes.extend_from_slice(&b[..b.len() - 6]);
+    bytes.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01]);
+    bytes.extend(encoded(&[
+        uni(T0 + 600_000, &r),
+        frame(
+            T0 + 601_000,
+            0,
+            book("y1", T0 + 600_995, &[("0.35", "4")], &[("0.38", "2")]),
+        ),
+        frame(
+            T0 + 601_100,
+            0,
+            book("y2", T0 + 601_095, &[("0.22", "3")], &[("0.27", "1")]),
+        ),
+    ]));
+    std::fs::write(&p, &bytes).unwrap();
+    let report = process_hour(&mut Reducer::new(rcfg()), &hour_job(&raw, &arch, 0))
+        .unwrap()
+        .unwrap();
+    assert!(report.read_error.is_some(), "{report:?}");
+    assert_eq!(report.status, "done");
+    assert_eq!(report.stats.lines, 7, "frames A and C are read: {report:?}");
+    assert_eq!(
+        report.source_bytes,
+        Some(u64::try_from(bytes.len()).unwrap())
+    );
+    assert_eq!(
+        report.source_sha256.as_deref(),
+        Some(compact::config::sha256_hex(&bytes).as_str())
+    );
+    let day = day_dir(&arch, T0);
+    let tob = read_all::<TobRow>(&part_path(&day, 0, "tob")).unwrap();
+    let last_a = h[0].last().unwrap().recv_ts_us / 1000;
+    assert!(tob.iter().any(|t| t.recv_ms == last_a), "A: {tob:?}");
+    let c: Vec<i64> = tob
+        .iter()
+        .filter(|t| t.recv_ms > last_a)
+        .map(|t| t.recv_ms)
+        .collect();
+    assert_eq!(c, vec![T0 + 601_000, T0 + 601_100], "C's books: {tob:?}");
+    assert!(
+        tob.iter()
+            .all(|t| t.bid != Some(m("0.30")) && t.recv_ms != T0 + 501_000),
+        "nothing from the broken frame: {tob:?}"
+    );
+    let gaps = read_all::<GapRow>(&part_path(&day, 0, "gaps")).unwrap();
+    assert!(
+        gaps.contains(&GapRow {
+            start_ms: last_a + 1,
+            end_ms: T0 + 600_000,
+            shard: None,
+            reason: reason::RAW_HOUR_LOST.into()
+        }),
+        "the unreadable stretch, up to C's first line: {gaps:?}"
+    );
+    assert!(
+        gaps.iter().all(|g| g.end_ms <= T0 + 601_100),
+        "books wait for C's snapshots, then nothing is open: {gaps:?}"
+    );
+    assert!(
+        gaps.iter()
+            .any(|g| g.start_ms == T0 + 600_000 && g.reason == reason::NO_BOOK_YET),
+        "books are untrusted across the break: {gaps:?}"
+    );
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
 #[test]
 fn reorder_sorts_within_the_window_and_counts_late_rows() {
     let mut r: Reorder<char> = Reorder::default();

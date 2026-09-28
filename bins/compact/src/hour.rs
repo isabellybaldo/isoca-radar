@@ -12,7 +12,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tape::line::Line;
 use tape::universe_view::load_record;
@@ -116,7 +116,9 @@ pub struct HourReport {
     pub truncated_windows: Vec<String>,
     pub stats: HourStats,
     pub late_rows: u64,
-    /// The first decode or read error of the raw file; the hour is `raw_hour_lost` from there.
+    /// The first decode or read error of the raw file. A decode error makes `raw_hour_lost` of
+    /// the stretch up to the next readable zstd frame (or the hour's end); an I/O error, of the
+    /// rest of the hour.
     pub read_error: Option<String>,
 }
 
@@ -245,22 +247,6 @@ impl Sink for PartSink {
     }
 }
 
-/// Hashes everything read through it (the raw file's sha256 in one pass).
-struct Hashing<R> {
-    inner: R,
-    h: Sha256,
-    n: u64,
-}
-
-impl<R: Read> Read for Hashing<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let k = self.inner.read(buf)?;
-        self.h.update(&buf[..k]);
-        self.n += u64::try_from(k).unwrap_or(0);
-        Ok(k)
-    }
-}
-
 struct SourceInfo {
     file: String,
     bytes: u64,
@@ -268,9 +254,9 @@ struct SourceInfo {
     read_error: Option<String>,
 }
 
-/// Feed the hour file to the reducer. A file that can't be decoded or read to the end keeps the
-/// lines before the break and turns the rest of the hour into `raw_hour_lost` (the reducer's
-/// `cut`); a line that is not a capture line (bad JSON or UTF-8) is only a bad line.
+/// Feed the hour file to the reducer. An undecodable stretch of the file becomes `raw_hour_lost`
+/// up to the next readable frame, an I/O error the rest of the hour (the reducer's `cut`); a line
+/// that is not a capture line (bad JSON or UTF-8) is only a bad line.
 fn read_hour(
     red: &mut Reducer,
     raw_dir: &Path,
@@ -291,57 +277,209 @@ fn read_hour(
     })
 }
 
+/// The raw file, read by offset: hashes each byte once, in file order, however often a resync
+/// re-reads it (sha256 in one pass), and keeps the first I/O error (as opposed to a decode error).
+struct Src<R> {
+    inner: R,
+    pos: u64,
+    hashed: u64,
+    h: Sha256,
+    io_error: Option<String>,
+}
+
+impl<R: Read + Seek> Src<R> {
+    fn seek_to(&mut self, at: u64) -> std::io::Result<()> {
+        if at != self.pos {
+            if let Err(e) = self.inner.seek(SeekFrom::Start(at)) {
+                self.io_error.get_or_insert(format!("read: {e}"));
+                return Err(e);
+            }
+            self.pos = at;
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for Src<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let k = match self.inner.read(buf) {
+            Ok(k) => k,
+            Err(e) => {
+                self.io_error.get_or_insert(format!("read: {e}"));
+                return Err(e);
+            }
+        };
+        let end = self.pos + u64::try_from(k).unwrap_or(0);
+        if end > self.hashed {
+            let fresh = usize::try_from(self.hashed.saturating_sub(self.pos)).unwrap_or(0);
+            self.h.update(&buf[fresh..k]);
+            self.hashed = end;
+        }
+        self.pos = end;
+        Ok(k)
+    }
+}
+
+/// A zstd frame starts with these bytes (0xFD2FB528, little-endian).
+const FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// The offset of the next frame magic at or after `from`, or None at the end of the file.
+fn next_frame<R: Read + Seek>(src: &mut Src<R>, from: u64) -> std::io::Result<Option<u64>> {
+    src.seek_to(from)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    // the last bytes of the previous chunk (a magic may straddle two reads), from offset `base`
+    let mut w: Vec<u8> = Vec::new();
+    let mut base = from;
+    loop {
+        let k = src.read(&mut buf)?;
+        if k == 0 {
+            return Ok(None);
+        }
+        w.extend_from_slice(&buf[..k]);
+        if let Some(i) = w.windows(4).position(|x| x == FRAME_MAGIC) {
+            return Ok(Some(base + u64::try_from(i).unwrap_or(0)));
+        }
+        let keep = w.len().min(FRAME_MAGIC.len() - 1);
+        let drop = w.len() - keep;
+        w.drain(..drop);
+        base += u64::try_from(drop).unwrap_or(0);
+    }
+}
+
+/// How one frame's decoding ended.
+enum FrameEnd {
+    /// The frame ended; the next one starts at this offset.
+    Done(u64),
+    /// Decoding (or reading) failed with this message.
+    Broken(String),
+}
+
 /// `read_hour` over any reader: (bytes read, their sha256, the first read error).
+///
+/// Frame by frame: a scanner restarting within the hour appends a new zstd frame, so a frame left
+/// unfinished by an unclean exit must not cost the frames after it. On a decode error the rest of
+/// the file is searched for the next frame magic and decoding resumes there (a false positive
+/// only fails to decode, and the search goes on); the unreadable stretch is a whole-feed
+/// `raw_hour_lost` gap from the last good line to the next one (the reducer's `cut`: every book
+/// waits for a new snapshot). An I/O error ends the hour there.
 fn feed(
     red: &mut Reducer,
     raw_dir: &Path,
-    input: impl Read,
+    input: impl Read + Seek,
     sink: &mut PartSink,
 ) -> anyhow::Result<(u64, String, Option<String>)> {
-    let mut hr = Hashing {
+    let mut src = Src {
         inner: input,
+        pos: 0,
+        hashed: 0,
         h: Sha256::new(),
-        n: 0,
+        io_error: None,
     };
-    let mut read_error = None;
-    {
-        let mut load = |taken: i64, file: &str| load_record(raw_dir, taken, file);
-        match zstd::Decoder::new(&mut hr) {
-            Err(e) => read_error = Some(format!("zstd: {e}")),
-            Ok(dec) => {
-                let mut rd = BufReader::new(dec);
-                let mut buf = Vec::new();
-                loop {
-                    buf.clear();
-                    match rd.read_until(b'\n', &mut buf) {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(e) => {
-                            read_error = Some(format!("read: {e}"));
-                            break;
-                        }
+    let mut read_error: Option<String> = None;
+    // the file ended in an error with no cut made for it yet
+    let mut open_break = false;
+    let mut load = |taken: i64, file: &str| load_record(raw_dir, taken, file);
+    let mut at = 0u64;
+    loop {
+        if src.seek_to(at).is_err() {
+            open_break = true;
+            break;
+        }
+        let end = {
+            let mut input = BufReader::with_capacity(128 * 1024, &mut src);
+            match input.fill_buf() {
+                Err(_) => {
+                    open_break = true;
+                    break;
+                }
+                Ok([]) => {
+                    if at == 0 {
+                        read_error.get_or_insert("zstd: empty file".to_string());
+                        open_break = true;
                     }
-                    if buf.iter().all(u8::is_ascii_whitespace) {
-                        continue;
+                    break;
+                }
+                Ok(_) => {}
+            }
+            let dec = match zstd::stream::read::Decoder::with_buffer(input) {
+                Ok(d) => d.single_frame(),
+                Err(e) => {
+                    read_error.get_or_insert(format!("zstd: {e}"));
+                    open_break = true;
+                    break;
+                }
+            };
+            let mut rd = BufReader::new(dec);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match rd.read_until(b'\n', &mut buf) {
+                    Ok(0) => {
+                        let input = rd.into_inner().finish();
+                        let unread = u64::try_from(input.buffer().len()).unwrap_or(0);
+                        break FrameEnd::Done(input.get_ref().pos - unread);
                     }
-                    match serde_json::from_slice::<Line>(&buf) {
-                        Ok(line) => red.line(&line, &mut load, sink)?,
-                        Err(_) => red.count_bad_line(),
+                    Ok(_) => {}
+                    Err(e) => break FrameEnd::Broken(format!("read: {e}")),
+                }
+                if buf.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                match serde_json::from_slice::<Line>(&buf) {
+                    Ok(line) => red.line(&line, &mut load, sink)?,
+                    Err(_) => red.count_bad_line(),
+                }
+            }
+        };
+        match end {
+            // a frame always has a header, so decoding one moves forward
+            FrameEnd::Done(next) if next > at => at = next,
+            FrameEnd::Done(_) => {
+                read_error.get_or_insert("zstd: a frame of no bytes".to_string());
+                open_break = true;
+                break;
+            }
+            FrameEnd::Broken(e) => {
+                if src.io_error.is_some() {
+                    open_break = true;
+                    break;
+                }
+                read_error.get_or_insert(e);
+                red.cut(reason::RAW_HOUR_LOST, sink)?;
+                match next_frame(&mut src, at + 1) {
+                    Ok(Some(x)) => at = x,
+                    Ok(None) => break,
+                    Err(_) => {
+                        open_break = true;
+                        break;
                     }
                 }
             }
         }
     }
-    // Hash the bytes past a break too: size and sha256 are of the whole file, or of the bytes
-    // read before an I/O error (then the read error, unless one came first). Never fails the hour.
-    if let Err(e) = std::io::copy(&mut hr, &mut std::io::sink()) {
-        read_error.get_or_insert(format!("read: {e}"));
+    if let Some(e) = &src.io_error {
+        read_error.get_or_insert(e.clone());
+    } else if src.seek_to(src.hashed).is_ok() {
+        // Hash any bytes not read yet (only after a failure to start a decoder): size and sha256
+        // are of the whole file, or of the bytes read before an I/O error. Never fails the hour.
+        if let Err(e) = std::io::copy(&mut src, &mut std::io::sink()) {
+            read_error.get_or_insert(format!("read: {e}"));
+        }
     }
-    if read_error.is_some() {
+    if let Some(e) = &src.io_error {
+        read_error.get_or_insert(e.clone());
+        open_break = true;
+    }
+    if open_break {
         red.cut(reason::RAW_HOUR_LOST, sink)?;
     }
-    let sha256 = hr.h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    Ok((hr.n, sha256, read_error))
+    let sha256 = src
+        .h
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok((src.hashed, sha256, read_error))
 }
 
 /// Compact one hour into the archive. `Ok(None)` only when `job.stop_before_publish`.
@@ -444,6 +582,12 @@ mod tests {
         fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
             self.0 += 1;
             Err(std::io::Error::other(format!("disk error {}", self.0)))
+        }
+    }
+
+    impl Seek for Failing {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
         }
     }
 
