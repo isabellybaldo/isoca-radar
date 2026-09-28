@@ -346,11 +346,23 @@ impl Merged {
     }
 }
 
-/// Merge every complete, unmerged day, oldest first; a failing day is skipped (see `Merged`).
-pub fn merge_ready(archive: &Path, cfg: &Config, cfg_sha: &str) -> Merged {
+/// A day may be merged only once its hour 23 is covered by a durable checkpoint (`through_ms`, the
+/// newest checkpoint's hour): until then an hour of it can still be redone (a crash between an
+/// hour's sidecar and its checkpoint), and a merged day must never get hourly parts again.
+/// `None` (no checkpoint loaded) merges nothing.
+pub fn may_merge(name: &str, through_ms: Option<i64>) -> bool {
+    match (parse_day(name), through_ms) {
+        (Some(day_ms), Some(t)) => t >= day_ms + 23 * HOUR_MS,
+        _ => false,
+    }
+}
+
+/// Merge every complete, unmerged day whose hour 23 is checkpointed (`may_merge`), oldest first;
+/// a failing day is skipped (see `Merged`).
+pub fn merge_ready(archive: &Path, cfg: &Config, cfg_sha: &str, through_ms: Option<i64>) -> Merged {
     let mut out = Merged::default();
     for (name, dir) in days(archive) {
-        if !merged(&dir) && complete(&dir) {
+        if !merged(&dir) && complete(&dir) && may_merge(&name, through_ms) {
             out.take(&name, merge_day(&dir, &name, cfg, cfg_sha).map(Some));
         }
     }
@@ -380,7 +392,8 @@ fn verified(day: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One day at startup: temporary files go; an unmerged complete day is merged; a merged day's
+/// One day at startup: temporary files go; an unmerged complete day is merged (only once
+/// `may_merge`); a merged day's
 /// leftovers go once its manifest verifies, or it is merged again when every sidecar is there,
 /// or it fails with everything kept.
 fn recover_day(
@@ -388,10 +401,11 @@ fn recover_day(
     name: &str,
     cfg: &Config,
     cfg_sha: &str,
+    through_ms: Option<i64>,
 ) -> anyhow::Result<Option<Manifest>> {
     remove_temps(dir)?;
     if !merged(dir) {
-        return if complete(dir) {
+        return if complete(dir) && may_merge(name, through_ms) {
             merge_day(dir, name, cfg, cfg_sha).map(Some)
         } else {
             Ok(None)
@@ -432,12 +446,13 @@ fn sweep_deleting(archive: &Path) -> anyhow::Result<()> {
 /// At startup: finish what an interrupted hour, merge or budget deletion left, then merge what is
 /// ready. Idempotent. Temporary files go everywhere (nothing is in progress at startup), and so do
 /// `.deleting-*` folders. An unmerged day's parts are never deleted; a merged day's leftover parts
-/// only after its manifest verifies. A failing day is skipped (see `Merged`).
-pub fn recover(archive: &Path, cfg: &Config, cfg_sha: &str) -> Merged {
+/// only after its manifest verifies. A failing day is skipped (see `Merged`). An unmerged day is
+/// merged only once `may_merge(through_ms)`; a day that already has a manifest is finished either way.
+pub fn recover(archive: &Path, cfg: &Config, cfg_sha: &str, through_ms: Option<i64>) -> Merged {
     let mut out = Merged::default();
     out.take(DELETING, sweep_deleting(archive).map(|()| None));
     for (name, dir) in days(archive) {
-        out.take(&name, recover_day(&dir, &name, cfg, cfg_sha));
+        out.take(&name, recover_day(&dir, &name, cfg, cfg_sha, through_ms));
     }
     out
 }

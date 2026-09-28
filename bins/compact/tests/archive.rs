@@ -4,6 +4,9 @@ use compact::archive::*;
 use compact::pq::{num_rows, read_all};
 use compact::rows::*;
 use fixture::*;
+
+/// A checkpoint past every test day: merging is allowed.
+const ALL: Option<i64> = Some(i64::MAX);
 use std::path::Path;
 
 /// The manifests of a pass that must not have failed on any day.
@@ -27,7 +30,7 @@ fn a_complete_day_merges_into_daily_files_with_a_manifest_and_drops_the_parts() 
     let (raw, arch) = (tmp("merge-raw"), tmp("merge-arch"));
     let reports = build_day(&raw, &arch, T0, &[5]);
     let c = cfg(&raw, &arch);
-    let ms = ok(merge_ready(&arch, &c, "cfgsha"));
+    let ms = ok(merge_ready(&arch, &c, "cfgsha", ALL));
     assert_eq!(ms.len(), 1);
     let m = &ms[0];
     let day = day_dir(&arch, T0);
@@ -83,8 +86,31 @@ fn a_day_missing_an_hour_is_not_merged() {
     let day = day_dir(&arch, T0);
     std::fs::remove_file(day.join("23.hour.json")).unwrap();
     assert!(!complete(&day));
-    assert!(ok(merge_ready(&arch, &cfg(&raw, &arch), "s")).is_empty());
+    assert!(ok(merge_ready(&arch, &cfg(&raw, &arch), "s", ALL)).is_empty());
     assert!(!merged(&day));
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[test]
+fn a_day_merges_only_once_its_hour_23_is_checkpointed() {
+    let (raw, arch) = (tmp("gate-raw"), tmp("gate-arch"));
+    build_day(&raw, &arch, T0, &[]);
+    let (c, day) = (cfg(&raw, &arch), day_dir(&arch, T0));
+    for through in [None, Some(T0 + 22 * H)] {
+        assert!(
+            ok(merge_ready(&arch, &c, "s", through)).is_empty(),
+            "{through:?}"
+        );
+        assert!(
+            ok(recover(&arch, &c, "s", through)).is_empty(),
+            "{through:?}"
+        );
+        assert!(!merged(&day));
+    }
+    assert!(!may_merge("2026-09-23", Some(T0 + 23 * H - 1)));
+    assert_eq!(ok(merge_ready(&arch, &c, "s", Some(T0 + 23 * H))).len(), 1);
+    assert!(merged(&day));
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
 }
@@ -99,13 +125,13 @@ fn a_merge_interrupted_at_any_point_is_finished_by_recover() {
         std::fs::copy(day.join(&n), copy.join(&n)).unwrap();
     }
     let c = cfg(&raw, &arch);
-    let first = ok(merge_ready(&arch, &c, "s")).remove(0);
+    let first = ok(merge_ready(&arch, &c, "s", ALL)).remove(0);
     // crash after the daily files were renamed, before the manifest: parts come back, no manifest
     std::fs::remove_file(day.join(MANIFEST)).unwrap();
     for n in names(&copy) {
         std::fs::copy(copy.join(&n), day.join(&n)).unwrap();
     }
-    let again = ok(recover(&arch, &c, "s"));
+    let again = ok(recover(&arch, &c, "s", ALL));
     assert_eq!(
         again,
         vec![first.clone()],
@@ -114,7 +140,7 @@ fn a_merge_interrupted_at_any_point_is_finished_by_recover() {
     // crash after the manifest, before the parts were deleted: recover only cleans up
     std::fs::copy(copy.join("07.tob.parquet"), day.join("07.tob.parquet")).unwrap();
     std::fs::write(day.join("tob.parquet.tmp"), b"half").unwrap();
-    assert!(ok(recover(&arch, &c, "s")).is_empty());
+    assert!(ok(recover(&arch, &c, "s", ALL)).is_empty());
     assert_eq!(
         names(&day),
         vec![
@@ -204,7 +230,7 @@ fn the_daily_files_are_the_hour_parts_concatenated_in_order_never_resorted() {
         tob_hours.len() >= 2,
         "tob rows come from several hours: {tob_hours:?}"
     );
-    let m = ok(merge_ready(&arch, &cfg(&raw, &arch), "s")).remove(0);
+    let m = ok(merge_ready(&arch, &cfg(&raw, &arch), "s", ALL)).remove(0);
     assert_eq!(read_all::<TobRow>(&daily_path(&day, "tob")).unwrap(), tob);
     assert_eq!(read_all::<L2Row>(&daily_path(&day, "l2")).unwrap(), l2);
     assert_eq!(
@@ -232,7 +258,7 @@ fn a_crash_while_staging_or_publishing_the_daily_files_is_merged_again() {
     std::fs::write(day.join("l2.parquet.tmp"), b"half").unwrap();
     std::fs::write(daily_path(&day, "tob"), b"stale").unwrap();
     std::fs::write(day.join("04.tob.parquet.tmp"), b"half").unwrap();
-    let ms = ok(recover(&arch, &c, "s"));
+    let ms = ok(recover(&arch, &c, "s", ALL));
     assert_eq!(ms.len(), 1);
     assert_eq!(
         names(&day),
@@ -251,7 +277,7 @@ fn a_crash_while_staging_or_publishing_the_daily_files_is_merged_again() {
     );
     // idempotent: a second recover finds nothing to do and changes nothing
     let before = day_files(&arch);
-    assert!(ok(recover(&arch, &c, "s")).is_empty());
+    assert!(ok(recover(&arch, &c, "s", ALL)).is_empty());
     assert_eq!(day_files(&arch), before);
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
@@ -269,7 +295,7 @@ fn recover_never_deletes_the_parts_of_an_unmerged_day() {
         .into_iter()
         .filter(|n| !n.ends_with(".tmp"))
         .collect();
-    assert!(ok(recover(&arch, &cfg(&raw, &arch), "s")).is_empty());
+    assert!(ok(recover(&arch, &cfg(&raw, &arch), "s", ALL)).is_empty());
     assert_eq!(names(&day), parts, "only the stale temp file goes");
     assert!(!merged(&day));
     std::fs::remove_dir_all(&raw).ok();
@@ -284,7 +310,7 @@ fn a_manifest_that_does_not_verify_never_lets_recover_delete_the_parts() {
     let c = cfg(&raw, &arch);
     // a manifest that doesn't parse beside a complete day: the day is merged again from its parts
     std::fs::write(day.join(MANIFEST), b"{").unwrap();
-    let ms = ok(recover(&arch, &c, "s"));
+    let ms = ok(recover(&arch, &c, "s", ALL));
     assert_eq!(ms.len(), 1, "merged again");
     assert_eq!(
         names(&day),
@@ -307,7 +333,7 @@ fn a_manifest_that_does_not_verify_never_lets_recover_delete_the_parts() {
     std::fs::write(day2.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
     std::fs::remove_file(sidecar_path(&day2, 3)).unwrap();
     let before = names(&day2);
-    let r = recover(&arch2, &cfg(&raw2, &arch2), "s");
+    let r = recover(&arch2, &cfg(&raw2, &arch2), "s", ALL);
     assert!(r.manifests.is_empty());
     assert_eq!(
         r.failed.len(),
@@ -373,7 +399,7 @@ fn a_cold_start_mid_day_fails_the_merge_and_keeps_every_hourly_part() {
     stopped_cold(&raw, &arch, &[22, 23]);
     let day = day_dir(&arch, T0);
     let before = names(&day);
-    let r = merge_ready(&arch, &cfg(&raw, &arch), "s");
+    let r = merge_ready(&arch, &cfg(&raw, &arch), "s", ALL);
     assert!(r.manifests.is_empty());
     assert_eq!(r.failed.len(), 1);
     assert_eq!(r.failed[0].0, "2026-09-23");
@@ -385,7 +411,7 @@ fn a_cold_start_mid_day_fails_the_merge_and_keeps_every_hourly_part() {
     assert_eq!(names(&day), before, "nothing published, nothing deleted");
     assert!(!merged(&day));
     // and recover reports the same, keeping everything
-    let r = recover(&arch, &cfg(&raw, &arch), "s");
+    let r = recover(&arch, &cfg(&raw, &arch), "s", ALL);
     assert_eq!(r.failed.len(), 1);
     assert_eq!(names(&day), before);
     std::fs::remove_dir_all(&raw).ok();
@@ -408,7 +434,7 @@ fn a_token_idx_outside_the_days_dictionary_fails_the_merge() {
         w.close().unwrap().publish().unwrap();
     }
     let before = names(&day);
-    let r = merge_ready(&arch, &cfg(&raw, &arch), "s");
+    let r = merge_ready(&arch, &cfg(&raw, &arch), "s", ALL);
     assert_eq!(r.failed.len(), 1);
     assert!(
         r.failed[0].1.contains("outside the day's dictionary"),
@@ -430,7 +456,7 @@ fn one_bad_day_is_reported_and_a_healthy_later_day_still_merges() {
     let before = names(&d1);
     for _ in 0..2 {
         // every restart: the bad day fails the same way, the good one is (or stays) merged
-        let r = recover(&arch, &cfg(&raw, &arch), "s");
+        let r = recover(&arch, &cfg(&raw, &arch), "s", ALL);
         assert_eq!(r.failed.len(), 1, "{:?}", r.failed);
         assert_eq!(r.failed[0].0, "2026-09-23");
         assert!(
@@ -454,7 +480,7 @@ fn a_manifest_that_does_not_verify_beside_a_day_that_lost_parts_is_reported_and_
     for n in names(&d1) {
         std::fs::copy(d1.join(&n), keep.join(&n)).unwrap();
     }
-    ok(merge_ready(&arch, &cfg(&raw, &arch), "s"));
+    ok(merge_ready(&arch, &cfg(&raw, &arch), "s", ALL));
     // crash part-way through deleting the parts (00.depth already gone, 00.hour.json still
     // there, so the day looks complete), and the manifest does not verify
     for n in names(&keep) {
@@ -464,7 +490,7 @@ fn a_manifest_that_does_not_verify_beside_a_day_that_lost_parts_is_reported_and_
     std::fs::write(d1.join(MANIFEST), b"{").unwrap();
     build_day(&raw, &arch, T0 + 24 * H, &[]);
     let before = names(&d1);
-    let r = recover(&arch, &cfg(&raw, &arch), "s");
+    let r = recover(&arch, &cfg(&raw, &arch), "s", ALL);
     assert_eq!(r.failed.len(), 1, "{:?}", r.failed);
     assert_eq!(r.failed[0].0, "2026-09-23");
     assert_eq!(names(&d1), before, "nothing deleted");
@@ -486,7 +512,7 @@ fn a_crash_after_the_budget_renamed_a_day_leaves_nothing_day_shaped() {
     std::fs::write(arch.join("2026-09-21").join(MANIFEST), b"{}").unwrap();
     assert_eq!(days(&arch).len(), 1);
     assert_eq!(oldest_day(&arch).as_deref(), Some("2026-09-21"));
-    ok(recover(&arch, &cfg(&raw, &arch), "s"));
+    ok(recover(&arch, &cfg(&raw, &arch), "s", ALL));
     assert_eq!(names(&arch), vec!["2026-09-21"]);
     // and the budget's own deletions go through the rename, leaving nothing behind
     let b = enforce_budget(&arch, 0).unwrap();

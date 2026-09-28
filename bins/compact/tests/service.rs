@@ -461,7 +461,8 @@ async fn unreadable_checkpoints_stop_compaction_but_not_the_merge_budget_or_stat
         tmp("corrupt-other"),
     );
     raw_hours(&raw, &[0, 1, 2, 3]);
-    // 2026-09-21 merged (the budget may delete it); 2026-09-22 complete but missing a part
+    // 2026-09-21 merged (the budget may delete it); 2026-09-22 complete but missing a part (not
+    // merged while no checkpoint is loaded; a_failed_merge_is_reported_in_last_error covers it)
     build_day(&other, &arch, T0 - 2 * DAY, &[]);
     merge_day(
         &day_dir(&arch, T0 - 2 * DAY),
@@ -501,8 +502,8 @@ async fn unreadable_checkpoints_stop_compaction_but_not_the_merge_budget_or_stat
             "{e}"
         );
         assert!(
-            e.contains("2026-09-22"),
-            "the failed merge is reported: {e}"
+            !e.contains("2026-09-22"),
+            "no checkpoint loaded: no day is merged, so none fails: {e}"
         );
         assert!(
             e.contains("over budget"),
@@ -882,4 +883,117 @@ async fn a_missed_hour_row_is_retried_before_the_next_hour_and_rewritten_at_load
     db.drop(owner).await;
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
+}
+
+// ---- fix round 2: merging waits for the checkpoint of hour 23 ----
+
+#[tokio::test]
+async fn a_failed_merge_is_reported_in_last_error() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch, other) = (tmp("mfail-raw"), tmp("mfail-arch"), tmp("mfail-other"));
+    raw_hours(&raw, &[0, 1, 2, 3]);
+    build_day(&other, &arch, T0 - DAY, &[]);
+    std::fs::remove_file(part_path(&day_dir(&arch, T0 - DAY), 5, "tob")).unwrap();
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    let st = svc.poll(&c, || T0 + 4 * H, &AtomicBool::new(false)).await;
+    let e = st.last_error.unwrap();
+    assert!(e.contains("day 2026-09-22 not merged"), "{e}");
+    assert_eq!(svc.next_hour(), Some(T0 + 2 * H), "the loop goes on");
+    c.close().await;
+    db.drop(owner).await;
+    for d in [raw, arch, other] {
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Hour 23 of day T0 is published (its sidecar) but its checkpoint write fails; a restart redoes
+/// it. The day must not merge before hour 23's checkpoint, and then must merge cleanly.
+async fn hour_23_published_without_its_checkpoint(with_file: bool) {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let tag = if with_file { "file" } else { "gap" };
+    let (raw, arch) = (
+        tmp(&format!("h23-{tag}-raw")),
+        tmp(&format!("h23-{tag}-arch")),
+    );
+    raw_from(&raw, 13, 25);
+    if !with_file {
+        std::fs::remove_file(tape::files::hour_path(&raw, T0 + 23 * H)).unwrap();
+        owner
+            .mark_hours_lost(&[T0 + 23 * H], T0 + 24 * H)
+            .await
+            .unwrap();
+    }
+    // hour 23's checkpoint can't be written (a directory holds its temporary name)
+    let blocker = arch
+        .join(compact::state::STATE_DIR)
+        .join(format!("checkpoint-{}.bin.zst.tmp", T0 + 23 * H));
+    std::fs::create_dir_all(&blocker).unwrap();
+    let c = compact_store(&db).await;
+    let stop = AtomicBool::new(false);
+    let day = day_dir(&arch, T0);
+    let mut svc = service(&raw, &arch);
+    let st = svc.poll(&c, || T0 + 26 * H, &stop).await;
+    assert!(st.last_error.is_some(), "hour 23's checkpoint failed");
+    assert!(sidecar_path(&day, 23).exists(), "hour 23 was published");
+    assert!(!merged(&day), "no merge before hour 23's checkpoint");
+    std::fs::remove_dir_all(&blocker).unwrap();
+    // a restart: hour 22's checkpoint, recover must not merge either, hour 23 is redone
+    let mut again = service(&raw, &arch);
+    let st = again.poll(&c, || T0 + 26 * H, &stop).await;
+    assert_eq!(st.last_error, None);
+    assert_eq!(again.next_hour(), Some(T0 + 24 * H));
+    assert!(merged(&day));
+    assert_eq!(
+        names_in(&day),
+        vec![
+            "depth.parquet",
+            "gaps.parquet",
+            "l2.parquet",
+            "manifest.json",
+            "tob.parquet",
+            "tokens.parquet"
+        ],
+        "no hourly part left in the merged day"
+    );
+    assert_eq!(
+        compact::verify::verify_day(&arch, "2026-09-23").unwrap(),
+        Vec::<String>::new()
+    );
+    let want = if with_file { "done" } else { "lost" };
+    assert_eq!(
+        owner
+            .compact_hour_statuses(T0 + 23 * H, T0 + 24 * H)
+            .await
+            .unwrap(),
+        vec![(T0 + 23 * H, want.to_string())]
+    );
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn a_gap_hour_23_without_its_checkpoint_is_redone_before_the_day_merges() {
+    hour_23_published_without_its_checkpoint(false).await;
+}
+
+#[tokio::test]
+async fn a_raw_hour_23_without_its_checkpoint_is_redone_before_the_day_merges() {
+    hour_23_published_without_its_checkpoint(true).await;
 }

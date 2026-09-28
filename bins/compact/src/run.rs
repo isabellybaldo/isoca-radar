@@ -114,6 +114,9 @@ pub struct Service {
     /// The day this process started cold (from its 00:00): reloading after an hour error may
     /// start it cold again, over the hours this process published itself.
     cold_day: Option<i64>,
+    /// The hour of the newest durable checkpoint (loaded or saved by this process): a day merges
+    /// only once its hour 23 is covered (`archive::may_merge`).
+    checkpoint_ms: Option<i64>,
     /// The first raw hour at a cold start: the hours before it were never seen by the service,
     /// so they are `lost` or `scanner_stopped` at once (no grace).
     first_file: Option<i64>,
@@ -137,6 +140,7 @@ impl Service {
             missing_since: None,
             cold_day: None,
             first_file: None,
+            checkpoint_ms: None,
         }
     }
 
@@ -156,7 +160,8 @@ impl Service {
             .with_context(|| format!("create {}", self.archive.display()))?;
         // Err when checkpoint files exist but none is readable: never a cold start over them.
         let cp = state::load_newest(&self.archive)?;
-        let rec = archive::recover(&self.archive, &self.cfg, &self.cfg_sha);
+        self.checkpoint_ms = cp.as_ref().map(|c| c.hour_ms);
+        let rec = archive::recover(&self.archive, &self.cfg, &self.cfg_sha, self.checkpoint_ms);
         for m in &rec.manifests {
             eprintln!(
                 "compact: merged {} (recovered), {} B",
@@ -294,6 +299,7 @@ impl Service {
                 reducer: red.state(),
             },
         )?;
+        self.checkpoint_ms = Some(next);
         self.red = Some(red);
         self.next_hour = Some(next + HOUR_MS);
         let row = row_of(&report, now_ms)?;
@@ -343,8 +349,9 @@ impl Service {
     /// failures and a budget stuck over its limit go to the status row's last_error.
     pub async fn maintain(&mut self) {
         let (arch, cfg, sha) = (self.archive.clone(), self.cfg.clone(), self.cfg_sha.clone());
+        let through = self.checkpoint_ms;
         let res = tokio::task::spawn_blocking(move || {
-            let merged = archive::merge_ready(&arch, &cfg, &sha);
+            let merged = archive::merge_ready(&arch, &cfg, &sha, through);
             let budget = archive::enforce_budget(&arch, cfg.budget_bytes());
             (merged, budget)
         })
@@ -481,30 +488,41 @@ pub fn confirm_gone(stat: std::io::Result<()>, path: &Path) -> anyhow::Result<()
     }
 }
 
-/// Refuse to redo an hour with no raw file when the archive already holds it from its raw file
-/// (a sidecar with a source file, or a merged day): e.g. resumed from an older checkpoint after
-/// the newest one was corrupt, with the raw hour deleted since. Redoing it would replace archived
-/// rows with a gap.
+/// Refuse to redo an hour with no raw file when the archive already holds it from its raw file:
+/// its sidecar, or on a merged day its manifest entry, records a source file (e.g. resumed from an
+/// older checkpoint after the newest one was corrupt, with the raw hour deleted since). Redoing it
+/// would replace archived rows with a gap. A gap hour may be redone: it is deterministic, and on a
+/// merged day the daily files stay the verified copy (recover deletes the stray hourly parts).
 fn keep_archived(archive_dir: &Path, hour_ms: i64) -> anyhow::Result<()> {
     let day = archive::day_dir(archive_dir, hour_ms);
     let side = archive::sidecar_path(&day, archive::hour_number(hour_ms));
-    let merged = archive::merged(&day);
-    let from_file = match std::fs::read(&side) {
+    // unparsable: assume it holds data (a visible error beats a silent overwrite)
+    let side_from_file = match std::fs::read(&side) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(e).with_context(|| format!("read {}", side.display())),
-        // unparsable: assume it holds data (a visible error beats a silent overwrite)
         Ok(b) => serde_json::from_slice::<HourReport>(&b).map_or(true, |r| r.source_file.is_some()),
     };
+    let mp = day.join(archive::MANIFEST);
+    let manifest_from_file = match std::fs::read(&mp) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("read {}", mp.display())),
+        Ok(b) => serde_json::from_slice::<archive::Manifest>(&b).map_or(true, |m| {
+            m.hours
+                .iter()
+                .find(|h| h.hour_ms == hour_ms)
+                .is_none_or(|h| h.source_file.is_some())
+        }),
+    };
     anyhow::ensure!(
-        !merged && !from_file,
+        !side_from_file && !manifest_from_file,
         "refusing to redo {}: it is already archived from its raw file ({}), but the raw file is \
          gone (resumed from an older checkpoint?); the archived hour is kept: restore the newest \
          checkpoint or the raw file",
         hour_label(hour_ms),
-        if merged {
-            day.display()
-        } else {
+        if side_from_file {
             side.display()
+        } else {
+            mp.display()
         }
     );
     Ok(())

@@ -5,12 +5,15 @@ use compact::pq::{PartWriter, Table, read_all};
 use compact::rows::*;
 use compact::verify::verify_day;
 use fixture::*;
+
+/// A checkpoint past every test day: merging is allowed.
+const ALL: Option<i64> = Some(i64::MAX);
 use std::path::{Path, PathBuf};
 
 fn good_day(name: &str) -> (PathBuf, PathBuf) {
     let (raw, arch) = (tmp(&format!("{name}-raw")), tmp(&format!("{name}-arch")));
     build_day(&raw, &arch, T0, &[3]);
-    let merged = merge_ready(&arch, &cfg(&raw, &arch), "s");
+    let merged = merge_ready(&arch, &cfg(&raw, &arch), "s", ALL);
     assert!(
         merged.failed.is_empty(),
         "merge failed: {:?}",
