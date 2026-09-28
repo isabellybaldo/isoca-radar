@@ -638,6 +638,14 @@ impl Reducer {
         if self.clock_ms < at {
             return Ok(());
         }
+        self.depth_snapshot(at, r, sink)?;
+        self.next_depth_ms = Some(after_clock);
+        Ok(())
+    }
+
+    /// The boundary `at`: every trusted token changed since its last snapshot (`r`: when a token
+    /// found unfit starts waiting).
+    fn depth_snapshot(&mut self, at: i64, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
         let toks: Vec<String> = self
             .changed
             .iter()
@@ -648,7 +656,6 @@ impl Reducer {
             self.depth_rows(&t, at, r, sink)?;
         }
         self.changed.clear();
-        self.next_depth_ms = Some(after_clock);
         Ok(())
     }
 
@@ -869,6 +876,33 @@ impl Reducer {
     /// Flush every open gap up to the hour's end (they stay open) and return the hour's counts.
     pub fn end_hour(&mut self, sink: &mut dyn Sink) -> anyhow::Result<HourStats> {
         let end = self.hour_ms + HOUR_MS;
+        // A boundary inside the hour that no line crossed (a quiet feed) fires now, so its rows
+        // stay in the hour (and the day) they are stamped in. No line came after it, so the books
+        // now are the books at it; the next hour starts from the first boundary at or past its
+        // start. A token found unfit waits from the boundary, counted as one bad line.
+        self.unfit = false;
+        let every = self.cfg.depth_every_ms;
+        let from = |t: i64| ((t - 1).div_euclid(every) + 1) * every; // first boundary >= t
+        while let Some(at) = self.next_depth_ms.filter(|at| *at < end) {
+            let before_day = at < self.dict_day_ms;
+            if self.day_open && !before_day {
+                // the day's first boundary snapshots every trusted token (as at a line)
+                self.changed.extend(self.trusted.iter().cloned());
+            }
+            self.depth_snapshot(at, at, sink)?;
+            // a boundary still pending from the previous day keeps its own tokens; the day's
+            // first boundary comes next
+            let next = if self.day_open && before_day {
+                self.dict_day_ms
+            } else {
+                end
+            };
+            self.next_depth_ms = Some(from(next));
+        }
+        if self.unfit {
+            self.stats.bad_lines += 1;
+            self.unfit = false;
+        }
         if let Some((why, since)) = self.global_gap.clone() {
             gap(self.hour_ms, since, end, None, &why, sink)?;
         }

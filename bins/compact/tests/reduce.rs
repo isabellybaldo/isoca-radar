@@ -126,6 +126,10 @@ fn the_golden_hour_produces_exactly_the_expected_rows() {
             depth(T0 + 300_000, 0, SIDE_BID, 0, "0.40", "100"),
             depth(T0 + 300_000, 0, SIDE_BID, 1, "0.39", "50"),
             depth(T0 + 300_000, 1, SIDE_BID, 0, "0.55", "10"),
+            // y1, retrusted at +402 s: the 10-minute boundary no line crossed fires at the
+            // hour's end
+            depth(T0 + 600_000, 0, SIDE_BID, 0, "0.41", "7"),
+            depth(T0 + 600_000, 0, SIDE_ASK, 0, "0.43", "9"),
         ]
     );
     assert_eq!(
@@ -1344,6 +1348,9 @@ fn a_new_utc_day_opens_with_a_row_and_a_depth_snapshot_for_every_trusted_token()
             depth(d + 300_000, 0, SIDE_BID, 0, "0.42", "1"),
             depth(d + 300_000, 0, SIDE_BID, 1, "0.41", "1"),
             depth(d + 300_000, 0, SIDE_ASK, 0, "0.45", "3"),
+            depth(d + 600_000, 0, SIDE_BID, 0, "0.43", "1"),
+            depth(d + 600_000, 0, SIDE_BID, 1, "0.42", "1"),
+            depth(d + 600_000, 0, SIDE_ASK, 0, "0.45", "3"),
         ]
     );
     assert_eq!(
@@ -1420,4 +1427,165 @@ fn a_checkpoint_from_before_day_opening_rows_does_not_repeat_a_top() {
         &mut s,
     );
     assert!(s.tob.is_empty(), "{:?}", s.tob);
+}
+
+/// Two hours ending at `h1`: y1 and y2 (shard 0) booked early in the first hour, y1 changed at
+/// `h1 − 10 min`, then `next` in the second hour (a quiet feed around the hour end).
+fn quiet_hour_end(h1: i64, next: Vec<tape::line::Line>) -> Vec<(i64, Vec<tape::line::Line>)> {
+    let (_, recs) = midnight_hours();
+    let h0 = h1 - H;
+    vec![
+        (
+            h0,
+            vec![
+                uni(h0 + 1_000, &recs[0]),
+                frame(
+                    h0 + 2_000,
+                    0,
+                    book("y1", h0 + 1_990, &[("0.40", "1")], &[("0.45", "3")]),
+                ),
+                frame(h0 + 3_000, 0, book("y2", h0 + 2_990, &[("0.20", "1")], &[])),
+                frame(
+                    h1 - 600_000,
+                    0,
+                    change("y1", h1 - 600_005, "BUY", "0.41", "1", "0.41", "0.45"),
+                ),
+            ],
+        ),
+        (h1, next),
+    ]
+}
+
+/// (ts_ms − `base`, token_idx) of each depth row, one per token and boundary.
+fn snaps(s: &VecSink, base: i64) -> Vec<(i64, u32)> {
+    let mut v: Vec<(i64, u32)> = s
+        .depth
+        .iter()
+        .map(|d| (d.ts_ms - base, d.token_idx))
+        .collect();
+    v.dedup();
+    v
+}
+
+#[test]
+fn a_boundary_before_a_quiet_midnight_stays_in_the_old_day() {
+    let d = T0 + 24 * H;
+    let hours = quiet_hour_end(
+        d,
+        vec![frame(
+            d + 600_000,
+            0,
+            change("y1", d + 599_995, "BUY", "0.42", "1", "0.42", "0.45"),
+        )],
+    );
+    let out = run_midnight(false, &hours);
+    assert_eq!(
+        snaps(&out[0].0, d),
+        vec![(-H + 300_000, 0), (-H + 300_000, 1), (-300_000, 0)],
+        "23:55 (y1's change at 23:50) is in hour 23, day D"
+    );
+    assert!(
+        out[0]
+            .0
+            .depth
+            .contains(&depth(d - 300_000, 0, SIDE_BID, 0, "0.41", "1"))
+    );
+    assert_eq!(
+        snaps(&out[1].0, d),
+        vec![(0, 0), (0, 1), (900_000, 0)],
+        "day D+1 opens with the full snapshot at its first boundary, before the 00:10 line"
+    );
+    assert!(
+        out[1]
+            .0
+            .depth
+            .contains(&depth(d, 0, SIDE_BID, 0, "0.41", "1"))
+    );
+    assert_eq!(run_midnight(true, &hours), out);
+}
+
+#[test]
+fn a_boundary_before_a_quiet_hour_end_stays_in_its_hour() {
+    let h11 = T0 + 11 * H;
+    let hours = quiet_hour_end(
+        h11,
+        vec![frame(
+            h11 + 180_000,
+            0,
+            change("y1", h11 + 179_995, "BUY", "0.42", "1", "0.42", "0.45"),
+        )],
+    );
+    let out = run_midnight(false, &hours);
+    assert_eq!(
+        snaps(&out[0].0, h11),
+        vec![(-H + 300_000, 0), (-H + 300_000, 1), (-300_000, 0)],
+        "10:55 is in hour 10"
+    );
+    assert_eq!(
+        snaps(&out[1].0, h11),
+        vec![(300_000, 0)],
+        "hour 11: nothing changed by 11:00, y1's 11:03 change at 11:05"
+    );
+    assert_eq!(run_midnight(true, &hours), out);
+}
+
+#[test]
+fn a_boundary_a_line_crossed_before_the_hour_end_is_not_fired_again() {
+    let h11 = T0 + 11 * H;
+    let mut hours = quiet_hour_end(
+        h11,
+        vec![frame(
+            h11 + 180_000,
+            0,
+            change("y1", h11 + 179_995, "BUY", "0.43", "1", "0.43", "0.45"),
+        )],
+    );
+    // a line at 10:57 crosses 10:55 and changes y1 again: 11:00 is the next hour's
+    hours[0].1.push(frame(
+        h11 - 180_000,
+        0,
+        change("y1", h11 - 180_005, "BUY", "0.42", "1", "0.42", "0.45"),
+    ));
+    let out = run_midnight(false, &hours);
+    assert_eq!(
+        snaps(&out[0].0, h11),
+        vec![(-H + 300_000, 0), (-H + 300_000, 1), (-300_000, 0)]
+    );
+    assert!(
+        out[0]
+            .0
+            .depth
+            .contains(&depth(h11 - 300_000, 0, SIDE_BID, 0, "0.41", "1"))
+    );
+    assert_eq!(
+        snaps(&out[1].0, h11),
+        vec![(0, 0), (300_000, 0)],
+        "11:00 (y1's 10:57 change) fires at the 11:03 line, once"
+    );
+    assert!(
+        out[1]
+            .0
+            .depth
+            .contains(&depth(h11, 0, SIDE_BID, 0, "0.42", "1"))
+    );
+    assert_eq!(run_midnight(true, &hours), out);
+}
+
+#[test]
+fn a_checkpoint_after_the_hour_end_carries_the_next_boundary() {
+    let h11 = T0 + 11 * H;
+    let hours = quiet_hour_end(h11, vec![]);
+    let (_, recs) = midnight_hours();
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(hours[0].0, vec![]);
+    run(&mut red, &hours[0].1, &recs, &mut s);
+    assert_eq!(red.state().next_depth_ms, Some(h11 - 300_000));
+    red.end_hour(&mut s).unwrap();
+    let st = red.state();
+    assert_eq!(st.next_depth_ms, Some(h11), "past the hour end");
+    assert!(st.changed.is_empty());
+    let json = serde_json::to_string(&st).unwrap();
+    let back = Reducer::from_state(rcfg(), serde_json::from_str(&json).unwrap()).unwrap();
+    assert_eq!(back.state(), st);
 }
