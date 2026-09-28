@@ -116,10 +116,11 @@ fn an_l2_window_starts_with_snapshot_rows_then_exact_changes() {
     assert_eq!(
         s.l2,
         vec![
-            l2(T0 + 49_995, t1, 0, SIDE_BID, "0.40", "10", true, "ep"),
-            l2(T0 + 49_995, t1, 0, SIDE_BID, "0.39", "1", true, "ep"),
-            l2(T0 + 49_995, t1, 0, SIDE_ASK, "0.45", "10", true, "ep"),
-            l2(T0 + 2_090, t1, 1, SIDE_BID, "0.20", "3", true, "ep"),
+            // snapshot rows: stamped max(book server ts, window start) (fix round 1, ruling 3)
+            l2(T0 + 100_000, t1, 0, SIDE_BID, "0.40", "10", true, "ep"),
+            l2(T0 + 100_000, t1, 0, SIDE_BID, "0.39", "1", true, "ep"),
+            l2(T0 + 100_000, t1, 0, SIDE_ASK, "0.45", "10", true, "ep"),
+            l2(T0 + 100_000, t1, 1, SIDE_BID, "0.20", "3", true, "ep"),
             l2(T0 + 100_495, t1, 0, SIDE_BID, "0.41", "2", false, "ep"),
             l2(T0 + 149_995, t2, 0, SIDE_BID, "0.38", "4", false, "ep"),
             l2(T0 + 149_995, t2, 0, SIDE_ASK, "0.45", "0", false, "ep"),
@@ -453,4 +454,199 @@ fn an_unfit_value_in_a_window_is_a_bad_line_and_the_token_restarts_with_its_next
         "{:?}",
         s.gaps
     );
+}
+
+/// y1 streams 0.40/10, 0.41/2 (bids) and 0.60/5 (ask) under "ep" from 100 500.
+fn streaming_lines() -> (tape::universe_view::RecordView, Vec<tape::line::Line>) {
+    let r = rec("u1", T0, &[("e1", &["y1"])], &[("e1", 0)]);
+    let lines = vec![
+        uni(T0 + 1_000, &r),
+        frame(
+            T0 + 2_000,
+            0,
+            book("y1", T0 + 1_990, &[("0.40", "10")], &[("0.60", "5")]),
+        ),
+        frame(
+            T0 + 100_500,
+            0,
+            change("y1", T0 + 100_495, "BUY", "0.41", "2", "0.41", "0.60"),
+        ),
+    ];
+    (r, lines)
+}
+
+fn streaming_rows() -> Vec<L2Row> {
+    let t = T0 + 100_500;
+    vec![
+        l2(T0 + 100_000, t, 0, SIDE_BID, "0.40", "10", true, "ep"),
+        l2(T0 + 100_000, t, 0, SIDE_ASK, "0.60", "5", true, "ep"),
+        l2(T0 + 100_495, t, 0, SIDE_BID, "0.41", "2", false, "ep"),
+    ]
+}
+
+#[test]
+fn probe_empty_snapshot_while_streaming() {
+    // A full book for a token already streaming is written as the exact difference from the
+    // levels last written, as deltas would be: an empty book zeroes every level.
+    let (r, mut lines) = streaming_lines();
+    lines.extend([
+        frame(T0 + 101_000, 0, book("y1", T0 + 100_995, &[], &[])),
+        frame(
+            T0 + 102_000,
+            0,
+            book("y1", T0 + 101_995, &[("0.30", "1")], &[]),
+        ),
+    ]);
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(T0, vec![win("ep", T0 + 100_000, T0 + 900_000)]);
+    run(&mut red, &lines, std::slice::from_ref(&r), &mut s);
+    red.end_hour(&mut s).unwrap();
+    let (a, b) = (T0 + 101_000, T0 + 102_000);
+    let mut want = streaming_rows();
+    want.extend([
+        l2(T0 + 100_995, a, 0, SIDE_BID, "0.40", "0", false, "ep"),
+        l2(T0 + 100_995, a, 0, SIDE_BID, "0.41", "0", false, "ep"),
+        l2(T0 + 100_995, a, 0, SIDE_ASK, "0.60", "0", false, "ep"),
+        l2(T0 + 101_995, b, 0, SIDE_BID, "0.30", "1", false, "ep"),
+    ]);
+    assert_eq!(s.l2, want);
+}
+
+#[test]
+fn probe_down_then_empty_snapshot() {
+    // A restart onto an empty book zeroes the levels written earlier this hour, then waits for
+    // the first non-empty state, which is a snapshot.
+    let (r, mut lines) = streaming_lines();
+    lines.extend([
+        down(T0 + 101_000, 0),
+        frame(T0 + 102_000, 0, book("y1", T0 + 101_995, &[], &[])),
+        frame(
+            T0 + 103_000,
+            0,
+            change("y1", T0 + 102_995, "BUY", "0.30", "1", "0.30", "1"),
+        ),
+    ]);
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(T0, vec![win("ep", T0 + 100_000, T0 + 900_000)]);
+    run(&mut red, &lines, std::slice::from_ref(&r), &mut s);
+    red.end_hour(&mut s).unwrap();
+    let (a, b) = (T0 + 102_000, T0 + 103_000);
+    let mut want = streaming_rows();
+    want.extend([
+        l2(T0 + 101_995, a, 0, SIDE_BID, "0.40", "0", false, "ep"),
+        l2(T0 + 101_995, a, 0, SIDE_BID, "0.41", "0", false, "ep"),
+        l2(T0 + 101_995, a, 0, SIDE_ASK, "0.60", "0", false, "ep"),
+        l2(T0 + 102_995, b, 0, SIDE_BID, "0.30", "1", true, "ep"),
+    ]);
+    assert_eq!(s.l2, want);
+}
+
+#[test]
+fn window_edges_are_exact() {
+    let (b, a, max) = (300_000, 300_000, 1_800_000);
+    // natural end exactly at the cap: not truncated; one past: truncated
+    let at_cap = window_of(&ep("x", T0 + 1_000_000, Some(T0 + 2_200_000)), b, a, max);
+    assert_eq!((at_cap.end_ms, at_cap.truncated), (T0 + 2_500_000, false));
+    let past = window_of(&ep("y", T0 + 1_000_000, Some(T0 + 2_200_001)), b, a, max);
+    assert_eq!((past.end_ms, past.truncated), (T0 + 2_500_000, true));
+    let c = cfg(Path::new("/r"), Path::new("/a"));
+    let h = T0 + H;
+    let eps = [
+        ep("ends_at_hour", h - 600_000, Some(h - 300_000)), // [h − 900 000, h): out
+        ep("ends_after", h - 600_000, Some(h - 299_999)),   // ends at h + 1: in
+        ep("starts_at_next", h + H + 300_000, None),        // starts at h + H: out
+        ep("starts_before_next", h + H + 299_999, None),    // starts at h + H − 1: in
+    ];
+    let ws = windows_for_hour(&eps, h, &c);
+    assert_eq!(
+        ws.iter().map(|w| w.episode_id.as_str()).collect::<Vec<_>>(),
+        vec!["ends_after", "starts_before_next"]
+    );
+}
+
+#[test]
+fn a_window_owns_lines_from_its_start_to_just_before_its_end() {
+    let r = rec("u1", T0, &[("e1", &["y1"])], &[("e1", 0)]);
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(T0, vec![win("ep", T0 + 100_000, T0 + 200_000)]);
+    run(
+        &mut red,
+        &[
+            uni(T0 + 1_000, &r),
+            frame(
+                T0 + 2_000,
+                0,
+                book("y1", T0 + 1_990, &[("0.40", "10")], &[]),
+            ),
+            frame(
+                T0 + 100_000,
+                0,
+                change("y1", T0 + 99_995, "BUY", "0.41", "1", "0.41", "1"),
+            ), // exactly at the start: in
+            frame(
+                T0 + 200_000,
+                0,
+                change("y1", T0 + 199_995, "BUY", "0.42", "1", "0.42", "1"),
+            ), // exactly at the end: out
+        ],
+        std::slice::from_ref(&r),
+        &mut s,
+    );
+    red.end_hour(&mut s).unwrap();
+    let t = T0 + 100_000;
+    assert_eq!(
+        s.l2,
+        vec![
+            l2(T0 + 100_000, t, 0, SIDE_BID, "0.40", "10", true, "ep"),
+            l2(T0 + 100_000, t, 0, SIDE_BID, "0.41", "1", false, "ep"),
+        ]
+    );
+}
+
+#[test]
+fn a_tokens_l2_ts_never_goes_back() {
+    let r = rec("u1", T0, &[("e1", &["y1"])], &[("e1", 0)]);
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(T0, vec![win("ep", T0 + 100_000, T0 + 900_000)]);
+    run(
+        &mut red,
+        &[
+            uni(T0 + 1_000, &r),
+            frame(
+                T0 + 2_000,
+                0,
+                book("y1", T0 + 1_990, &[("0.40", "10"), ("0.39", "1")], &[]),
+            ),
+            frame(
+                T0 + 100_500,
+                0,
+                change("y1", T0 + 100_495, "BUY", "0.38", "1", "0.40", "1"),
+            ),
+            // a full book with an older server ts (same top: no tob row): 0.38 is gone
+            frame(
+                T0 + 101_000,
+                0,
+                book("y1", T0 + 100_200, &[("0.40", "10"), ("0.39", "1")], &[]),
+            ),
+        ],
+        std::slice::from_ref(&r),
+        &mut s,
+    );
+    let st = red.end_hour(&mut s).unwrap();
+    let (a, b) = (T0 + 100_500, T0 + 101_000);
+    assert_eq!(
+        s.l2,
+        vec![
+            // the book's ts (1 990) is before the window: stamped at its start
+            l2(T0 + 100_000, a, 0, SIDE_BID, "0.40", "10", true, "ep"),
+            l2(T0 + 100_000, a, 0, SIDE_BID, "0.39", "1", true, "ep"),
+            l2(T0 + 100_495, a, 0, SIDE_BID, "0.38", "1", false, "ep"),
+            l2(T0 + 100_495, b, 0, SIDE_BID, "0.38", "0", false, "ep"), // raised from 100 200
+        ]
+    );
+    assert_eq!(st.ts_clamped, 1);
 }
