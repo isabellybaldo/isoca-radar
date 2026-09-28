@@ -10,7 +10,10 @@
 //!
 //! Reading l2 per token: the `snapshot = true` rows sharing one `recv_ms` replace the token's
 //! whole book; every other row sets one level (`new_size` 0 = the level is gone). A token's
-//! `ts_ms` never goes back.
+//! `ts_ms` never goes back. Rows apply in file order, which keeps each token's order from here:
+//! rows sharing one `recv_ms` can be zeros then a snapshot set (a restart that first clears the
+//! levels written before) or a snapshot set then a diff (a restart and its change on one line), so
+//! a reader never re-sorts one token's rows by `recv_ms` or `ts_ms`.
 use crate::rows::{
     DepthRow, GapRow, L2Row, SIDE_ASK, SIDE_BID, Sink, TobRow, TokenRow, micros, reason,
 };

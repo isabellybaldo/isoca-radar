@@ -650,3 +650,62 @@ fn a_tokens_l2_ts_never_goes_back() {
     );
     assert_eq!(st.ts_clamped, 1);
 }
+
+#[test]
+fn a_tokens_l2_ts_never_goes_back_across_a_checkpoint() {
+    let r = rec("u1", T0, &[("e1", &["y1"])], &[("e1", 0)]);
+    let w = || vec![win("ep", T0 + 50_000, T0 + H + 500_000)];
+    let mut red = Reducer::new(rcfg());
+    let mut s = VecSink::default();
+    red.begin_hour(T0, w());
+    run(
+        &mut red,
+        &[
+            uni(T0 + 1_000, &r),
+            frame(
+                T0 + 2_000,
+                0,
+                book("y1", T0 + 1_990, &[("0.40", "10"), ("0.39", "1")], &[]),
+            ),
+            frame(
+                T0 + 100_500,
+                0,
+                change("y1", T0 + 100_495, "BUY", "0.38", "1", "0.40", "1"),
+            ),
+            // hour 0 ends with the book's ts (100 200) behind the token's l2 ts (100 495)
+            frame(
+                T0 + 101_000,
+                0,
+                book("y1", T0 + 100_200, &[("0.40", "10"), ("0.39", "1")], &[]),
+            ),
+        ],
+        std::slice::from_ref(&r),
+        &mut s,
+    );
+    red.end_hour(&mut s).unwrap();
+    assert_eq!(s.l2.last().unwrap().ts_ms, T0 + 100_495);
+    // the checkpoint, through its serialized form, as the service saves and loads it
+    let st: compact::reduce::ReducerState =
+        serde_json::from_slice(&serde_json::to_vec(&red.state()).unwrap()).unwrap();
+    drop(red);
+    let mut red = Reducer::from_state(rcfg(), st).unwrap();
+    let mut s = VecSink::default();
+    red.begin_hour(T0 + H, w());
+    let t = T0 + H + 1_000;
+    run(
+        &mut red,
+        &[frame(t, 0, trade("y1", T0 + H + 995))],
+        std::slice::from_ref(&r),
+        &mut s,
+    );
+    let stats = red.end_hour(&mut s).unwrap();
+    assert_eq!(
+        s.l2,
+        vec![
+            // hour 1 restarts the stream (R5) from the book stamped 100 200: raised to 100 495
+            l2(T0 + 100_495, t, 0, SIDE_BID, "0.40", "10", true, "ep"),
+            l2(T0 + 100_495, t, 0, SIDE_BID, "0.39", "1", true, "ep"),
+        ]
+    );
+    assert_eq!(stats.ts_clamped, 2);
+}

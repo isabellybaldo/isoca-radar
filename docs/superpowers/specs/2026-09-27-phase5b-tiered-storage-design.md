@@ -102,7 +102,7 @@ A day can be verified, or rebuilt while its raw hours still exist.
 
 ### 4.1 Order and carried state
 - **Order:** hours are processed strictly in order, and the compactor keeps every token's `Book` in memory (about 4k tokens, estimated 50–100 MB, inside 256 MB).
-- **Checkpoints:** after each hour, all books, the token dictionary, the day's `token_idx` map, and the open `l2` windows are written to `archive/_state/checkpoint-<hour>.bin.zst`, via a temporary name and an atomic rename. Two checkpoints are kept.
+- **Checkpoints:** after each hour, all books, the token dictionary, the day's `token_idx` map, and each token's `l2` state (its latest `l2` `ts_ms`, so `ts_ms` never goes back across hours) are written to `archive/_state/checkpoint-<hour>.bin.zst`, via a temporary name and an atomic rename. Two checkpoints are kept. Open `l2` windows are not carried: each hour re-reads its windows from the episodes and restarts every window's streams with snapshot rows (ruling R5), which gives the same rows.
 - **Restart:** the compactor resumes from the newest checkpoint.
 - **Discontinuity:** a missing hour, a `Down` control line, or a stretch where the scanner was stopped (no hour file) marks the affected tokens' books **unknown**. `tob`, `depth` and `l2` rows for them resume only after the next full book snapshot in the feed, and the stretch is written to `gaps`. No row is ever invented from a stale book.
 
