@@ -214,7 +214,7 @@ if not: `database unreachable` = redo step 24, then `docker compose --profile co
 cd /home/isoca/projects/cute-trading && date +%s%3N > /root/5b_web_ms && docker inspect -f '{{.State.StartedAt}}' cute-trading-scanner-1 | tee /root/5b_scanner_started && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to_char(to_timestamp(minute_ms/1000) AT TIME ZONE 'UTC','HH24:MI'), shards, reconnects, parked_shards, msgs, lag_p50_ms FROM health ORDER BY minute_ms DESC LIMIT 3" && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web && docker compose -f compose.yml -f compose.web.yml --profile web ps api web --format '{{.Service}} {{.Status}}'
 ```
 → expected: the scanner's start time (step 25), three `HH:MI|<shards>|0|0|<msgs>|<lag>` rows, `Container cute-trading-api-1 …` and `Container cute-trading-web-1 …` lines only (no network, no other container), then `api Up …` and `web Up …`.
-if not: api/web not `Up`: `docker compose -f compose.yml -f compose.web.yml --profile web logs --tail 30 api web`.
+if not: reconnects already > 0 in the baseline rows: note them in Results and go on (step 29 then expects no more than that); api/web not `Up`: `docker compose -f compose.yml -f compose.web.yml --profile web logs --tail 30 api web`.
 
 29. After the restart: no websocket disconnect, and the scanner now waits for the compactor.
 ```bash
@@ -354,7 +354,7 @@ if not: nothing; wait and reconnect.
 
 41. Everything came back by itself (scanner via the unit, the rest via `unless-stopped`), and postgres was not recreated.
 ```bash
-cd /home/isoca/projects/cute-trading && systemctl status isoca-radar-scanner.service --no-pager | grep -E 'Active|status=' ; journalctl -b -u isoca-radar-scanner --no-pager | grep -c Recreate; docker compose -f compose.yml -f compose.web.yml --profile core --profile web ps --format '{{.Service}} {{.Status}}'
+cd /home/isoca/projects/cute-trading && systemctl status isoca-radar-scanner.service --no-pager | grep -E 'Active|status=' ; journalctl -b -u isoca-radar-scanner --no-pager | grep -c 'postgres-1.*Recreate'; docker compose -f compose.yml -f compose.web.yml --profile core --profile web ps --format '{{.Service}} {{.Status}}'
 ```
 → expected: `Active: active (exited)` and `status=0/SUCCESS`, `0`, then `postgres`, `scanner`, `analyze`, `compact`, `api`, `web`, `oauth2-proxy` all `Up <n> minutes`.
 if not: `journalctl -u isoca-radar-scanner --no-pager | tail -20` and stop here.
@@ -384,9 +384,9 @@ if not: `docker compose --profile core ps compact` must show it exited; run the 
 
 45. Full rollback: the `:pre5b` scanner, analyze, api and web images (0008 stays: additive, unused by the old code), and the boot unit removed if step 30 installed it (the old `migrate` refuses the applied 0008, so the unit could not start this scanner).
 ```bash
-cd /home/isoca/projects/cute-trading && docker compose --profile core stop compact scanner analyze && docker compose exec -T postgres psql -U ct_owner -d cute_trading -c "ALTER ROLE compact_rw NOLOGIN" && docker tag cute-trading/rust:dev cute-trading/rust:5b && docker tag cute-trading/web:dev cute-trading/web:5b && docker tag cute-trading/rust:pre5b cute-trading/rust:dev && docker tag cute-trading/web:pre5b cute-trading/web:dev && docker compose --profile core up -d --no-build --no-deps scanner analyze && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web && { [ ! -f /etc/systemd/system/isoca-radar-scanner.service ] || { systemctl disable --now isoca-radar-scanner.service && rm /etc/systemd/system/isoca-radar-scanner.service && systemctl daemon-reload && echo unit-removed; }; } && sleep 20 && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT version FROM runs WHERE service = 'scanner' ORDER BY run_id DESC LIMIT 1"
+cd /home/isoca/projects/cute-trading && docker compose --profile core stop compact scanner analyze && docker compose --profile core rm -sf compact && docker compose exec -T postgres psql -U ct_owner -d cute_trading -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'compact_rw') THEN ALTER ROLE compact_rw NOLOGIN; END IF; END \$\$" && docker tag cute-trading/rust:dev cute-trading/rust:5b && docker tag cute-trading/web:dev cute-trading/web:5b && docker tag cute-trading/rust:pre5b cute-trading/rust:dev && docker tag cute-trading/web:pre5b cute-trading/web:dev && docker compose --profile core up -d --no-build --no-deps scanner analyze && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web && { [ ! -f /etc/systemd/system/isoca-radar-scanner.service ] || { systemctl disable --now isoca-radar-scanner.service && rm /etc/systemd/system/isoca-radar-scanner.service && systemctl daemon-reload && echo unit-removed; }; } && sleep 20 && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT version FROM runs WHERE service = 'scanner' ORDER BY run_id DESC LIMIT 1"
 ```
-→ expected: `ALTER ROLE`, `unit-removed` (if step 30 ran), then the pre-5b version (sha). The scanner no longer starts at boot: after any reboot run `docker compose --profile core up -d --no-build --no-deps scanner` (without `--no-deps` the old `migrate` fails).
+→ expected: `Container cute-trading-compact-1  Removed` (the old image has no compact binary), `DO`, `unit-removed` (if step 30 ran), then the pre-5b version (sha). The scanner no longer starts at boot: after any reboot run `docker compose --profile core up -d --no-build --no-deps scanner` (without `--no-deps` the old `migrate` fails).
 if not: the database is unusable (should not happen, 0008 is additive): ask the owner before `pg_restore` of `/root/ct-pre-5b.dump`.
 
 ## Results
