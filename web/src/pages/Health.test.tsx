@@ -66,7 +66,7 @@ describe('Health', () => {
       '/api/integrity/summary': integrity,
     });
     const { container } = renderAt('/health');
-    expect(await screen.findByText('3 events in 258000 messages: 11.63 per million.')).toBeInTheDocument();
+    expect(await screen.findByText('3 events in 258,000 messages: 11.63 per million.')).toBeInTheDocument();
     expect(await screen.findByText('PAUSED')).toBeInTheDocument();
     expect(screen.getByText('top_mismatch')).toBeInTheDocument();
     await waitFor(() => expect(container.querySelectorAll('rect.marker')).toHaveLength(1));
@@ -101,7 +101,7 @@ describe('Health', () => {
       '/api/integrity/summary': unsorted,
     });
     const { container } = renderAt('/health');
-    await screen.findByText('3 events in 258000 messages: 11.63 per million.');
+    await screen.findByText('3 events in 258,000 messages: 11.63 per million.');
     const bars = [...container.querySelectorAll('.cb-bar')] as HTMLElement[];
     expect(bars[0].style.width).toBe('100%');
     expect(bars[1].style.width).toBe('50%');

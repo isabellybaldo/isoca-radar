@@ -35,6 +35,10 @@ describe('CardView', () => {
     expect(within(card).getByText(/n = 1240/)).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Help: What is side asymmetry?' })).toBeInTheDocument();
     expect(within(card).getByRole('img', { name: 'YES 1150, NO 38' })).toBeInTheDocument();
+    // the two bars say which side is which
+    const legend = within(card).getByRole('list', { name: 'bar legend' });
+    expect(within(legend).getByText('YES 1,150')).toBeInTheDocument();
+    expect(within(legend).getByText('NO 38')).toBeInTheDocument();
     const claim = card.querySelector('dl.claim') as HTMLElement;
     expect(within(claim).getByText('paper')).toBeInTheDocument();
     expect(within(claim).getByText('ours')).toBeInTheDocument();

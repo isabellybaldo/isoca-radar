@@ -1,18 +1,31 @@
 import type { CardBody, CardSeries } from '../api/types';
+import { groupThousands } from '../lib/money';
 import { fmtDuration } from '../lib/time';
 import { LatencyAxis } from './LatencyAxis';
 import { LineChart, type Series } from './LineChart';
 
 /** Two pixel bars (G1). Counts, not money. */
+const BAR_TONES = ['p0', 'p3']; // same colours as .bar.b0 / .bar.b1
+
 export function SideBars({ bars }: { bars: NonNullable<CardSeries['bars']> }) {
   const max = Math.max(1, ...bars.map((b) => b.value));
   const W = 100;
   return (
+    <>
     <svg className="bars" viewBox={`0 0 ${W} ${bars.length * 12}`} preserveAspectRatio="none" shapeRendering="crispEdges" role="img" aria-label={bars.map((b) => `${b.label} ${b.value}`).join(', ')}>
       {bars.map((b, i) => (
         <rect key={b.label} className={`bar b${i}`} x={0} y={i * 12 + 1} width={b.value <= 0 ? 0 : Math.max(1, Math.round((b.value / max) * W))} height={10} />
       ))}
     </svg>
+    <ul className="legend barlegend" aria-label="bar legend">
+      {bars.map((b, i) => (
+        <li key={b.label}>
+          <span className={`sw ${BAR_TONES[i % BAR_TONES.length]}`} aria-hidden="true" />
+          {`${b.label} ${groupThousands(String(b.value))}`}
+        </li>
+      ))}
+    </ul>
+    </>
   );
 }
 

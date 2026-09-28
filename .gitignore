@@ -223,3 +223,6 @@ web/dist/
 
 # brainstorming companion scratch
 .superpowers/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
