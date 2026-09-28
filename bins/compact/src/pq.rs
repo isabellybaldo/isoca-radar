@@ -62,12 +62,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// `fsync` a directory so a prior rename inside it is durable across a crash. A no-op on
 /// non-Unix platforms, which cannot open a directory as a syncable file handle.
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+pub fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

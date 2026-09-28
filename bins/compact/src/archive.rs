@@ -10,11 +10,18 @@
 //! deleted only when its manifest parses and matches the daily files. The merge concatenates the
 //! hours in order and each part's rows in file order: it never re-sorts (readers rely on each
 //! token's order inside a part: l2 snapshot sets before their diffs, tob ts non-decreasing).
+//!
+//! Every hour's token dictionary must be a prefix of hour 23's and every token_idx inside it, or the
+//! day is not merged. One failing day never stops the others (`Merged::failed`). The budget
+//! renames a day to `.deleting-<day>` before removing it, so a crash leaves nothing day-shaped.
 use crate::config::Config;
 use crate::hour::{HourReport, RowCounts};
-use crate::pq::{Staged, Table, for_each_batch, num_rows, props, tmp_of, write_atomic};
+use crate::pq::{
+    Staged, Table, for_each_batch, num_rows, props, read_all, sync_dir, tmp_of, write_atomic,
+};
 use crate::rows::{DepthRow, GapRow, L2Row, TobRow, TokenRow};
 use anyhow::Context;
+use arrow::array::UInt32Array;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use serde::{Deserialize, Serialize};
@@ -135,17 +142,32 @@ fn sync_file(p: &Path) -> anyhow::Result<()> {
 }
 
 /// One daily file under its temporary name, fsync'd: the 24 parts' batches in hour order, each
-/// part's rows in file order (never re-sorted).
-fn merge_table<R: Table>(day: &Path) -> anyhow::Result<Staged> {
+/// part's rows in file order (never re-sorted). Every `token_idx` must index the day's dictionary
+/// (`n_tokens` rows), or the day fails before anything is published.
+fn merge_table<R: Table>(day: &Path, n_tokens: u64) -> anyhow::Result<Staged> {
     let fin = daily_path(day, R::NAME);
     let tmp = tmp_of(&fin);
     let file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     let mut w = ArrowWriter::try_new(file, R::schema(), Some(props()?))?;
+    let tok_col = R::schema().index_of("token_idx").ok();
     let mut rows = 0u64;
     for hh in 0..24u32 {
         let part = part_path(day, hh, R::NAME);
         for_each_batch(&part, |b| {
             let b = RecordBatch::try_new(R::schema(), b.columns().to_vec())?;
+            if let Some(c) = tok_col {
+                let idx = b
+                    .column(c)
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .context("token_idx is not u32")?;
+                if let Some(bad) = idx.values().iter().find(|v| u64::from(**v) >= n_tokens) {
+                    anyhow::bail!(
+                        "token_idx {bad} is outside the day's dictionary (23.tokens.parquet has \
+                         {n_tokens} tokens)"
+                    );
+                }
+            }
             rows += u64::try_from(b.num_rows())?;
             w.write(&b)?;
             Ok(())
@@ -155,6 +177,26 @@ fn merge_table<R: Table>(day: &Path) -> anyhow::Result<Staged> {
     let _meta = w.close()?;
     sync_file(&tmp)?;
     Ok(Staged { tmp, fin, rows })
+}
+
+/// Every hour's dictionary must be a prefix of hour 23's (the day's dictionary, which only grows
+/// through the day). A reducer that started cold mid-day breaks this: its token_idx values mean
+/// other tokens than the earlier hours'. Returns hour 23's token count.
+fn check_dictionary(day: &Path) -> anyhow::Result<u64> {
+    let last = read_all::<TokenRow>(&part_path(day, 23, TokenRow::NAME))?;
+    for hh in 0..23u32 {
+        let p = part_path(day, hh, TokenRow::NAME);
+        let t = read_all::<TokenRow>(&p)?;
+        anyhow::ensure!(
+            t.len() <= last.len() && last.get(..t.len()) == Some(t.as_slice()),
+            "{} ({} tokens) is not a prefix of 23.tokens.parquet ({} tokens): the token \
+             dictionary changed during the day (a cold start mid-day?); keeping the hourly parts",
+            p.display(),
+            t.len(),
+            last.len()
+        );
+    }
+    Ok(u64::try_from(last.len())?)
 }
 
 /// The tokens file: the last hour's part holds the whole day's dictionary.
@@ -173,12 +215,13 @@ fn stage_tokens(day: &Path) -> anyhow::Result<Staged> {
 }
 
 fn stage_all(day: &Path) -> anyhow::Result<Vec<Staged>> {
+    let n = check_dictionary(day)?;
     Ok(vec![
         stage_tokens(day)?,
-        merge_table::<TobRow>(day)?,
-        merge_table::<DepthRow>(day)?,
-        merge_table::<L2Row>(day)?,
-        merge_table::<GapRow>(day)?,
+        merge_table::<TobRow>(day, n)?,
+        merge_table::<DepthRow>(day, n)?,
+        merge_table::<L2Row>(day, n)?,
+        merge_table::<GapRow>(day, n)?,
     ])
 }
 
@@ -202,8 +245,9 @@ fn read_sidecars(day: &Path, name: &str) -> anyhow::Result<Vec<HourReport>> {
     Ok(hours)
 }
 
-/// Merge a complete day (spec §4.4): daily files under temporary names, row counts checked
-/// against the sidecars, then published, the manifest written last, the hourly parts deleted.
+/// Merge a complete day (spec §4.4): the dictionary checked, daily files under temporary names,
+/// row counts checked against the sidecars, then published, the manifest written last, the hourly
+/// parts deleted. Any check failing publishes nothing and deletes nothing.
 pub fn merge_day(day: &Path, name: &str, cfg: &Config, cfg_sha: &str) -> anyhow::Result<Manifest> {
     let hours = read_sidecars(day, name)?;
     let sum = |f: fn(&RowCounts) -> u64| hours.iter().map(|h| f(&h.rows)).sum::<u64>();
@@ -279,15 +323,38 @@ pub fn merge_day(day: &Path, name: &str, cfg: &Config, cfg_sha: &str) -> anyhow:
     Ok(m)
 }
 
-/// Merge every complete, unmerged day.
-pub fn merge_ready(archive: &Path, cfg: &Config, cfg_sha: &str) -> anyhow::Result<Vec<Manifest>> {
-    let mut out = Vec::new();
-    for (name, dir) in days(archive) {
-        if !merged(&dir) && complete(&dir) {
-            out.push(merge_day(&dir, &name, cfg, cfg_sha)?);
+/// What a pass of `merge_ready` or `recover` did. One day failing never stops the others: each
+/// failure is logged, its files are kept, and it is listed in `failed` as (day, error) for the
+/// caller's `last_error`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Merged {
+    pub manifests: Vec<Manifest>,
+    pub failed: Vec<(String, String)>,
+}
+
+impl Merged {
+    fn take(&mut self, name: &str, r: anyhow::Result<Option<Manifest>>) {
+        match r {
+            Ok(Some(m)) => self.manifests.push(m),
+            Ok(None) => {}
+            Err(e) => {
+                let e = format!("{e:#}");
+                eprintln!("compact: day {name} failed, its files are kept: {e}");
+                self.failed.push((name.to_string(), e));
+            }
         }
     }
-    Ok(out)
+}
+
+/// Merge every complete, unmerged day, oldest first; a failing day is skipped (see `Merged`).
+pub fn merge_ready(archive: &Path, cfg: &Config, cfg_sha: &str) -> Merged {
+    let mut out = Merged::default();
+    for (name, dir) in days(archive) {
+        if !merged(&dir) && complete(&dir) {
+            out.take(&name, merge_day(&dir, &name, cfg, cfg_sha).map(Some));
+        }
+    }
+    out
 }
 
 /// A merged day's manifest parses and every daily file holds the rows it states.
@@ -313,32 +380,66 @@ fn verified(day: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// At startup: finish what an interrupted hour or merge left, then merge what is ready.
-/// Idempotent. Temporary files go everywhere (nothing is in progress at startup). A merged day's
-/// leftover hourly parts go only once its manifest verifies; if it doesn't and every sidecar is
-/// there, the day is merged again from its parts; otherwise everything stays and it is logged.
-/// An unmerged day's parts are never touched.
-pub fn recover(archive: &Path, cfg: &Config, cfg_sha: &str) -> anyhow::Result<Vec<Manifest>> {
-    let mut out = Vec::new();
-    for (name, dir) in days(archive) {
-        remove_temps(&dir)?;
-        if !merged(&dir) || !names(&dir)?.iter().any(|(n, _)| hourly(n)) {
-            continue;
+/// One day at startup: temporary files go; an unmerged complete day is merged; a merged day's
+/// leftovers go once its manifest verifies, or it is merged again when every sidecar is there,
+/// or it fails with everything kept.
+fn recover_day(
+    dir: &Path,
+    name: &str,
+    cfg: &Config,
+    cfg_sha: &str,
+) -> anyhow::Result<Option<Manifest>> {
+    remove_temps(dir)?;
+    if !merged(dir) {
+        return if complete(dir) {
+            merge_day(dir, name, cfg, cfg_sha).map(Some)
+        } else {
+            Ok(None)
+        };
+    }
+    if !names(dir)?.iter().any(|(n, _)| hourly(n)) {
+        return Ok(None);
+    }
+    match verified(dir) {
+        Ok(()) => remove_leftovers(dir).map(|()| None),
+        Err(e) if complete(dir) => {
+            eprintln!("compact: {name}: manifest does not verify ({e:#}); merging it again");
+            merge_day(dir, name, cfg, cfg_sha).map(Some)
         }
-        match verified(&dir) {
-            Ok(()) => remove_leftovers(&dir)?,
-            Err(e) if complete(&dir) => {
-                eprintln!("compact: {name}: manifest does not verify ({e:#}); merging it again");
-                out.push(merge_day(&dir, &name, cfg, cfg_sha)?);
-            }
-            Err(e) => eprintln!(
-                "compact: {name}: manifest does not verify ({e:#}) and some hours are missing; \
-                 leaving its files alone"
-            ),
+        Err(e) => Err(e.context(format!(
+            "{name}: the manifest does not verify and some hours are missing; files left alone"
+        ))),
+    }
+}
+
+/// `.deleting-<day>`: a day the budget was deleting when it crashed.
+const DELETING: &str = ".deleting-";
+
+/// Remove what a budget deletion left (renamed day folders, never a day folder itself).
+fn sweep_deleting(archive: &Path) -> anyhow::Result<()> {
+    let Ok(rd) = std::fs::read_dir(archive) else {
+        return Ok(());
+    };
+    for e in rd.flatten() {
+        if e.file_name().to_string_lossy().starts_with(DELETING) && e.path().is_dir() {
+            std::fs::remove_dir_all(e.path())
+                .with_context(|| format!("delete {}", e.path().display()))?;
         }
     }
-    out.extend(merge_ready(archive, cfg, cfg_sha)?);
-    Ok(out)
+    Ok(())
+}
+
+/// At startup: finish what an interrupted hour, merge or budget deletion left, then merge what is
+/// ready. Idempotent. Temporary files go everywhere (nothing is in progress at startup), and so do
+/// `.deleting-*` folders. An unmerged day's parts are never deleted; a merged day's leftover parts
+/// only after its manifest verifies. A failing day is skipped (see `Merged`).
+pub fn recover(archive: &Path, cfg: &Config, cfg_sha: &str) -> Merged {
+    let mut out = Merged::default();
+    out.take(DELETING, sweep_deleting(archive).map(|()| None));
+    for (name, dir) in days(archive) {
+        out.take(&name, recover_day(&dir, &name, cfg, cfg_sha));
+    }
+    out
 }
 
 fn dir_bytes(p: &Path) -> u64 {
@@ -363,26 +464,39 @@ pub fn oldest_day(archive: &Path) -> Option<String> {
     days(archive).into_iter().next().map(|(n, _)| n)
 }
 
-/// While over `budget`, delete the oldest merged day (spec §4.4). Returns (day, bytes) deleted.
-/// Never an unmerged day (today's included) and never `_state`: if only those remain over the
-/// budget, it is logged and nothing more is deleted.
-pub fn enforce_budget(archive: &Path, budget: u64) -> anyhow::Result<Vec<(String, u64)>> {
-    let mut gone = Vec::new();
+/// What `enforce_budget` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Budget {
+    /// (day, bytes) deleted, oldest first.
+    pub deleted: Vec<(String, u64)>,
+    /// `Some(archive bytes)` when the archive is still over the budget with no merged day left to
+    /// delete (only unmerged days and checkpoints). Not logged here: the caller decides (e.g. only
+    /// when it changes, or in `last_error`), so it doesn't repeat every hour.
+    pub stuck_at: Option<u64>,
+}
+
+/// While over `budget`, delete the oldest merged day (spec §4.4). Never an unmerged day (today's
+/// included) and never `_state`. A day is first renamed to `.deleting-<day>` (durably) so a crash
+/// part-way leaves no half-deleted day folder, only something `recover` sweeps.
+pub fn enforce_budget(archive: &Path, budget: u64) -> anyhow::Result<Budget> {
+    sweep_deleting(archive)?;
+    let mut out = Budget::default();
     loop {
         let total = archive_bytes(archive);
         if total <= budget {
             break;
         }
         let Some((name, dir)) = days(archive).into_iter().find(|(_, d)| merged(d)) else {
-            eprintln!(
-                "compact: archive is {total} B, over its {budget} B budget, but no merged day is \
-                 left to delete (unmerged days and checkpoints are kept)"
-            );
+            out.stuck_at = Some(total);
             break;
         };
         let bytes = dir_bytes(&dir);
-        std::fs::remove_dir_all(&dir).with_context(|| format!("delete {}", dir.display()))?;
-        gone.push((name, bytes));
+        let doomed = archive.join(format!("{DELETING}{name}"));
+        std::fs::rename(&dir, &doomed)
+            .with_context(|| format!("rename {} to {}", dir.display(), doomed.display()))?;
+        sync_dir(archive).with_context(|| format!("fsync {}", archive.display()))?;
+        std::fs::remove_dir_all(&doomed).with_context(|| format!("delete {}", doomed.display()))?;
+        out.deleted.push((name, bytes));
     }
-    Ok(gone)
+    Ok(out)
 }
