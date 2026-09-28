@@ -33,6 +33,10 @@ const APPLIED: &[(i64, &str)] = &[
         7,
         "6450cd23d19340bdfd635ab1a06ad8a2be4eb90883fc2b34753c209e5a669daadda415348e98c886edca897fed772c5e",
     ),
+    (
+        8,
+        "f5fae731026d660877d87a8dcacc84fa01f181b8e1e9848ac5a12641049894729cb54f5147a66032e938bd82bb6d17f9",
+    ),
 ];
 
 fn hex(bytes: &[u8]) -> String {
