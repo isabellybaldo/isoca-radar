@@ -611,7 +611,7 @@ async fn run_live(
     // Spec 5b §4.3: raw hours wait for the compactor (compact_hours), except at the byte cap.
     let guard_view = Arc::new(crate::retention::GuardView::default());
     let (lost_tx, lost_rx) = mpsc::unbounded_channel::<i64>();
-    let guard_task = tokio::spawn(crate::retention::guard_task(
+    let mut guard_task = tokio::spawn(crate::retention::guard_task(
         store.clone(),
         guard_view.clone(),
         lost_rx,
@@ -1082,7 +1082,6 @@ async fn run_live(
     };
     let _ = by_deadline(deadline, "writer flush", flush).await;
     health_task.abort();
-    guard_task.abort();
     rechecks_task.abort();
     resnapshots_task.abort();
     samplers_task.abort();
@@ -1092,8 +1091,17 @@ async fn run_live(
     let _ = by_deadline(deadline, "writer exit", writer_task).await;
     if wait_thread(&capture_thread, deadline).await {
         let _ = capture_thread.join();
+        // The capture thread dropped its lost-mark sender: guard_task records the last marks
+        // (a housekeeping pass may have just deleted hours) and ends.
+        if by_deadline(deadline, "lost marks", &mut guard_task)
+            .await
+            .is_none()
+        {
+            guard_task.abort();
+        }
     } else {
         eprintln!("shutdown: capture thread still busy at the deadline; exiting without it");
+        guard_task.abort();
     }
     result
 }

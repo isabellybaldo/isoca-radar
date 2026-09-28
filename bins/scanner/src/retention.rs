@@ -127,7 +127,12 @@ pub fn housekeep(
         if std::fs::remove_file(&d.path).is_ok() {
             n += 1;
             if d.uncompacted {
-                let _ = lost.send(d.hour_ms);
+                if let Err(e) = lost.send(d.hour_ms) {
+                    eprintln!(
+                        "capture: hour {} deleted, its lost mark not sent ({e}); the compactor labels it itself",
+                        tape::time::hour_label(d.hour_ms)
+                    );
+                }
                 if d.by_cap {
                     eprintln!(
                         "capture: hour {} deleted before compaction (disk cap)",
@@ -186,7 +191,8 @@ async fn flush_lost(store: &Store, pending: &mut BTreeSet<i64>) {
 /// Records lost hours the moment the capture thread reports them (so the compactor can't pass an
 /// hour before its mark, spec §4.3 / D5), and every 30 s retries failed marks and refreshes the
 /// view: set while the compactor is alive, cleared (today's rule) while it is silent. Ends when the
-/// capture thread drops its sender.
+/// capture thread drops its sender, after one last try at the marks still pending (the shutdown
+/// awaits it after joining the capture thread).
 pub async fn guard_task(store: Store, view: Arc<GuardView>, mut lost: UnboundedReceiver<i64>) {
     let mut every = tokio::time::interval(Duration::from_millis(REFRESH_MS));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -204,7 +210,16 @@ pub async fn guard_task(store: Store, view: Arc<GuardView>, mut lost: UnboundedR
                     flush_lost(&store, &mut pending).await;
                     continue;
                 }
-                None => return,
+                None => {
+                    flush_lost(&store, &mut pending).await;
+                    if !pending.is_empty() {
+                        eprintln!(
+                            "capture: {} lost mark(s) not recorded at shutdown (the database write failed); the compactor labels those hours itself",
+                            pending.len()
+                        );
+                    }
+                    return;
+                }
             },
         }
         flush_lost(&store, &mut pending).await;
