@@ -3,6 +3,7 @@
 //! books are trusted (untrusted from a disconnect, a restart, a missing or lost stretch, or a
 //! token's first appearance, until the feed sends it a full snapshot: no row is ever made from a
 //! stale book), the day's token dictionary, top-of-book changes, periodic depth, and the gaps.
+//! Every stretch in which a visible token is untrusted lies inside a gap row.
 use crate::rows::{DepthRow, GapRow, SIDE_ASK, SIDE_BID, Sink, TobRow, TokenRow, micros, reason};
 use crate::windows::Window;
 use anyhow::Context;
@@ -10,8 +11,8 @@ use arb_core::book::Top;
 use arb_core::money::{Price, Shares};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tape::feed::{Applied, FeedBooks, FeedState, LineEvent};
-use tape::line::Line;
+use tape::feed::{Applied, FeedBooks, FeedState, Levels, LineEvent, TokenMeta};
+use tape::line::{Ctl, Line};
 use tape::time::{HOUR_MS, day_of};
 use tape::universe_view::RecordView;
 
@@ -60,6 +61,12 @@ pub struct ReducerState {
     pub clock_ms: i64,
     pub shard_gaps: BTreeMap<usize, OpenGap>,
     pub global_gap: Option<(String, i64)>,
+    /// The last shard each visible token was on: a token whose group lost its connection waits
+    /// (and is covered by a `down` gap) there.
+    pub last_conn: BTreeMap<String, usize>,
+    /// Since when the universe is unknown (a record could not be read): a whole-feed
+    /// `raw_hour_lost` gap until the next record is applied.
+    pub universe_lost: Option<i64>,
 }
 
 pub struct Reducer {
@@ -76,11 +83,18 @@ pub struct Reducer {
     clock_ms: i64,
     shard_gaps: BTreeMap<usize, OpenGap>,
     global_gap: Option<(String, i64)>,
+    last_conn: BTreeMap<String, usize>,
+    universe_lost: Option<i64>,
     // per hour, never checkpointed
     hour_ms: i64,
     windows: Vec<Window>,
     stats: HourStats,
+    /// This line carried a value that does not fit the archive (counted once as a bad line).
+    unfit: bool,
 }
+
+/// What must stay equal across a universe line for a trusted book to stay trusted.
+type Mark = (Levels, i64, TokenMeta);
 
 fn top_micros(t: Top) -> anyhow::Result<TopMicros> {
     let pair = |x: Option<(Price, Shares)>| -> anyhow::Result<Option<(i64, i64)>> {
@@ -127,9 +141,12 @@ impl Reducer {
             clock_ms: i64::MIN,
             shard_gaps: BTreeMap::new(),
             global_gap: None,
+            last_conn: BTreeMap::new(),
+            universe_lost: None,
             hour_ms: 0,
             windows: Vec::new(),
             stats: HourStats::default(),
+            unfit: false,
         }
     }
 
@@ -151,6 +168,8 @@ impl Reducer {
         r.clock_ms = s.clock_ms;
         r.shard_gaps = s.shard_gaps;
         r.global_gap = s.global_gap;
+        r.last_conn = s.last_conn;
+        r.universe_lost = s.universe_lost;
         Ok(r)
     }
 
@@ -167,6 +186,8 @@ impl Reducer {
             clock_ms: self.clock_ms,
             shard_gaps: self.shard_gaps.clone(),
             global_gap: self.global_gap.clone(),
+            last_conn: self.last_conn.clone(),
+            universe_lost: self.universe_lost,
         }
     }
 
@@ -216,19 +237,47 @@ impl Reducer {
         let r = line.recv_ts_us.div_euclid(1000);
         self.stats.lines += 1;
         self.clock_ms = self.clock_ms.max(r);
+        self.unfit = false;
         if let Some((why, since)) = self.global_gap.take() {
             gap(self.hour_ms, since, r, None, &why, sink)?;
             self.wait_for_untrusted(r);
         }
-        self.depth_due(sink)?;
+        self.depth_due(r, sink)?;
+        // A universe line can hand a still-visible token a different (empty) book: a token live
+        // in two groups, or one moving between canary and a group leg. FeedBooks reports neither
+        // as a reset (it mirrors the engine), so compare every trusted book across the line.
+        let marks: Vec<(String, Mark)> = if matches!(line.ctl, Some(Ctl::Universe { .. })) {
+            self.trusted
+                .iter()
+                .filter_map(|t| self.mark(t).map(|m| (t.clone(), m)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let ap = self.feed.apply(line, load, &|_| false);
+        for (t, m) in marks {
+            if self.mark(&t).as_ref() != Some(&m) {
+                self.trusted.remove(&t);
+            }
+        }
         self.on_event(&ap, r, sink)?;
-        self.rows(&ap, r, sink)
+        self.rows(&ap, r, sink)?;
+        if self.unfit && ap.event != LineEvent::BadLine {
+            self.stats.bad_lines += 1;
+        }
+        Ok(())
+    }
+
+    fn mark(&self, t: &str) -> Option<Mark> {
+        let b = self.feed.book(t)?;
+        Some((Levels::of(b), b.server_ts_ms(), self.feed.meta(t)?.clone()))
     }
 
     fn rows(&mut self, ap: &Applied, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
-        for t in &ap.snapshotted {
-            self.retrust(t, r, sink)?;
+        if self.universe_lost.is_none() {
+            for t in &ap.snapshotted {
+                self.retrust(t, r, sink)?;
+            }
         }
         for t in &ap.touched {
             if self.trusted.contains(t) {
@@ -248,25 +297,38 @@ impl Reducer {
                 }
             }
             LineEvent::Universe(ch) => {
+                self.close_universe_gap(r, sink)?;
                 for t in &ch.gone {
                     self.forget(t, r, sink)?;
                 }
                 for t in ch.appeared.iter().chain(ch.reset.iter()) {
                     self.trusted.remove(t);
                 }
+                // before the shards are updated: a token that lost its connection waits on its
+                // last one
                 self.wait_for_untrusted(r);
+                for t in self.feed.visible_tokens() {
+                    if let Some(c) = self.feed.conn(&t) {
+                        self.last_conn.insert(t, c);
+                    }
+                }
             }
             LineEvent::UniverseMissing(_) => {
+                // the universe is unknown until the next record: the whole feed is lost
                 self.stats.universe_missing += 1;
-                self.trusted.clear();
-                self.wait_for_untrusted(r);
-            }
-            LineEvent::Shutdown => {
                 self.close_shard_gaps(r, sink)?;
                 self.trusted.clear();
+                if self.universe_lost.is_none() {
+                    self.universe_lost = Some(r);
+                }
+            }
+            LineEvent::Shutdown => {
+                // the shard gaps and the whole-feed gap meet at r: no instant is left uncovered
+                self.close_shard_gaps(r, sink)?;
+                self.close_universe_gap(r, sink)?;
+                self.trusted.clear();
                 if self.global_gap.is_none() {
-                    self.global_gap =
-                        Some((reason::SCANNER_STOPPED.to_string(), r.saturating_add(1)));
+                    self.global_gap = Some((reason::SCANNER_STOPPED.to_string(), r));
                 }
             }
             LineEvent::BadLine => self.stats.bad_lines += 1,
@@ -276,6 +338,9 @@ impl Reducer {
     }
 
     fn wait(&mut self, conn: usize, t: &str, why: &str, r: i64) {
+        if self.universe_lost.is_some() {
+            return; // inside a whole-feed gap
+        }
         self.shard_gaps
             .entry(conn)
             .or_insert_with(|| OpenGap {
@@ -287,16 +352,31 @@ impl Reducer {
             .insert(t.to_string());
     }
 
-    /// Every visible, untrusted token with a connection waits for its snapshot.
+    /// An untrusted token waits for its snapshot on its shard; with no connection now, on the
+    /// last shard it was on, as `down`.
+    fn wait_one(&mut self, t: &str, r: i64) {
+        if let Some(c) = self.feed.conn(t) {
+            self.wait(c, t, reason::NO_BOOK_YET, r);
+        } else if let Some(&c) = self.last_conn.get(t) {
+            self.wait(c, t, reason::DOWN, r);
+        }
+    }
+
+    /// Every visible, untrusted token waits for its snapshot.
     fn wait_for_untrusted(&mut self, r: i64) {
         for t in self.feed.visible_tokens() {
-            if self.trusted.contains(&t) {
-                continue;
-            }
-            if let Some(c) = self.feed.conn(&t) {
-                self.wait(c, &t, reason::NO_BOOK_YET, r);
+            if !self.trusted.contains(&t) {
+                self.wait_one(&t, r);
             }
         }
+    }
+
+    /// A token whose book holds a value the archive cannot store: no row, a bad line, and the
+    /// token waits for its next snapshot.
+    fn mark_unfit(&mut self, t: &str, r: i64) {
+        self.unfit = true;
+        self.trusted.remove(t);
+        self.wait_one(t, r);
     }
 
     fn stop_waiting(&mut self, t: &str, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
@@ -325,12 +405,20 @@ impl Reducer {
     fn forget(&mut self, t: &str, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
         self.trusted.remove(t);
         self.changed.remove(t);
+        self.last_conn.remove(t);
         self.stop_waiting(t, r, sink)
     }
 
     fn close_shard_gaps(&mut self, at: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
         for (c, g) in std::mem::take(&mut self.shard_gaps) {
             gap(self.hour_ms, g.since_ms, at, Some(c), &g.reason, sink)?;
+        }
+        Ok(())
+    }
+
+    fn close_universe_gap(&mut self, at: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
+        if let Some(since) = self.universe_lost.take() {
+            gap(self.hour_ms, since, at, None, reason::RAW_HOUR_LOST, sink)?;
         }
         Ok(())
     }
@@ -361,8 +449,11 @@ impl Reducer {
         let Some(book) = self.feed.book(t) else {
             return Ok(());
         };
-        let top = top_micros(book.top())?;
         let ts = book.server_ts_ms();
+        let Ok(top) = top_micros(book.top()) else {
+            self.mark_unfit(t, r);
+            return Ok(());
+        };
         let prev = self.last_top.get(t).copied();
         if prev.is_some_and(|p| p.top == top) {
             return Ok(());
@@ -388,17 +479,18 @@ impl Reducer {
         Ok(())
     }
 
-    /// At each depth boundary the receive clock crosses: the books as of that boundary.
-    fn depth_due(&mut self, sink: &mut dyn Sink) -> anyhow::Result<()> {
+    /// When the receive clock (now at line time `r`) has crossed a depth boundary: the books as
+    /// of the first boundary crossed, which is the first after every pending change.
+    fn depth_due(&mut self, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
         let every = self.cfg.depth_every_ms;
-        let Some(next) = self.next_depth_ms else {
-            self.next_depth_ms = Some((self.clock_ms.div_euclid(every) + 1) * every);
+        let after_clock = (self.clock_ms.div_euclid(every) + 1) * every;
+        let Some(at) = self.next_depth_ms else {
+            self.next_depth_ms = Some(after_clock);
             return Ok(());
         };
-        if self.clock_ms < next {
+        if self.clock_ms < at {
             return Ok(());
         }
-        let at = self.clock_ms.div_euclid(every) * every;
         let toks: Vec<String> = self
             .changed
             .iter()
@@ -406,46 +498,44 @@ impl Reducer {
             .cloned()
             .collect();
         for t in toks {
-            self.depth_rows(&t, at, sink)?;
+            self.depth_rows(&t, at, r, sink)?;
         }
         self.changed.clear();
-        self.next_depth_ms = Some(at + every);
+        self.next_depth_ms = Some(after_clock);
         Ok(())
     }
 
-    fn depth_rows(&mut self, t: &str, at: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
+    fn depth_rows(&mut self, t: &str, at: i64, r: i64, sink: &mut dyn Sink) -> anyhow::Result<()> {
         let Some(book) = self.feed.book(t) else {
             return Ok(());
         };
         let n = self.cfg.depth_levels;
         let sides = [
-            (
-                SIDE_BID,
-                book.bids_best_first()
-                    .into_iter()
-                    .take(n)
-                    .collect::<Vec<_>>(),
-            ),
-            (
-                SIDE_ASK,
-                book.asks_best_first()
-                    .into_iter()
-                    .take(n)
-                    .collect::<Vec<_>>(),
-            ),
+            (SIDE_BID, book.bids_best_first()),
+            (SIDE_ASK, book.asks_best_first()),
         ];
-        let token_idx = self.index(t)?;
-        for (side, levels) in sides {
-            for (level, (p, s)) in levels.into_iter().enumerate() {
-                sink.depth(DepthRow {
-                    ts_ms: at,
-                    token_idx,
-                    side,
-                    level: u16::try_from(level)?,
-                    price: micros(p.get())?,
-                    size: micros(s.get())?,
-                })?;
+        let mut levels = Vec::new();
+        for (side, lv) in sides {
+            for (level, (p, s)) in lv.into_iter().take(n).enumerate() {
+                match (micros(p.get()), micros(s.get())) {
+                    (Ok(price), Ok(size)) => levels.push((side, level, price, size)),
+                    _ => {
+                        self.mark_unfit(t, r);
+                        return Ok(());
+                    }
+                }
             }
+        }
+        let token_idx = self.index(t)?;
+        for (side, level, price, size) in levels {
+            sink.depth(DepthRow {
+                ts_ms: at,
+                token_idx,
+                side,
+                level: u16::try_from(level)?,
+                price,
+                size,
+            })?;
         }
         Ok(())
     }
@@ -454,6 +544,7 @@ impl Reducer {
     pub fn missing_hour(&mut self, why: &str, sink: &mut dyn Sink) -> anyhow::Result<()> {
         let h = self.hour_ms;
         self.close_shard_gaps(h, sink)?;
+        self.close_universe_gap(h, sink)?;
         self.trusted.clear();
         match &self.global_gap {
             Some((w, _)) if w == why => {}
@@ -464,14 +555,21 @@ impl Reducer {
         Ok(())
     }
 
-    /// The raw file can't be read past the last line: the rest of the hour is `why`.
+    /// The raw file can't be read past the last line: the rest of the hour is `why`, whatever
+    /// whole-feed gap was open before (unreadable data is lost even after a shutdown).
     pub fn cut(&mut self, why: &str, sink: &mut dyn Sink) -> anyhow::Result<()> {
         let at = self.clock_ms.saturating_add(1).max(self.hour_ms);
         self.close_shard_gaps(at, sink)?;
+        self.close_universe_gap(at, sink)?;
         self.trusted.clear();
-        if self.global_gap.is_none() {
-            self.global_gap = Some((why.to_string(), at));
-        }
+        self.global_gap = match self.global_gap.take() {
+            Some((w, since)) if w == why => Some((w, since)),
+            Some((w, since)) => {
+                gap(self.hour_ms, since, at, None, &w, sink)?;
+                Some((why.to_string(), at))
+            }
+            None => Some((why.to_string(), at)),
+        };
         self.next_depth_ms = None;
         Ok(())
     }
@@ -481,6 +579,9 @@ impl Reducer {
         let end = self.hour_ms + HOUR_MS;
         if let Some((why, since)) = self.global_gap.clone() {
             gap(self.hour_ms, since, end, None, &why, sink)?;
+        }
+        if let Some(since) = self.universe_lost {
+            gap(self.hour_ms, since, end, None, reason::RAW_HOUR_LOST, sink)?;
         }
         let open: Vec<(usize, OpenGap)> = self
             .shard_gaps
