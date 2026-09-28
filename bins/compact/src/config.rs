@@ -40,6 +40,13 @@ impl Config {
         Self::parse(&text)
     }
 
+    pub fn reduce(&self) -> crate::reduce::ReduceCfg {
+        crate::reduce::ReduceCfg {
+            depth_every_ms: self.depth_every_secs.saturating_mul(1_000),
+            depth_levels: self.depth_levels,
+        }
+    }
+
     pub fn budget_bytes(&self) -> u64 {
         self.archive_budget_gb.saturating_mul(1_000_000_000)
     }
