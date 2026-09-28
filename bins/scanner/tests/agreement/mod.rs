@@ -100,7 +100,10 @@ fn universe1() -> Universe {
 }
 
 /// U2: e1 loses its connection and a2 (a3 goes live); a2 moves to e2; b2 halts; a new group e3
-/// (d1, d2) and a new canary pair m8 appear. Groups stay sorted by event id (the engine searches them).
+/// (d1, d2, and b1 again: a YES token live in two groups, which the universe builder does not
+/// dedupe) and a new canary pair m8 appear. b1's carried book goes to its first listing (e2); the
+/// visible book is the last live listing's (e3), empty. Groups stay sorted by event id (the engine
+/// searches them).
 fn universe2() -> Universe {
     Universe {
         taken_ms: T0 + 600_000,
@@ -114,7 +117,14 @@ fn universe2() -> Universe {
                     leg("a2", Status::Live),
                 ],
             ),
-            group("e3", vec![leg("d1", Status::Live), leg("d2", Status::Live)]),
+            group(
+                "e3",
+                vec![
+                    leg("d1", Status::Live),
+                    leg("d2", Status::Live),
+                    leg("b1", Status::Live),
+                ],
+            ),
         ],
         canary: vec![
             canary("m9", "e9", "cy", "cn"),
@@ -124,11 +134,15 @@ fn universe2() -> Universe {
 }
 
 /// U3: U2 with b2 live again (its halted book carried back; the deferred check it had before U2
-/// must not come back with it).
+/// must not come back with it) and b1 halted in e3: b1's last old listing (e3, live, the book the
+/// deltas since U2 built) is carried to its first new listing (e2), which is visible again. When the
+/// restarted run re-applies U3, b1's last old listing is e3's HALTED leg (empty book): the old
+/// books offer every listing whatever its status, so e2's b1 is carried that empty book.
 fn universe3() -> Universe {
     let mut u = universe2();
     u.taken_ms = T0 + 602_000;
     u.groups[1].legs[1].status = Status::Live;
+    u.groups[2].legs[2].status = Status::Halted;
     u
 }
 
@@ -412,6 +426,20 @@ pub fn fixture(dir: &Path) {
                 ],
             ),
         ),
+        // b1 is now e3's (shard 2) visible leg, starting empty
+        line(
+            T0 + 600_500,
+            2,
+            books(&[("b1", T0 + 600_495, &[("0.47", "3")], &[("0.53", "3")])]),
+        ),
+        line(
+            T0 + 601_500,
+            2,
+            change(
+                T0 + 601_495,
+                &[("b1", "BUY", "0.48", "1", Some("0.48"), Some("0.53"))],
+            ),
+        ),
         CaptureMsg::Universe(Box::new(r3.clone())),
         ctl(
             T0 + 602_000,
@@ -503,7 +531,42 @@ pub fn fixture(dir: &Path) {
             ),
         ));
     }
-    m.push(ctl(t + 1, 0, Ctl::Shutdown));
+    // d2 (e3, shard 2; bid 0.60, no asks): a wrong server top (bid 0.50) still pending at Shutdown.
+    // close_all drops it; the restarted run appends to the same hour file and replay keeps the same
+    // engine, so re-applying U3 keeps only checks that survived, and the next shard-2 frame (d1,
+    // more than 1 s later) would otherwise settle d2's and trim its 0.60 bid.
+    m.push(line(
+        t + 1,
+        2,
+        change(
+            t - 4,
+            &[("d2", "SELL", "0.70", "1", Some("0.50"), Some("0.70"))],
+        ),
+    ));
+    m.push(ctl(t + 2, 0, Ctl::Shutdown));
+    let r = t + 60_000;
+    m.push(ctl(
+        r,
+        0,
+        Ctl::Universe {
+            taken_ms: T0 + 602_000,
+            file: r3.file.clone(),
+        },
+    ));
+    m.push(line(
+        r + 2_000,
+        2,
+        change(r + 1_995, &[("d1", "BUY", "0.02", "1", None, None)]),
+    ));
+    m.push(line(
+        r + 3_000,
+        1,
+        change(
+            r + 2_995,
+            &[("b1", "BUY", "0.30", "2", Some("0.30"), Some("1"))],
+        ),
+    ));
+    m.push(ctl(r + 4_000, 0, Ctl::Shutdown));
     let mut w = Writer::new(dir.to_path_buf());
     for msg in &m {
         w.write(msg).unwrap();
@@ -511,10 +574,11 @@ pub fn fixture(dir: &Path) {
     w.finish();
 }
 
-type Lv = (Vec<(Price, Shares)>, Vec<(Price, Shares)>);
+/// A book's levels, best first on each side, and its server timestamp.
+type Lv = (Vec<(Price, Shares)>, Vec<(Price, Shares)>, i64);
 
 fn lv(b: Option<&Book>) -> Option<Lv> {
-    b.map(|b| (b.bids_best_first(), b.asks_best_first()))
+    b.map(|b| (b.bids_best_first(), b.asks_best_first(), b.server_ts_ms()))
 }
 
 /// Drive the engine and FeedBooks over every hour file of `dir`, comparing `tokens` after every
@@ -530,11 +594,30 @@ pub fn compare(dir: &Path, tokens: Option<&[&str]>) -> usize {
     let mut n = 0usize;
     for h in tape::files::listing(dir).hours {
         tape::files::for_each_line(&h.path, |l| {
+            // a control line that can move books without touching them (a universe change, a
+            // disconnect, a shutdown, a REST snapshot): check every token visible before or after
+            let wide = tokens.is_none()
+                && matches!(
+                    l.ctl,
+                    Some(
+                        Ctl::Universe { .. } | Ctl::Down | Ctl::Shutdown | Ctl::RestSnapshot { .. }
+                    )
+                );
+            let was = if wide { feed.visible_tokens() } else { vec![] };
             apply_line(&mut engine, dir, &l, &mut st, &mut |_| {})?;
             let ap = feed.apply(&l, &mut load, &|_| false);
             let check: Vec<String> = match tokens {
                 Some(t) => t.iter().map(|s| s.to_string()).collect(),
-                None => ap.touched.clone(),
+                None => {
+                    let mut c = ap.touched.clone();
+                    if wide {
+                        c.extend(was);
+                        c.extend(feed.visible_tokens());
+                        c.sort();
+                        c.dedup();
+                    }
+                    c
+                }
             };
             for t in &check {
                 assert_eq!(

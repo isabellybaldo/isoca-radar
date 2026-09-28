@@ -10,6 +10,8 @@ fn feed_books_equal_the_engines_after_every_line() {
     fixture(&dir);
     let n = compare(&dir, Some(&TOKENS));
     assert!(n > 1_500, "{n} lines compared");
+    // and the real-capture mode (the tokens each line touched, every visible one on control lines)
+    assert_eq!(compare(&dir, None), n);
     std::fs::remove_dir_all(&dir).ok();
 }
 
