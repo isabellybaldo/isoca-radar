@@ -8578,160 +8578,331 @@ git commit -m "docker: compact in the rust image; compose service (0.25 CPU, 256
 
 ### Task 21: the deploy runbook `docs/superpowers/runbooks/phase5b-storage-vps.md`
 
-No code. The owner runs it. It follows the 5a runbook's mechanics (`docs/superpowers/runbooks/phase5a-cards-vps.md`) and the 5d lessons (`docs/superpowers/runbooks/phase5d-sweet-vps.md` §5: LF line endings, migrate alone first); only what differs is spelled out. It goes after the current 5d redeploy and the other agent's frontend changes (spec §9).
+No code. The owner runs it. The owner's runbook format is strict: a flat numbered list; each step is ONE copy-pasteable bash block, then `→ expected:` (the exact output shape), then at most one `if not:` line; **STOP** after every step whose failure must halt; prose at most one line per step; fully self-contained (no "as in 5a §n": every command is written out). It carries the 5d lessons (LF line endings, migrate alone first, the migration-checksum test) and goes after the current 5d redeploy and the other agent's frontend changes (spec §9).
 
 **Files:**
 - Create: `docs/superpowers/runbooks/phase5b-storage-vps.md`
 
 - [ ] **Step 1: Write the runbook**
 
-It opens with the same Rules paragraph as the 5d runbook (never print `.env`, never print a container's environment, `docker compose config` only as `--env-file .env.example … config -q`, never restart Docker), with the disk budget changed to **75 GB for this project on the VPS** (`LIMIT_GB=75 sh scripts/disk-budget.sh`, spec §1), then a **What ships** list (the Rust image gains `compact`, the scanner's new retention/guard/universe dedup, api health fields; the web image the ARCHIVE box and heart; migration 0008; the `compact` service and `archive` volume; the new `.env` key `COMPACT_RW_DB_PASSWORD`) and an **Order** table (PC §1–§4, VPS §5–§12). Sections, with these exact commands:
+Create `docs/superpowers/runbooks/phase5b-storage-vps.md` with exactly this content (fill only the `<…>` values when running it):
 
-1. **Line endings and the tree (PC).** `git status --short --untracked-files=no` shows nothing; then
+````markdown
+# Phase 5b on the VPS: tiered storage (compact service, Parquet archive, delete guard)
+
+Rules: never print `.env` or a container's environment; `docker compose config` only as `--env-file .env.example … config -q`; never restart Docker; PC steps in Git Bash, VPS steps as root over SSH.
+
+## On the PC
+
+1. Go to the repo on the branch being deployed; the tree must be clean.
 ```bash
-git ls-files --eol crates/store/migrations/0008_compact.sql config/compact.toml config/scanner.toml
-grep -rlI "$(printf '\r')" crates/store/migrations config || echo lf-ok
+cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH" && git status --short --untracked-files=no && git log -1 --format='%h %s'
 ```
-   Expect `i/lf w/lf` on each line and `lf-ok`. If a file shows `w/crlf`, run `git checkout -- <that file>` (`.gitattributes` pins LF, so checkout rewrites it LF) and check again. The Docker build refuses CRLF anyway (5d lesson).
-2. **Build (PC).** 5a runbook §3, with the new key: the count check becomes
+→ expected: no status lines, then one line `<sha> <subject>` of the commit to deploy.
+if not: commit or stash the listed changes, then run this step again.
+
+2. Line endings: migrations and configs baked into the image must be LF.
 ```bash
-grep -c -E '^(ANALYZE_RW_DB_PASSWORD|SCANNER_HOST|COMPACT_RW_DB_PASSWORD)=' .env
+git ls-files --eol crates/store/migrations config | grep -v 'w/lf' ; grep -rlI "$(printf '\r')" crates/store/migrations config || echo lf-ok
 ```
-   (expect `3`; if less, add the missing key without printing it: `grep -q '^COMPACT_RW_DB_PASSWORD=' .env || printf 'COMPACT_RW_DB_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env`), then build both images as in 5a §3, and prove the binary and its config are in the image:
+→ expected: only `lf-ok`.
+if not: `git checkout -- <each listed file>` (.gitattributes pins LF) and run this step again.
+**STOP**
+
+3. Migration checksums: the applied migrations' bytes must match what production recorded.
+```bash
+cargo test -p store --test migration_checksums 2>&1 | tail -3
+```
+→ expected: `test result: ok. 2 passed; 0 failed`.
+if not: a CRLF or edited migration (fix as in step 2); if the test file is missing, merge `main` (PR #4) into this branch first.
+**STOP**
+
+4. The new `.env` key on the PC (compose refuses to parse without it; the value is never printed).
+```bash
+(grep -q '^COMPACT_RW_DB_PASSWORD=' .env || printf 'COMPACT_RW_DB_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env) && grep -c -E '^(ANALYZE_RW_DB_PASSWORD|SCANNER_HOST|COMPACT_RW_DB_PASSWORD)=' .env
+```
+→ expected: `3`.
+if not: add the missing key the same way (`openssl rand -hex 24`), never with an editor that echoes it.
+
+5. Disk budget on the PC before building.
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/disk-budget.ps1
+```
+→ expected: the script's pass line (under 30 GB).
+if not: `cargo clean` and `docker builder prune -f --keep-storage 5GB`, then run this step again.
+
+6. Build both images (Rust: scanner, api, analyze, compact; web).
+```bash
+export GIT_SHA="$(git rev-parse --short HEAD)" && echo "$GIT_SHA" && docker compose build --build-arg GIT_SHA="$GIT_SHA" migrate && docker compose --env-file .env.example -f compose.yml -f compose.web.yml --profile web build web
+```
+→ expected: the short sha, then both builds end without `ERROR` (a `CRLF found` failure means step 2 was skipped).
+if not: read the first `ERROR` line; fix and run this step again.
+**STOP**
+
+7. The compactor and its config are in the image.
 ```bash
 MSYS_NO_PATHCONV=1 docker run --rm --entrypoint /usr/local/bin/compact cute-trading/rust:dev --help | head -1
 ```
-   Expect `raw capture hours → the Parquet archive (paper trading only)`. Write `GIT_SHA` in Results.
-3. **Benchmark on a real hour (spec §8; optional but recommended, the owner copies the hour).** On the VPS, as root, pick a closed hour from the middle of a UTC day (`H=13`, `D=<YYYY-MM-DD>` of yesterday) and copy it with exactly the universe records its control lines name (each `Ctl::Universe` line carries `"file":"universe-<taken_ms>-<seq>.json.zst"`, stored in the day of its `taken_ms`; `zstdcat` comes with the `zstd` package: `apt-get install -y zstd` if it is missing):
+→ expected: `raw capture hours → the Parquet archive (paper trading only)`.
+if not: step 6 built from the wrong tree; rebuild.
+
+8. (Benchmark, on the VPS) Copy one closed hour from yesterday and the universe records its control lines name (`D` yesterday's date, `H=13`).
 ```bash
-C=/var/lib/docker/volumes/cute-trading_data/_data/capture
-mkdir -p ~/bench/$D && cp $C/$D/$H.jsonl.zst ~/bench/$D/
-for f in $(zstdcat $C/$D/$H.jsonl.zst | grep '"kind":"universe"' | grep -o 'universe-[0-9]*-[0-9]*\.json\.zst' | sort -u); do
-  t=${f#universe-}; t=${t%%-*}; d=$(date -u -d @$((t / 1000)) +%F)
-  mkdir -p ~/bench/$d && cp $C/$d/$f ~/bench/$d/
-done
-ls -R ~/bench | head -20
-tar -cf ~/bench.tar -C ~ bench && du -h ~/bench.tar && rm -rf ~/bench
+D=<YYYY-MM-DD>; H=13; C=/var/lib/docker/volumes/cute-trading_data/_data/capture; command -v zstdcat >/dev/null || apt-get install -y zstd; mkdir -p ~/bench/$D && cp $C/$D/$H.jsonl.zst ~/bench/$D/ && for f in $(zstdcat $C/$D/$H.jsonl.zst | grep '"kind":"universe"' | grep -o 'universe-[0-9]*-[0-9]*\.json\.zst' | sort -u); do t=${f#universe-}; t=${t%%-*}; d=$(date -u -d @$((t / 1000)) +%F); mkdir -p ~/bench/$d && cp $C/$d/$f ~/bench/$d/; done; tar -cf ~/bench.tar -C ~ bench && rm -rf ~/bench && du -h ~/bench.tar
 ```
-   Copy it to the PC (`scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123:/root/bench.tar "$HOME/"`), delete `~/bench.tar` on the VPS, unpack to `$HOME/bench/`. Then on the PC:
+→ expected: one line `<size>  /root/bench.tar` (a few hundred MB).
+if not: skip steps 8–11; the spec §3 defaults stay (write "no benchmark" in Results).
+
+9. (Benchmark, on the PC) Fetch and unpack it, then delete it on the VPS.
 ```bash
-MSYS_NO_PATHCONV=1 docker run --rm --cpus 0.25 --memory 256m --tmpfs /tmp -v "$HOME/bench:/bench:ro" --entrypoint /usr/local/bin/compact cute-trading/rust:dev bench /bench/$D/$H.jsonl.zst
-TAPE_AGREEMENT_DIR="$HOME/bench" cargo test -p scanner --test tape_agreement -- --ignored --nocapture
-TAPE_AGREEMENT_DIR="$HOME/bench" cargo test -p scanner --test tob_agreement -- --ignored --nocapture
-COMPACT_BENCH_HOUR="$HOME/bench/$D/$H.jsonl.zst" cargo test -p compact --test bench -- --ignored --nocapture
+scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123:/root/bench.tar "$HOME/bench.tar" && rm -rf "$HOME/bench" && tar -xf "$HOME/bench.tar" -C "$HOME" && rm "$HOME/bench.tar" && ssh -p 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123 rm /root/bench.tar && ls "$HOME/bench"
 ```
-   The first line is the release build under the service's limits: record its `ms`, `peak_rss_kb`, rows and bytes per table, and `per_day_bytes`. The second proves the compactor's books equal the scanner engine's on real data, line by line, and the third that every `tob` row equals the engine's top at its line (debug builds; ruling R1 rests on these two). The fourth is the same compaction in a debug build (correctness, not timing).
-   **Decision (spec §8, ruling R3):**
-   - `ms` must be under 600,000 (10 min at 0.25 CPU) and `peak_rss_kb` under 200,000 (headroom under 256 MB). If either fails, stop: do not deploy; report the numbers.
-   - `per_day_bytes` + 50 MB (the l2 upper estimate, not measured without episodes) ≤ 300 MB: keep the spec §3 defaults.
-   - Over 300 MB and depth over 50 MB a day (`24 × depth bytes`): set `depth_every_secs = 600` in `config/compact.toml`, commit (`config: compact depth every 10 min (benchmark <date>)`), rebuild (§2) and re-run the bench line.
-   - Still over: keep it and write the expected days kept (`55 GB ÷ per-day bytes`) in Results; `tob` has no knob.
-   - No hour copied: skip this section; the defaults stay as in spec §3.
-4. **Bundle and ship (PC).** 5a runbook §4 unchanged (the bundle already carries `compose.yml`, `.env.example` and the roles script).
-5. **Load and the `.env` key (VPS).** 5a runbook §7 (load, `config -q` check, disk budget with `LIMIT_GB=75`), then add `COMPACT_RW_DB_PASSWORD` to the VPS `.env` without printing it, exactly as 5a §6 did for `ANALYZE_RW_DB_PASSWORD`:
+→ expected: one or two `YYYY-MM-DD` folder names.
+if not: check the scp line's key path (quoted, forward slashes).
+
+10. (Benchmark, on the PC) The release compactor on that hour under the service's limits.
 ```bash
-cd /home/isoca/projects/cute-trading
-grep -q '^COMPACT_RW_DB_PASSWORD=' .env || printf 'COMPACT_RW_DB_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
-grep -c '^COMPACT_RW_DB_PASSWORD=' .env
+MSYS_NO_PATHCONV=1 docker run --rm --cpus 0.25 --memory 256m --tmpfs /tmp -v "$HOME/bench:/bench:ro" --entrypoint /usr/local/bin/compact cute-trading/rust:dev bench /bench/<YYYY-MM-DD>/13.jsonl.zst
 ```
-   Expect `1`. Then check `grep -n -A1 -E '^  compact:$' compose.yml` finds the service.
-6. **Pre-flight (VPS).** Record the raw capture size, back up as in 5a §5 (tag the running image `cute-trading/rust:<old-sha>`, `cp .env .env.bak-5b`), and note the running scanner's run id:
+→ expected: one line `bench: <day>/13.jsonl.zst <ms> ms, lines=… tob=… depth=… gaps=… tokens=…, bytes tob=… depth=… gaps=… tokens=…, per_day_bytes=<n> …, peak_rss_kb=<n>` with `<ms>` < 600000 and `peak_rss_kb` < 200000; write the line in Results.
+if not: over time or memory: **STOP**, do not deploy, report the line; `per_day_bytes` + 50 MB over 300 MB with depth over 50 MB a day: set `depth_every_secs = 600` in `config/compact.toml`, commit, and redo steps 6–10.
+
+11. (Benchmark, on the PC) Both agreement tests on the real hour (the compactor's books and tob rows equal the scanner engine's).
 ```bash
-du -sh /var/lib/docker/volumes/cute-trading_data/_data/capture
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT max(run_id) FROM runs WHERE service = 'scanner'"
-df -BG --output=size,used,avail /var/lib/docker
-du -s --block-size=1G /var/lib/docker/volumes/cute-trading_* | awk '{s += $1} END {print "project_gb", s}'
+TAPE_AGREEMENT_DIR="$HOME/bench" cargo test -p scanner --test tape_agreement --test tob_agreement -- --ignored --nocapture 2>&1 | grep -E 'tape agreement|tob agreement|test result'
 ```
-   **Disk headroom (required).** The scanner pauses capture when free space drops below 10 GB and resumes only above 15 GB (`config/scanner.toml [capture] pause_below_gb`, `resume_above_gb`), so the disk must keep at least 20 GB free with the project at its full 75 GB. With `size` from `df` and `other_gb = used − project_gb` (everything that isn't this project), check `size − other_gb − 75 ≥ 20`. If it fails, lower the archive budget before deploying: `archive_budget_gb = size − other_gb − 20 − 15 − 1` (20 headroom, 15 raw cap, 1 database), rounded down, at least 1; set it in `config/compact.toml`, commit (`config: archive budget <n> GB for this disk`), rebuild (§2). Write the numbers and the decision in Results.
-7. **Migrate alone first, and check version 8 (VPS).** Never paste the whole block; stop at the first failure (5d lesson).
+→ expected: `tape agreement: <n> lines, books equal after every one`, `tob agreement: <n> rows equal the engine's top`, and two `test result: ok. 1 passed`.
+if not: **STOP**, do not deploy; the failing line and token go to the plan owner.
+
+12. Bundle the images, compose files, `.env.example`, roles script and disk-budget script.
 ```bash
-docker compose --profile core stop --timeout 60 scanner
-docker compose --profile core run --rm migrate; echo "migrate exit=$?"
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT max(version) FROM _sqlx_migrations WHERE success"
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT has_table_privilege('compact_rw','compact_hours','UPDATE'), has_table_privilege('compact_rw','episodes','INSERT'), has_table_privilege('scanner_rw','compact_hours','INSERT'), has_table_privilege('scanner_rw','compact_hours','UPDATE'), has_table_privilege('analyze_ro','compact_status','SELECT'), has_table_privilege('scanner_rw','compact_status','SELECT')"
+R=/c/Users/Isabelly/PycharmProjects/cute-trading && mkdir -p "$HOME/ct-5b/docker/postgres/init" "$HOME/ct-5b/scripts" && cd "$HOME/ct-5b" && docker save cute-trading/rust:dev cute-trading/web:dev | gzip -1 > image.tar.gz && cp "$R/compose.yml" "$R/compose.web.yml" "$R/.env.example" . && cp "$R/docker/postgres/init/01-roles.sh" docker/postgres/init/ && cp "$R/scripts/disk-budget.sh" scripts/ && tar -cf "$HOME/ct-5b.tar" image.tar.gz compose.yml compose.web.yml .env.example docker scripts && cd "$HOME" && rm -rf "$HOME/ct-5b" && ls -l "$HOME/ct-5b.tar" && docker builder prune -f --keep-storage 5GB >/dev/null && cd "$R"
 ```
-   Expect `migrate exit=0`, `8`, then `t|f|t|f|t|t`. If `migrate` fails, read `docker compose --profile core logs --tail 50 migrate` before anything else; 0008 is additive (two new tables, a role, grants), so a clean failure leaves nothing half-applied.
-8. **Activate `compact_rw` once (VPS; the password is never printed).** 5a runbook §11 exactly, with the names changed:
+→ expected: one `ls -l` line for `ct-5b.tar` (about 1 GB).
+if not: free disk (step 5) and run this step again.
+
+13. Ship the bundle to the VPS.
 ```bash
-PW="$(grep -E '^COMPACT_RW_DB_PASSWORD=' .env | cut -d= -f2-)"
-case "$PW" in ''|*[!0-9a-f]*) echo "pw-bad: not an openssl rand -hex value; stop"; PW= ;; *) echo pw-read ;; esac
-[ -n "$PW" ] && printf '\\set pw %s\nSET log_min_error_statement = panic;\nALTER ROLE compact_rw LOGIN PASSWORD :'"'"'pw'"'"';\n' "$PW" | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U ct_owner -d cute_trading && echo role-set
-unset PW
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'compact_rw'"
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT setconfig FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'compact_rw'"
+scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" "$HOME/ct-5b.tar" root@31.97.23.123:/root/ && rm "$HOME/ct-5b.tar"
 ```
-   Expect `pw-read`, `role-set`, `t`, `{statement_timeout=10s}`. Never with `-e`, `-a` or `\echo`.
-9. **Start the scanner, then the compactor, then api and web (VPS).**
+→ expected: the transfer progress line, then nothing.
+if not: check the key path is quoted with forward slashes and the port is 50158.
+
+## On the VPS
+
+14. Disk headroom: with the project at its 75 GB ceiling the disk must keep ≥ 20 GB free (capture pauses below 10 GB free).
 ```bash
-docker compose --profile core up -d --no-build --no-deps scanner
-docker compose --profile core logs --tail 30 scanner
-docker compose --profile core up -d --no-build --no-deps compact
-docker compose --profile core logs --tail 20 compact
-docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web
+cd /home/isoca/projects/cute-trading && df -BG --output=size,used,avail /var/lib/docker | tail -1 && du -s --block-size=1G /var/lib/docker/volumes/cute-trading_* | awk '{s += $1} END {print "project_gb", s}'
 ```
-   Expect the scanner's usual start lines, no `capture: compact_hours unreadable`, and, within 30 s and until compact has reported, `capture: compactor silent (no compact_status within 6 h); retention falls back to age + cap` (today's rule while no compactor runs, ruling R10), followed by `capture: compactor reporting; raw hours wait for compaction` within a minute of compact's start; the compactor's `compact: every 60 s, /data/capture → /archive …` and no `refusing to start`. The first hour it can compact is the oldest raw hour on disk once two newer hours exist, so `compact: <H> done in …` lines start within minutes and then catch up hour by hour (each ~ the benchmark time).
-10. **Post-deploy checks (VPS, then the browser).**
-    - Hours become `done` within about 2 h of closing:
+→ expected: `<size>G <used>G <avail>G` then `project_gb <p>`; with `other = used − p`, `size − other − 75 ≥ 20`.
+if not: set `archive_budget_gb = size − other − 36` (rounded down, ≥ 1) in `config/compact.toml` on the PC, commit, redo steps 6–13.
+**STOP**
+
+15. Keep the running images under a rollback tag before loading the new ones, and back up `.env`.
 ```bash
-docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to_char(to_timestamp(hour_ms/1000) AT TIME ZONE 'UTC','MM-DD HH24'), status, rows FROM compact_hours ORDER BY hour_ms DESC LIMIT 5"
+docker tag "$(docker inspect -f '{{.Image}}' "$(docker compose --profile core ps -q scanner)")" cute-trading/rust:pre5b && docker tag "$(docker inspect -f '{{.Image}}' "$(docker compose -f compose.yml -f compose.web.yml --profile web ps -q web)")" cute-trading/web:pre5b && cp compose.yml /root/compose.yml.pre5b && cp compose.web.yml /root/compose.web.yml.pre5b && cp .env .env.bak-5b && chmod 600 .env.bak-5b && docker image ls 'cute-trading/*' --format '{{.Repository}}:{{.Tag}} {{.ID}}'
+```
+→ expected: `rust:pre5b` on the same ID as `rust:dev`, `web:pre5b` on the same ID as `web:dev`.
+if not: a service is not running; tag from `docker image ls` by the ID it last ran, then continue.
+
+16. Back up the database.
+```bash
+docker compose exec -T postgres pg_dump -U ct_owner -d cute_trading -Fc > /root/ct-pre-5b.dump && ls -lh /root/ct-pre-5b.dump
+```
+→ expected: one `ls` line, a few hundred MB.
+if not: free space and run this step again; do not migrate without it.
+**STOP**
+
+17. Load the bundle.
+```bash
+tar -xf /root/ct-5b.tar && rm /root/ct-5b.tar && gunzip -c image.tar.gz | docker load && rm image.tar.gz && docker image ls 'cute-trading/*' --format '{{.Repository}}:{{.Tag}} {{.ID}}'
+```
+→ expected: `Loaded image: cute-trading/rust:dev` and `…/web:dev`; `:dev` now on new IDs, `:pre5b` on the old ones.
+if not: the tar was truncated; re-ship (step 13).
+
+18. Compose parses with the new service and keys.
+```bash
+docker compose --env-file .env.example -f compose.yml -f compose.web.yml --profile core --profile web config -q && echo config-ok && grep -c -E '^  compact:$|COMPACT_RW_DB_PASSWORD' compose.yml
+```
+→ expected: `config-ok` then `3`.
+if not: the bundle's compose files are old; re-bundle (step 12).
+**STOP**
+
+19. The new `.env` key on the VPS (never printed).
+```bash
+grep -q '^COMPACT_RW_DB_PASSWORD=' .env || printf 'COMPACT_RW_DB_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env; grep -c '^COMPACT_RW_DB_PASSWORD=' .env
+```
+→ expected: `1`.
+if not: remove duplicate lines by hand without printing values (`sed -i` on the key name), then run again.
+
+20. Disk budget of the project before migrating.
+```bash
+LIMIT_GB=75 sh scripts/disk-budget.sh
+```
+→ expected: the script's pass line.
+if not: free space (old images: `docker image prune -f`) and run again.
+
+21. Stop the scanner and migrate ALONE.
+```bash
+docker compose --profile core stop --timeout 60 scanner && docker compose --profile core run --rm migrate; echo "migrate exit=$?"
+```
+→ expected: `migrate exit=0`.
+if not: `docker compose --profile core logs --tail 50 migrate`; do not start anything; a checksum error means a CRLF image: redo steps 2–17.
+**STOP**
+
+22. Migration 8 is applied and the grants are right.
+```bash
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT max(version) FROM _sqlx_migrations WHERE success" && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT has_table_privilege('compact_rw','compact_hours','UPDATE'), has_table_privilege('compact_rw','episodes','INSERT'), has_table_privilege('scanner_rw','compact_hours','INSERT'), has_table_privilege('scanner_rw','compact_hours','UPDATE'), has_table_privilege('analyze_ro','compact_status','SELECT'), has_table_privilege('scanner_rw','compact_status','SELECT')"
+```
+→ expected: `8` then `t|f|t|f|t|t`.
+if not: do not continue; roll back (step 37).
+**STOP**
+
+23. Activate `compact_rw` with the `.env` password (never printed).
+```bash
+PW="$(grep -E '^COMPACT_RW_DB_PASSWORD=' .env | cut -d= -f2-)"; case "$PW" in ''|*[!0-9a-f]*) echo "pw-bad"; PW= ;; *) echo pw-read ;; esac; [ -n "$PW" ] && printf '\\set pw %s\nSET log_min_error_statement = panic;\nALTER ROLE compact_rw LOGIN PASSWORD :'"'"'pw'"'"';\n' "$PW" | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U ct_owner -d cute_trading && echo role-set; unset PW; docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'compact_rw'"
+```
+→ expected: `pw-read`, `role-set`, `t`.
+if not: `pw-bad` means the `.env` line isn't an `openssl rand -hex 24` value: replace it that way (step 19) and run again.
+**STOP**
+
+24. Start the scanner (new retention, delete guard, universe dedup) and note the deploy time.
+```bash
+date +%s%3N > /root/5b_deploy_ms && docker compose --profile core up -d --no-build --no-deps scanner && sleep 60 && docker compose --profile core logs --since 70s scanner 2>&1 | grep -E 'capture:|error|panicked' | head
+```
+→ expected: `capture: compactor silent (no compact_status within 6 h); retention falls back to age + cap` and no `error`/`panicked` lines.
+if not: roll back the scanner (step 37).
+
+25. Start the compactor.
+```bash
+docker compose --profile core up -d --no-build --no-deps compact && sleep 90 && docker compose --profile core logs --since 100s compact 2>&1 | head -5
+```
+→ expected: `compact: every 60 s, /data/capture → /archive (writes compact_hours/compact_status only, paper only)`, then `compact: <YYYY-MM-DDTHH> done in <ms> ms, tob=… depth=… l2=… gaps=…, <n> B` lines as it catches up.
+if not: `refusing to start` = step 23 failed; `database unreachable` = the password; fix, then `docker compose --profile core restart compact`.
+
+26. Restart api and web (health fields, Archive box).
+```bash
+docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web && docker compose -f compose.yml -f compose.web.yml --profile web ps api web --format '{{.Service}} {{.Status}}'
+```
+→ expected: `api Up …` and `web Up …`.
+if not: `docker compose -f compose.yml -f compose.web.yml --profile web logs --tail 30 api web`.
+
+27. The scanner now waits for the compactor.
+```bash
+sleep 60; docker compose --profile core logs --since 3m scanner 2>&1 | grep 'capture: compactor' | tail -1
+```
+→ expected: `capture: compactor reporting; raw hours wait for compaction`.
+if not: check `compact_status` (step 29); the scanner keeps today's rule meanwhile, nothing is lost.
+
+28. First compaction check (run about 2 h after step 25): hours become `done` 1–2 h after they close.
+```bash
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to_char(to_timestamp(hour_ms/1000) AT TIME ZONE 'UTC','MM-DD HH24'), status, rows FROM compact_hours ORDER BY hour_ms DESC LIMIT 3"
+```
+→ expected: three `MM-DD HH|done|{"tob": …}` lines, the newest 1–2 hours before now (UTC).
+if not: `docker compose --profile core logs --tail 30 compact`; do not leave it running with errors: roll back compact (step 36).
+**STOP**
+
+29. Status row, lag and errors.
+```bash
 docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to_char(to_timestamp(updated_ms/1000) AT TIME ZONE 'UTC','HH24:MI'), archive_bytes, oldest_day, lag_hours, last_error FROM compact_status"
 ```
-      Expect the newest `done` hour 1–2 h behind now, and `lag_hours` 1 or 2 with no error once caught up.
-    - Limits: `docker stats --no-stream` shows `compact` under 256 MiB and its CPU within 0.25 while working; record both.
-    - Universe records only on change: `ls /var/lib/docker/volumes/cute-trading_data/_data/capture/$(date -u +%F)/ | grep -c universe-` stays far below 12 an hour.
-    - The raw folder shrinks to about a day over the next 24 h: `du -sh …/capture` then and 24 h later (≤ ~10 GB, never over 15).
-    - No hour lost at the cap: `SELECT count(*) FROM compact_hours WHERE status = 'lost' AND done_ms > <deploy ms>` stays `0`, and the scanner log has no `deleted before compaction`.
-    - Browser (signed in): Health shows the ARCHIVE box (size, oldest day, lag, last report, last error `—`), and Radar still shows ten hearts.
-    - Disk: `LIMIT_GB=75 sh scripts/disk-budget.sh` passes.
-11. **After the first full UTC day (VPS).** Once `compact: merged <day>` appears:
-```bash
-docker compose --profile core run --rm --no-deps compact verify <day>; echo "verify exit=$?"
-ls -l /var/lib/docker/volumes/cute-trading_archive/_data/<day>/
-```
-    Then the day's timestamp clamps and late rows (ruling R4; both should be small next to the day's `tob` rows):
-```bash
-python3 -c "import json,sys; m=json.load(open(sys.argv[1])); print('tob', m['totals']['tob'], 'ts_clamped', m['ts_clamped'], 'late_rows', m['late_rows'])" /var/lib/docker/volumes/cute-trading_archive/_data/<day>/manifest.json
-```
-    Expect `verify <day>: ok` and `verify exit=0`, and six files (`tokens`, `tob`, `depth`, `l2`, `gaps` `.parquet` + `manifest.json`). Record the day's total bytes and each table's bytes (the manifest's `bytes`). If `l2` is over 50 MB a day, set `l2_before_secs = 120` and `l2_after_secs = 120` in `config/compact.toml` and ship it with the next deploy; record the decision.
-12. **How to query the archive (PC, DuckDB CLI).** Copy day folders to the PC (`scp -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" -r root@31.97.23.123:/var/lib/docker/volumes/cute-trading_archive/_data/<day> "$HOME/archive/"`), run `duckdb` in `$HOME`, and use these three queries (prices and sizes are micro-units: divide by 1e6; `token_idx` is per day, so tables join on the day folder too):
-```sql
--- 1. One token's top of book over a week
-WITH tok AS (SELECT regexp_extract(filename, '(\d{4}-\d{2}-\d{2})', 1) AS day, token_idx, token_id
-             FROM read_parquet('archive/*/tokens.parquet', filename = true)),
-     tob AS (SELECT regexp_extract(filename, '(\d{4}-\d{2}-\d{2})', 1) AS day, *
-             FROM read_parquet('archive/*/tob.parquet', filename = true))
-SELECT to_timestamp(tob.ts_ms / 1000) AS t, tob.bid / 1e6 AS bid, tob.bid_sz / 1e6 AS bid_sz,
-       tob.ask / 1e6 AS ask, tob.ask_sz / 1e6 AS ask_sz
-FROM tob JOIN tok USING (day, token_idx)
-WHERE tok.token_id = '<TOKEN_ID>'
-ORDER BY tob.day, tob.recv_ms;
+→ expected: `HH:MI|<bytes>|<YYYY-MM-DD>|1|` or `…|2|` (empty last_error), updated within the last minute.
+if not: the last_error text says what failed; lag above 3 costs a heart on Radar.
 
--- 2. The l2 book at an episode's peak (<PEAK_MS> = episodes.peak_server_ms): the last full
---    snapshot of each token before the peak, then every change after it, last size per level
-WITH l AS (SELECT * FROM read_parquet('archive/<day>/l2.parquet', file_row_number = true)
-           WHERE episode_id = '<EPISODE_ID>' AND ts_ms <= <PEAK_MS>),
+30. Container limits hold while it works.
+```bash
+docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' | grep compact
+```
+→ expected: `cute-trading-compact-1 <≤ 25%> <under 256MiB> / 256MiB`; write it in Results.
+if not: memory near the limit: lower `depth_levels` or the row groups per the plan; report.
+
+31. No hour lost at the cap since the deploy.
+```bash
+docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*) FROM compact_hours WHERE status = 'lost' AND done_ms > $(cat /root/5b_deploy_ms)"; docker compose --profile core logs scanner 2>&1 | grep -c 'deleted before compaction'
+```
+→ expected: `0` then `0`.
+if not: the compactor is too slow for the cap: report the lag and `docker stats` (step 30).
+
+32. Raw capture holds about a day (run 24 h after step 24).
+```bash
+du -sh /var/lib/docker/volumes/cute-trading_data/_data/capture && ls /var/lib/docker/volumes/cute-trading_data/_data/capture/$(date -u +%F) | grep -c universe-
+```
+→ expected: at most about 10G (never over 15G), then a count far below 12 per hour elapsed today.
+if not: over 15G means the cap isn't enforced: report the scanner log's `capture:` lines.
+
+33. Verify the first full archived day (run after `compact: merged <day>` appears in the compact log).
+```bash
+DAY=<YYYY-MM-DD>; docker compose --profile core run --rm --no-deps compact verify $DAY; echo "verify exit=$?"; python3 -c "import json,sys; m=json.load(open(sys.argv[1])); print('tob', m['totals']['tob'], 'ts_clamped', m['ts_clamped'], 'late_rows', m['late_rows'], 'bytes', m['bytes'])" /var/lib/docker/volumes/cute-trading_archive/_data/$DAY/manifest.json
+```
+→ expected: `verify <day>: ok`, `verify exit=0`, then one line with `ts_clamped` and `late_rows` small next to `tob`, and the bytes per table; write them in Results.
+if not: **STOP** compaction (step 36) and report every listed problem.
+
+34. (On the PC, after step 22 succeeded) Pin 0008's production checksum in the checksum test.
+```bash
+ssh -p 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123 "cd /home/isoca/projects/cute-trading && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc \"SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 8\""
+```
+→ expected: one 96-character hex line; add `(8, "<that hex>"),` after the version-7 entry of `APPLIED` in `crates/store/tests/migration_checksums.rs`, run `cargo test -p store --test migration_checksums` (→ `2 passed`), commit `store: pin migration 0008's checksum`.
+if not: the test file is not on the branch yet: add the line once PR #4 is merged.
+
+35. Query the archive on the PC with DuckDB (copy a day first; prices and sizes are micro-units).
+```bash
+DAY=<YYYY-MM-DD>; mkdir -p "$HOME/archive" && scp -r -P 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123:/var/lib/docker/volumes/cute-trading_archive/_data/$DAY "$HOME/archive/" && cd "$HOME" && duckdb <<'SQL'
+-- 1. one token's top of book (every copied day)
+WITH tok AS (SELECT regexp_extract(filename, '(\d{4}-\d{2}-\d{2})', 1) AS day, token_idx, token_id FROM read_parquet('archive/*/tokens.parquet', filename = true)),
+     tob AS (SELECT regexp_extract(filename, '(\d{4}-\d{2}-\d{2})', 1) AS day, * FROM read_parquet('archive/*/tob.parquet', filename = true))
+SELECT to_timestamp(tob.ts_ms / 1000) AS t, tob.bid / 1e6 AS bid, tob.bid_sz / 1e6 AS bid_sz, tob.ask / 1e6 AS ask, tob.ask_sz / 1e6 AS ask_sz
+FROM tob JOIN tok USING (day, token_idx) WHERE tok.token_id = '<TOKEN_ID>' ORDER BY tob.day, tob.recv_ms LIMIT 20;
+-- 2. the l2 book at an episode's peak (<PEAK_MS> = episodes.peak_server_ms)
+WITH l AS (SELECT * FROM read_parquet('archive/<YYYY-MM-DD>/l2.parquet', file_row_number = true) WHERE episode_id = '<EPISODE_ID>' AND ts_ms <= <PEAK_MS>),
      s AS (SELECT token_idx, max(recv_ms) AS snap_recv FROM l WHERE snapshot GROUP BY token_idx),
-     b AS (SELECT l.token_idx, min(l.file_row_number) AS from_row
-           FROM l JOIN s USING (token_idx) WHERE l.snapshot AND l.recv_ms = s.snap_recv GROUP BY l.token_idx),
-     book AS (SELECT l.token_idx, l.side, l.price, arg_max(l.new_size, l.file_row_number) AS size
-              FROM l JOIN b USING (token_idx) WHERE l.file_row_number >= b.from_row GROUP BY ALL)
-SELECT t.token_id, CASE book.side WHEN 0 THEN 'bid' ELSE 'ask' END AS side,
-       book.price / 1e6 AS price, book.size / 1e6 AS size
-FROM book JOIN read_parquet('archive/<day>/tokens.parquet') t USING (token_idx)
-WHERE book.size > 0
-ORDER BY t.token_id, side, price DESC;
-
--- 3. A day's gaps (shard 'all' = the whole feed)
-SELECT to_timestamp(start_ms / 1000) AS start, (end_ms - start_ms) / 1000 AS secs,
-       coalesce(CAST(shard AS VARCHAR), 'all') AS shard, reason
-FROM read_parquet('archive/<day>/gaps.parquet')
-ORDER BY start_ms;
+     b AS (SELECT l.token_idx, min(l.file_row_number) AS from_row FROM l JOIN s USING (token_idx) WHERE l.snapshot AND l.recv_ms = s.snap_recv GROUP BY l.token_idx),
+     book AS (SELECT l.token_idx, l.side, l.price, arg_max(l.new_size, l.file_row_number) AS size FROM l JOIN b USING (token_idx) WHERE l.file_row_number >= b.from_row GROUP BY ALL)
+SELECT t.token_id, CASE book.side WHEN 0 THEN 'bid' ELSE 'ask' END AS side, book.price / 1e6 AS price, book.size / 1e6 AS size
+FROM book JOIN read_parquet('archive/<YYYY-MM-DD>/tokens.parquet') t USING (token_idx) WHERE book.size > 0 ORDER BY t.token_id, side, price DESC;
+-- 3. the day's gaps ('all' = the whole feed)
+SELECT to_timestamp(start_ms / 1000) AS start, (end_ms - start_ms) / 1000 AS secs, coalesce(CAST(shard AS VARCHAR), 'all') AS shard, reason
+FROM read_parquet('archive/<YYYY-MM-DD>/gaps.parquet') ORDER BY start_ms;
+SQL
 ```
-13. **Exit (spec §1).** On the VPS: every raw hour compacted within about 2 h of closing; the raw folder holds about a day; the archive grows about the benchmark's per-day bytes (spec: ~250–300 MB); `compact verify` passes on the first full day; Health shows the archive size, oldest day and lag; the project stays under 75 GB. Record the date.
-14. **Rollback.** Stop the compactor: `docker compose --profile core stop compact`. For up to 6 h the scanner keeps waiting (uncompacted hours stay, up to the 15 GB cap); once `compact_status` is 6 h old the scanner logs `capture: compactor silent …; retention falls back to age + cap` and is back on today's rule with the new numbers (24 h, 15 GB), every hour it deletes marked `lost` (ruling R10, owner-approved). To return fully to the old code, start the previous image (`cute-trading/rust:<old-sha>`) for the scanner as in the 5a runbook Rollback. Migration 0008, the role, the `archive` volume and its files can stay: the old code never reads them.
-15. **Results.** Blanks for: `GIT_SHA`; the pinned `parquet`/`arrow` version; the benchmark (`ms`, `peak_rss_kb`, rows and bytes per table, `per_day_bytes`, the two agreement tests' line and row counts, the decision); the disk headroom check (`size`, `other_gb`, the result, any budget change); migrate exit and version; the role checks; the first `done` hour and its lag; `docker stats` for `compact`; the raw folder size at deploy and 24 h later; the first merged day, its `verify` output, its bytes per table, `ts_clamped` and `late_rows`; the date.
+→ expected: three result tables (20 top-of-book rows, the book's levels, the gaps with their reasons).
+if not: `duckdb` missing: install the DuckDB CLI on the PC (a standalone binary, not a crate).
 
-- [ ] **Step 2: Commit**
+## Rollback (only if a step above says so)
+
+36. Stop the compactor (the scanner returns to today's rule by itself once `compact_status` is 6 h old).
+```bash
+docker compose --profile core stop compact && docker compose exec -T postgres psql -U ct_owner -d cute_trading -c "ALTER ROLE compact_rw NOLOGIN"
+```
+→ expected: `Stopped`, then `ALTER ROLE`; within 6 h the scanner logs `capture: compactor silent …; retention falls back to age + cap`.
+if not: `docker compose --profile core ps compact` must show it exited; run the stop again.
+
+37. Full rollback: the previous scanner, api and web images (0008 stays: additive, unused by the old code).
+```bash
+docker compose --profile core stop compact scanner && docker tag cute-trading/rust:dev cute-trading/rust:5b && docker tag cute-trading/web:dev cute-trading/web:5b && docker tag cute-trading/rust:pre5b cute-trading/rust:dev && docker tag cute-trading/web:pre5b cute-trading/web:dev && docker compose --profile core up -d --no-build --no-deps scanner && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT version FROM runs WHERE service = 'scanner' ORDER BY run_id DESC LIMIT 1"
+```
+→ expected: the newest scanner run on the pre-5b version (sha).
+if not: the database is unusable (should not happen, 0008 is additive): ask the owner before `pg_restore` of `/root/ct-pre-5b.dump`.
+
+## Results
+
+- `GIT_SHA`: · parquet/arrow version: · checksum test (step 3):
+- Benchmark line (step 10): · agreement counts (step 11): · decision:
+- Disk headroom (step 14) `size` / `other` / budget change:
+- migrate exit / version / grants (steps 21–22): · role (step 23):
+- First `done` hour and its lag (step 28): · status (step 29): · docker stats (step 30):
+- Lost since deploy (step 31): · raw size at +24 h (step 32):
+- First merged day, `verify`, bytes per table, `ts_clamped`, `late_rows` (step 33):
+- 0008 checksum pinned (step 34): · date:
+````
+
+- [ ] **Step 2: Check the format**
+
+```bash
+f=docs/superpowers/runbooks/phase5b-storage-vps.md; grep -c '^→ expected:' $f; grep -c '^```bash' $f; grep -n -i -E '5a runbook|5d runbook|as in 5a|as in 5d' $f || echo self-contained
+```
+Expected: `37`, `37`, `self-contained` (one bash block and one expected line per step, no references to other runbooks).
+
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/runbooks/phase5b-storage-vps.md
