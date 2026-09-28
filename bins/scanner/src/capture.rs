@@ -411,7 +411,7 @@ pub fn spawn(
                     &dir,
                     now,
                     &cfg,
-                    view.as_ref(),
+                    &view,
                     &lost,
                     writer.current_path(),
                 );

@@ -3,7 +3,8 @@
 //! compact_hours fresh and records the hours deleted before they were compacted. Capture never
 //! stalls on the database or on a stopped compactor: with no fresh view, retention is today's rule
 //! (age plus cap), and every deletion made blind is marked lost (a no-op for hours already done:
-//! ON CONFLICT DO NOTHING).
+//! ON CONFLICT DO NOTHING). Before `guard_task`'s first read (scanner start) only the cap applies:
+//! an alive compactor may still need hours past `retention_hours` (final review M2).
 use crate::config::CaptureCfg;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,10 +19,24 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 pub const VIEW_FRESH_MS: i64 = 120_000;
 /// How often `guard_task` re-reads compact_hours (and retries lost marks that failed).
 pub const REFRESH_MS: u64 = 30_000;
-/// How far back `guard_task` reads (24 h retention and a 15 GB cap keep far less on disk).
+/// How far back `guard_task` reads (24 h retention and a 30 GB cap keep far less on disk).
 pub const LOOKBACK_MS: i64 = 14 * 24 * HOUR_MS;
 /// A compactor silent this long is treated as stopped: retention returns to today's rule (§9.5).
 pub const COMPACTOR_STALE_MS: i64 = 6 * HOUR_MS;
+
+/// What retention knows about compaction when it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum View {
+    /// `guard_task` hasn't read compact_hours yet (scanner start): only the cap deletes, so a
+    /// warm start never age-deletes hours an alive compactor still needs.
+    Unread,
+    /// Read, but no fresh view: the compactor is silent or absent, or the database is down (or
+    /// was at the first read). Today's rule: age plus cap.
+    Blind,
+    /// The hours compact_hours records done or lost, read within `VIEW_FRESH_MS` from an alive
+    /// compactor: age deletes only these.
+    Compacted(BTreeSet<i64>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deletion {
@@ -34,9 +49,9 @@ pub struct Deletion {
 }
 
 /// Which hour files to delete, oldest first. Age: past `retention_hours` and compacted (any age
-/// when `compacted` is None, the fallback). Cap: while the capture folder (hours + universe
-/// records) is over `max_bytes`, the oldest remaining hour, whatever its status. `keep` (the file
-/// being written) is never deleted.
+/// when the view is `Blind`, the fallback; none while `Unread`). Cap: while the capture folder
+/// (hours + universe records) is over `max_bytes`, the oldest remaining hour, whatever its status.
+/// `keep` (the file being written) is never deleted.
 pub fn plan(
     hours: &[HourFile],
     universe_bytes: u64,
@@ -44,10 +59,15 @@ pub fn plan(
     retention_hours: i64,
     max_bytes: u64,
     keep: Option<&Path>,
-    compacted: Option<&BTreeSet<i64>>,
+    view: &View,
 ) -> Vec<Deletion> {
     let cutoff = now_ms.saturating_sub(retention_hours.saturating_mul(HOUR_MS));
-    let is_done = |h: i64| compacted.is_some_and(|s| s.contains(&h));
+    let is_done = |h: i64| matches!(view, View::Compacted(s) if s.contains(&h));
+    let age_ok = |h: i64| match view {
+        View::Unread => false,
+        View::Blind => true,
+        View::Compacted(s) => s.contains(&h),
+    };
     let mut sorted: Vec<&HourFile> = hours.iter().collect();
     sorted.sort_by(|a, b| {
         a.start_ms
@@ -65,7 +85,7 @@ pub fn plan(
             continue;
         }
         let old = h.start_ms.saturating_add(HOUR_MS) <= cutoff;
-        if old && (compacted.is_none() || is_done(h.start_ms)) {
+        if old && age_ok(h.start_ms) {
             total = total.saturating_sub(h.bytes);
             out.push(Deletion {
                 path: h.path.clone(),
@@ -107,7 +127,7 @@ pub fn housekeep(
     dir: &Path,
     now_ms: i64,
     cfg: &CaptureCfg,
-    view: Option<&BTreeSet<i64>>,
+    view: &View,
     lost: &UnboundedSender<i64>,
     keep: Option<&Path>,
 ) -> u64 {
@@ -150,31 +170,58 @@ pub fn housekeep(
     n
 }
 
+#[derive(Debug, Default)]
+enum Seen {
+    #[default]
+    Unread,
+    Blind,
+    Read(i64, BTreeSet<i64>),
+}
+
 /// The capture thread's view of compact_hours (done or lost hours) and when it was read.
 #[derive(Debug, Default)]
 pub struct GuardView {
-    inner: Mutex<Option<(i64, BTreeSet<i64>)>>,
+    inner: Mutex<Seen>,
 }
 
 impl GuardView {
     pub fn set(&self, fetched_ms: i64, hours: BTreeSet<i64>) {
         if let Ok(mut g) = self.inner.lock() {
-            *g = Some((fetched_ms, hours));
+            *g = Seen::Read(fetched_ms, hours);
         }
     }
 
     /// Forget the view: retention falls back to today's rule until the next `set`.
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
-            *g = None;
+            *g = Seen::Blind;
         }
     }
 
-    /// The compacted hours, or None (fall back) when never read, cleared, or read over 2 min ago.
-    pub fn get(&self, now_ms: i64) -> Option<BTreeSet<i64>> {
-        let g = self.inner.lock().ok()?;
-        let (t, s) = g.as_ref()?;
-        (now_ms.abs_diff(*t) <= VIEW_FRESH_MS.unsigned_abs()).then(|| s.clone())
+    /// A read failed (the database is down): a view never read becomes `Blind` (today's rule);
+    /// a view already read stays until it goes stale.
+    pub fn read_failed(&self) {
+        if let Ok(mut g) = self.inner.lock()
+            && matches!(*g, Seen::Unread)
+        {
+            *g = Seen::Blind;
+        }
+    }
+
+    /// `Compacted` while read within `VIEW_FRESH_MS`; `Unread` before the first read; `Blind`
+    /// (fall back) when cleared, stale, or after a failed first read. A poisoned lock is `Blind`.
+    pub fn get(&self, now_ms: i64) -> View {
+        let Ok(g) = self.inner.lock() else {
+            return View::Blind;
+        };
+        match &*g {
+            Seen::Unread => View::Unread,
+            Seen::Blind => View::Blind,
+            Seen::Read(t, s) if now_ms.abs_diff(*t) <= VIEW_FRESH_MS.unsigned_abs() => {
+                View::Compacted(s.clone())
+            }
+            Seen::Read(..) => View::Blind,
+        }
     }
 }
 
@@ -251,6 +298,7 @@ pub async fn guard_task(store: Store, view: Arc<GuardView>, mut lost: UnboundedR
                 }
             }
             (Err(e), _) | (_, Err(e)) => {
+                view.read_failed();
                 if !failing {
                     eprintln!(
                         "capture: compact_hours unreadable ({e}); retention falls back to age + cap"
