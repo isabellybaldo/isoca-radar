@@ -11,7 +11,7 @@ use crate::windows::Window;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use tape::line::Line;
@@ -106,6 +106,8 @@ pub struct HourReport {
     pub status: String,
     /// Relative to raw_dir: YYYY-MM-DD/HH.jsonl.zst; None when there was no file.
     pub source_file: Option<String>,
+    /// Size and sha256 of the bytes actually read: the whole file, unless `read_error` reports an
+    /// I/O failure, which stops them at the bytes read before it.
     pub source_bytes: Option<u64>,
     pub source_sha256: Option<String>,
     pub rows: RowCounts,
@@ -114,6 +116,7 @@ pub struct HourReport {
     pub truncated_windows: Vec<String>,
     pub stats: HourStats,
     pub late_rows: u64,
+    /// The first decode or read error of the raw file; the hour is `raw_hour_lost` from there.
     pub read_error: Option<String>,
 }
 
@@ -137,14 +140,52 @@ pub struct HourJob {
     pub stop_before_publish: bool,
 }
 
-/// The five parts of one hour, tob and l2 through the reorder buffers.
+/// A `Reorder` that never changes the order of one token's rows. Each row sorts on
+/// max(recv_ms, the token's previous key), so the reducer's order per token survives even when a
+/// line from another shard stamped rows with a later recv_ms first (a window restart's snapshot
+/// set, a token fed from two shards); the stored recv_ms is unchanged. A late row (key below what
+/// was already written) cannot jump ahead of its own token: a token with rows still buffered has
+/// a key at or above the flush cut, which is above everything written. One key per token seen
+/// this hour (the sink lives for one hour).
+struct TokenOrder<R> {
+    order: Reorder<R>,
+    last: HashMap<u32, i64>,
+}
+
+impl<R> Default for TokenOrder<R> {
+    fn default() -> Self {
+        TokenOrder {
+            order: Reorder::default(),
+            last: HashMap::new(),
+        }
+    }
+}
+
+impl<R> TokenOrder<R> {
+    fn push(
+        &mut self,
+        token_idx: u32,
+        recv_ms: i64,
+        row: R,
+        out: &mut dyn FnMut(R) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let key = self
+            .last
+            .get(&token_idx)
+            .map_or(recv_ms, |k| (*k).max(recv_ms));
+        self.last.insert(token_idx, key);
+        self.order.push(key, row, out)
+    }
+}
+
+/// The five parts of one hour, tob and l2 through the per-token reorder buffers.
 struct PartSink {
     tob: PartWriter<TobRow>,
     depth: PartWriter<DepthRow>,
     l2: PartWriter<L2Row>,
     gaps: PartWriter<GapRow>,
-    tob_order: Reorder<TobRow>,
-    l2_order: Reorder<L2Row>,
+    tob_order: TokenOrder<TobRow>,
+    l2_order: TokenOrder<L2Row>,
     tokens_fin: PathBuf,
 }
 
@@ -155,8 +196,8 @@ impl PartSink {
             depth: PartWriter::create(part_path(day, hh, DepthRow::NAME))?,
             l2: PartWriter::create(part_path(day, hh, L2Row::NAME))?,
             gaps: PartWriter::create(part_path(day, hh, GapRow::NAME))?,
-            tob_order: Reorder::default(),
-            l2_order: Reorder::default(),
+            tob_order: TokenOrder::default(),
+            l2_order: TokenOrder::default(),
             tokens_fin: part_path(day, hh, TokenRow::NAME),
         })
     }
@@ -164,10 +205,10 @@ impl PartSink {
     /// Drain the buffers, write the tokens part, close everything under temporary names.
     fn close(mut self, tokens: &[TokenRow]) -> anyhow::Result<(Vec<Staged>, u64)> {
         let w = &mut self.tob;
-        self.tob_order.drain(&mut |x| w.push(x))?;
+        self.tob_order.order.drain(&mut |x| w.push(x))?;
         let w = &mut self.l2;
-        self.l2_order.drain(&mut |x| w.push(x))?;
-        let late = self.tob_order.late() + self.l2_order.late();
+        self.l2_order.order.drain(&mut |x| w.push(x))?;
+        let late = self.tob_order.order.late() + self.l2_order.order.late();
         let mut t = PartWriter::<TokenRow>::create(self.tokens_fin.clone())?;
         for row in tokens {
             t.push(row.clone())?;
@@ -188,14 +229,16 @@ impl PartSink {
 impl Sink for PartSink {
     fn tob(&mut self, r: TobRow) -> anyhow::Result<()> {
         let w = &mut self.tob;
-        self.tob_order.push(r.recv_ms, r, &mut |x| w.push(x))
+        self.tob_order
+            .push(r.token_idx, r.recv_ms, r, &mut |x| w.push(x))
     }
     fn depth(&mut self, r: DepthRow) -> anyhow::Result<()> {
         self.depth.push(r)
     }
     fn l2(&mut self, r: L2Row) -> anyhow::Result<()> {
         let w = &mut self.l2;
-        self.l2_order.push(r.recv_ms, r, &mut |x| w.push(x))
+        self.l2_order
+            .push(r.token_idx, r.recv_ms, r, &mut |x| w.push(x))
     }
     fn gap(&mut self, r: GapRow) -> anyhow::Result<()> {
         self.gaps.push(r)
@@ -225,8 +268,9 @@ struct SourceInfo {
     read_error: Option<String>,
 }
 
-/// Feed the hour file to the reducer. A file that can't be decoded to the end keeps the lines
-/// before the break and turns the rest of the hour into `raw_hour_lost` (the reducer's `cut`).
+/// Feed the hour file to the reducer. A file that can't be decoded or read to the end keeps the
+/// lines before the break and turns the rest of the hour into `raw_hour_lost` (the reducer's
+/// `cut`); a line that is not a capture line (bad JSON or UTF-8) is only a bad line.
 fn read_hour(
     red: &mut Reducer,
     raw_dir: &Path,
@@ -234,8 +278,28 @@ fn read_hour(
     sink: &mut PartSink,
 ) -> anyhow::Result<SourceInfo> {
     let f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let (bytes, sha256, read_error) = feed(red, raw_dir, f, sink)?;
+    let file = path
+        .strip_prefix(raw_dir)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.display().to_string());
+    Ok(SourceInfo {
+        file,
+        bytes,
+        sha256,
+        read_error,
+    })
+}
+
+/// `read_hour` over any reader: (bytes read, their sha256, the first read error).
+fn feed(
+    red: &mut Reducer,
+    raw_dir: &Path,
+    input: impl Read,
+    sink: &mut PartSink,
+) -> anyhow::Result<(u64, String, Option<String>)> {
     let mut hr = Hashing {
-        inner: f,
+        inner: input,
         h: Sha256::new(),
         n: 0,
     };
@@ -245,18 +309,22 @@ fn read_hour(
         match zstd::Decoder::new(&mut hr) {
             Err(e) => read_error = Some(format!("zstd: {e}")),
             Ok(dec) => {
-                for text in BufReader::new(dec).lines() {
-                    let text = match text {
-                        Ok(t) => t,
+                let mut rd = BufReader::new(dec);
+                let mut buf = Vec::new();
+                loop {
+                    buf.clear();
+                    match rd.read_until(b'\n', &mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
                         Err(e) => {
                             read_error = Some(format!("read: {e}"));
                             break;
                         }
-                    };
-                    if text.trim().is_empty() {
+                    }
+                    if buf.iter().all(u8::is_ascii_whitespace) {
                         continue;
                     }
-                    match serde_json::from_str::<Line>(&text) {
+                    match serde_json::from_slice::<Line>(&buf) {
                         Ok(line) => red.line(&line, &mut load, sink)?,
                         Err(_) => red.count_bad_line(),
                     }
@@ -264,22 +332,16 @@ fn read_hour(
             }
         }
     }
+    // Hash the bytes past a break too: size and sha256 are of the whole file, or of the bytes
+    // read before an I/O error (then the read error, unless one came first). Never fails the hour.
+    if let Err(e) = std::io::copy(&mut hr, &mut std::io::sink()) {
+        read_error.get_or_insert(format!("read: {e}"));
+    }
     if read_error.is_some() {
         red.cut(reason::RAW_HOUR_LOST, sink)?;
     }
-    // hash the bytes past a break too: the sha256 and size are of the whole file
-    std::io::copy(&mut hr, &mut std::io::sink())
-        .with_context(|| format!("read {}", path.display()))?;
-    let file = path
-        .strip_prefix(raw_dir)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| path.display().to_string());
-    Ok(SourceInfo {
-        file,
-        bytes: hr.n,
-        sha256: hr.h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
-        read_error,
-    })
+    let sha256 = hr.h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((hr.n, sha256, read_error))
 }
 
 /// Compact one hour into the archive. `Ok(None)` only when `job.stop_before_publish`.
@@ -368,4 +430,59 @@ pub fn process_hour(red: &mut Reducer, job: &HourJob) -> anyhow::Result<Option<H
     write_atomic(&side, &serde_json::to_vec_pretty(&report)?)
         .with_context(|| format!("publish {}", side.display()))?;
     Ok(Some(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reduce::ReduceCfg;
+
+    /// A raw file whose disk fails: every read errors, with a new message each time.
+    struct Failing(u32);
+
+    impl Read for Failing {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            self.0 += 1;
+            Err(std::io::Error::other(format!("disk error {}", self.0)))
+        }
+    }
+
+    #[test]
+    fn an_io_error_keeps_the_first_error_and_does_not_fail_the_hour() {
+        let day = std::env::temp_dir().join(format!(
+            "compact-unit-ioerr-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(&day).unwrap();
+        let mut red = Reducer::new(ReduceCfg {
+            depth_every_ms: 300_000,
+            depth_levels: 2,
+        });
+        let hour_ms = 1_790_121_600_000;
+        let mut sink = PartSink::create(&day, 0).unwrap();
+        red.begin_hour(hour_ms, vec![]);
+        let (bytes, sha, err) = feed(&mut red, &day, Failing(0), &mut sink).unwrap();
+        assert_eq!(bytes, 0);
+        assert_eq!(sha, crate::config::sha256_hex(&[]));
+        let err = err.unwrap();
+        assert!(
+            err.contains("disk error 1"),
+            "the first error is kept: {err}"
+        );
+        red.end_hour(&mut sink).unwrap();
+        let (staged, _) = sink.close(red.tokens()).unwrap();
+        let gaps = staged
+            .iter()
+            .find(|s| s.fin.ends_with("00.gaps.parquet"))
+            .unwrap();
+        gaps.publish().unwrap();
+        let rows = crate::pq::read_all::<GapRow>(&gaps.fin).unwrap();
+        assert!(
+            rows.iter()
+                .any(|g| g.reason == reason::RAW_HOUR_LOST && g.end_ms == hour_ms + 3_600_000),
+            "{rows:?}"
+        );
+        std::fs::remove_dir_all(&day).ok();
+    }
 }
