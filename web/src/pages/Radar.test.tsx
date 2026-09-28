@@ -65,6 +65,10 @@ describe('Radar', () => {
     expect(within(table).getByText('83')).toBeInTheDocument();
     expect(within(table).getByText('NO')).toBeInTheDocument();
     expect(screen.getByText('ARBITRAGE (YES / NO) · 1')).toBeInTheDocument();
+    // phone card layout hooks: the table and each cell carry the classes the < 600 px CSS lays out
+    expect(table).toHaveClass('arbtable');
+    expect(link.closest('td')).toHaveClass('c-event');
+    expect(within(table).getByText('83').closest('td')).toHaveClass('c-q', 'num');
   });
 
   it('shows a missing $100 figure as not measured, never as zero', async () => {
