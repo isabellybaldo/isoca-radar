@@ -509,6 +509,10 @@ async fn unreadable_checkpoints_stop_compaction_but_not_the_merge_budget_or_stat
             "the stuck budget is reported: {e}"
         );
         assert!(!svc.loaded(), "never a cold start over corrupt checkpoints");
+        assert_eq!(
+            st.lag_hours, 3,
+            "lag from the oldest raw hour's end, not 0: the heart lights"
+        );
         assert!(!day_dir(&arch, T0).exists(), "no hour compacted");
         assert!(
             !day_dir(&arch, T0 - 2 * DAY).exists(),
@@ -552,6 +556,11 @@ async fn a_cold_start_refuses_a_day_that_already_has_published_hours() {
             "{e}"
         );
         assert!(!svc.loaded());
+        assert_eq!(
+            svc.status(T0 + 4 * H).lag_hours,
+            3,
+            "a refused cold start is behind"
+        );
         assert!(
             compact::state::list(&arch).is_empty() && !sidecar_path(&day, 1).exists(),
             "nothing compacted"
@@ -651,6 +660,223 @@ async fn a_first_deploy_mid_day_fills_the_earlier_hours_and_the_day_merges() {
         !read_all::<TobRow>(&daily_path(&day, "tob"))
             .unwrap()
             .is_empty()
+    );
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+// ---- fix round 1 ----
+
+#[test]
+fn with_no_checkpoint_and_no_raw_hour_the_lag_is_above_the_alarm() {
+    let (raw, arch) = (tmp("nolag-raw"), tmp("nolag-arch"));
+    let mut svc = service(&raw, &arch);
+    assert_eq!(svc.status(T0).lag_hours, 4, "lag_alarm_hours 3 + 1");
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn the_status_row_is_written_after_each_hour_of_a_backlog() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch) = (tmp("st-raw"), tmp("st-arch"));
+    raw_hours(&raw, &[0, 1, 2, 3, 4, 5]);
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    assert!(
+        svc.step(&c, T0 + 6 * H).await.unwrap(),
+        "hour 0 (the cold start)"
+    );
+    // in one poll hour 1 goes through and hour 2 fails: the row must already say "hour 1 done"
+    std::fs::create_dir_all(sidecar_path(&day_dir(&arch, T0), 2)).unwrap();
+    let stop = AtomicBool::new(false);
+    let clock = std::cell::Cell::new(T0 + 6 * H);
+    let st = svc
+        .poll(
+            &c,
+            || {
+                clock.set(clock.get() + 1_000);
+                clock.get()
+            },
+            &stop,
+        )
+        .await;
+    assert!(st.last_error.is_some(), "hour 2 failed");
+    let row = owner
+        .compact_status()
+        .await
+        .unwrap()
+        .expect("written by poll");
+    assert_eq!(
+        row.last_error, None,
+        "written after hour 1, before hour 2 failed"
+    );
+    assert_eq!(row.lag_hours, 4, "next hour 2 at T0+6h");
+    assert!(row.updated_ms < st.updated_ms);
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn consecutive_missing_hours_share_one_grace() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch) = (tmp("grace-raw"), tmp("grace-arch"));
+    raw_hours(&raw, &[0, 4, 5]);
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    let t = T0 + 6 * H;
+    assert!(svc.step(&c, t).await.unwrap(), "hour 0");
+    assert!(!svc.step(&c, t).await.unwrap(), "hour 1: the grace starts");
+    assert!(!svc.step(&c, t + 299_999).await.unwrap());
+    for h in 1..=3 {
+        assert!(
+            svc.step(&c, t + 300_000).await.unwrap(),
+            "hour {h} inside the same grace"
+        );
+    }
+    assert_eq!(svc.next_hour(), Some(T0 + 4 * H));
+    let st = owner
+        .compact_hour_statuses(T0 + H, T0 + 4 * H)
+        .await
+        .unwrap();
+    assert_eq!(st.iter().filter(|(_, s)| s == "done").count(), 3);
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn a_database_failure_restarts_the_grace() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch) = (tmp("regrace-raw"), tmp("regrace-arch"));
+    raw_hours(&raw, &[0, 2, 3]);
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    let t = T0 + 4 * H;
+    assert!(svc.step(&c, t).await.unwrap(), "hour 0");
+    assert!(!svc.step(&c, t).await.unwrap(), "hour 1: the grace starts");
+    c.close().await;
+    assert!(
+        svc.step(&c, t + 100_000).await.is_err(),
+        "the database is gone"
+    );
+    let c = compact_store(&db).await;
+    assert!(
+        !svc.step(&c, t + 300_000).await.unwrap(),
+        "a new grace from the first good read"
+    );
+    assert!(!svc.step(&c, t + 599_999).await.unwrap());
+    assert!(svc.step(&c, t + 600_000).await.unwrap());
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn an_archived_hour_whose_raw_file_is_gone_is_never_redone_as_a_gap() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch) = (tmp("keep-raw"), tmp("keep-arch"));
+    raw_hours(&raw, &[0, 1, 2, 3]);
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    assert!(svc.step(&c, T0 + 4 * H).await.unwrap());
+    assert!(svc.step(&c, T0 + 4 * H).await.unwrap());
+    // the newest checkpoint (hour 1) is corrupt, so a restart resumes at hour 1; its raw is gone
+    let (_, newest) = compact::state::list(&arch).pop().unwrap();
+    std::fs::write(&newest, b"garbage").unwrap();
+    std::fs::remove_file(tape::files::hour_path(&raw, T0 + H)).unwrap();
+    let day = day_dir(&arch, T0);
+    let before = (
+        std::fs::read(sidecar_path(&day, 1)).unwrap(),
+        std::fs::read(part_path(&day, 1, "tob")).unwrap(),
+    );
+    let mut again = service(&raw, &arch);
+    for now in [T0 + 4 * H, T0 + 5 * H] {
+        let e = format!("{:#}", again.step(&c, now).await.unwrap_err());
+        assert!(e.contains("refusing to redo 2026-09-23T01"), "{e}");
+    }
+    let after = (
+        std::fs::read(sidecar_path(&day, 1)).unwrap(),
+        std::fs::read(part_path(&day, 1, "tob")).unwrap(),
+    );
+    assert!(before == after, "the archived hour is untouched");
+    assert_eq!(
+        owner
+            .compact_hour_statuses(T0 + H, T0 + 2 * H)
+            .await
+            .unwrap(),
+        vec![(T0 + H, "done".to_string())]
+    );
+    c.close().await;
+    db.drop(owner).await;
+    std::fs::remove_dir_all(&raw).ok();
+    std::fs::remove_dir_all(&arch).ok();
+}
+
+#[tokio::test]
+async fn a_missed_hour_row_is_retried_before_the_next_hour_and_rewritten_at_load() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let (raw, arch) = (tmp("pend-raw"), tmp("pend-arch"));
+    raw_hours(&raw, &[0, 1, 2, 3]);
+    let c = compact_store(&db).await;
+    let mut svc = service(&raw, &arch);
+    let now = T0 + 4 * H;
+    assert!(svc.step(&c, now).await.unwrap(), "hour 0");
+    owner
+        .raw_exec("REVOKE INSERT, UPDATE ON compact_hours FROM compact_rw")
+        .await
+        .unwrap();
+    assert!(
+        svc.step(&c, now).await.is_err(),
+        "hour 1 archived, its row refused"
+    );
+    assert!(
+        svc.loaded(),
+        "the checkpoint is durable: the reducer is kept"
+    );
+    assert_eq!(svc.next_hour(), Some(T0 + 2 * H));
+    assert_eq!(compact::state::list(&arch).last().unwrap().0, T0 + H);
+    assert_eq!(
+        owner
+            .compact_hour_statuses(T0, T0 + 4 * H)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    owner
+        .raw_exec("GRANT INSERT, UPDATE ON compact_hours TO compact_rw")
+        .await
+        .unwrap();
+    // hour 2 is not ready (no hour-4 file): the step only retries the row
+    assert!(!svc.step(&c, now).await.unwrap());
+    assert_eq!(
+        owner.compact_hour_statuses(T0, T0 + 4 * H).await.unwrap(),
+        vec![(T0, "done".to_string()), (T0 + H, "done".to_string())]
+    );
+    // a restart re-records the checkpoint's hour
+    owner.raw_exec("DELETE FROM compact_hours").await.unwrap();
+    let mut again = service(&raw, &arch);
+    assert!(!again.step(&c, now).await.unwrap());
+    assert_eq!(
+        owner.compact_hour_statuses(T0, T0 + 4 * H).await.unwrap(),
+        vec![(T0 + H, "done".to_string())]
     );
     c.close().await;
     db.drop(owner).await;

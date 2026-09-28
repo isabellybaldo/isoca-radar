@@ -226,21 +226,27 @@ impl Service {
             return Ok(false);
         }
         let (from, to) = query_range(next, &self.cfg);
-        let eps = store
-            .compact_episodes(from, to)
-            .await
-            .context("read episodes")?;
+        let eps = match store.compact_episodes(from, to).await {
+            Ok(e) => e,
+            Err(e) => return Err(self.db_failed(e, "read episodes")),
+        };
         let windows = windows_for_hour(&eps, next, &self.cfg);
         let source = match listing.hours.iter().find(|h| h.start_ms == next) {
             Some(h) => Source::File(h.path.clone()),
-            // listed before, gone now: only the scanner deletes raw hours (its mark may be in flight)
-            None if self.seen.contains(&next) => Source::Lost,
             None => {
-                let st = store
-                    .compact_hour_statuses(next, next + HOUR_MS)
-                    .await
-                    .context("read compact_hours")?;
-                if st.iter().any(|(_, s)| s == "lost") {
+                let st = match store.compact_hour_statuses(next, next + HOUR_MS).await {
+                    Ok(s) => s,
+                    Err(e) => return Err(self.db_failed(e, "read compact_hours")),
+                };
+                // never overwrite an hour archived from its raw file with a gap
+                keep_archived(&self.archive, next)?;
+                if self.seen.contains(&next) {
+                    // listed before, gone now: only the scanner deletes raw hours (its mark may be
+                    // in flight), once the file is really gone, not a day folder that failed to list
+                    let p = tape::files::hour_path(&self.raw, next);
+                    confirm_gone(std::fs::metadata(&p).map(|_| ()), &p)?;
+                    Source::Lost
+                } else if st.iter().any(|(_, s)| s == "lost") {
                     Source::Lost
                 } else if self.first_file.is_some_and(|f| next < f) {
                     // before the first file this service ever saw: nothing can be in flight
@@ -256,6 +262,8 @@ impl Service {
                     if now_ms.saturating_sub(since) < MISSING_GRACE_MS {
                         return Ok(false);
                     }
+                    // one grace per run of consecutive missing hours: the next one inherits it
+                    self.missing_since = Some((next + HOUR_MS, since));
                     Source::Stopped
                 }
             }
@@ -314,6 +322,23 @@ impl Service {
         Ok(true)
     }
 
+    /// A database read failed: the scanner's lost marks may be held back by the same outage, so a
+    /// running grace starts again once reads work.
+    fn db_failed(&mut self, e: store::StoreError, what: &'static str) -> anyhow::Error {
+        self.missing_since = None;
+        anyhow::Error::from(e).context(what)
+    }
+
+    /// Write compact_status now (spec 5: after each hour and each merge). A failed write is
+    /// logged and shown in last_error; it never fails the hour.
+    async fn write_status(&mut self, store: &Store, now_ms: i64) {
+        let st = self.status(now_ms);
+        if let Err(e) = store.compact_status_put(&st).await {
+            eprintln!("compact: status not written: {e:#}");
+            self.last_error = Some(format!("status not written: {e:#}"));
+        }
+    }
+
     /// Merge every complete day and keep the archive under its budget. Never fails: merge
     /// failures and a budget stuck over its limit go to the status row's last_error.
     pub async fn maintain(&mut self) {
@@ -363,9 +388,10 @@ impl Service {
         self.archive_error = (!problems.is_empty()).then(|| problems.join("; "));
     }
 
-    /// One poll (spec §4, §5): compact every ready hour (merging after each one), stopping at the
-    /// first error, which goes to last_error and is retried next poll; then merge and enforce the
-    /// budget at least once whatever happened; then the status row to write.
+    /// One poll (spec §4, §5): compact every ready hour (merging, then writing compact_status after
+    /// each one), stopping at the first error, which goes to last_error and is retried next poll;
+    /// then merge and enforce the budget at least once whatever happened; then the status row for
+    /// the caller to write.
     pub async fn poll(
         &mut self,
         store: &Store,
@@ -379,6 +405,7 @@ impl Service {
                     self.last_error = None;
                     self.maintain().await;
                     maintained = true;
+                    self.write_status(store, now()).await;
                 }
                 Ok(false) => {
                     self.last_error = None;
@@ -398,12 +425,26 @@ impl Service {
         self.status(now())
     }
 
+    /// Whole hours behind: from the next hour to compact; with none loaded (a refused cold start,
+    /// unreadable checkpoints), from the end of the oldest raw hour on disk, so a stuck compactor
+    /// lights the lag heart; with no raw hour either, just above lag_alarm_hours.
+    fn lag_hours(&self, now_ms: i64) -> i64 {
+        let behind = |end: i64| now_ms.saturating_sub(end).div_euclid(HOUR_MS).max(0);
+        match self.next_hour {
+            Some(n) => behind(n),
+            None => tape::files::listing(&self.raw)
+                .hours
+                .first()
+                .map_or(self.cfg.lag_alarm_hours + 1, |h| {
+                    behind(h.start_ms + HOUR_MS)
+                }),
+        }
+    }
+
     /// The compact_status row (spec §5). Lag = whole hours between the end of the last compacted
     /// hour and now (1–2 in steady state). last_error joins the hour, recovery and archive errors.
     pub fn status(&mut self, now_ms: i64) -> CompactStatusRow {
-        let lag = self
-            .next_hour
-            .map_or(0, |n| now_ms.saturating_sub(n).div_euclid(HOUR_MS).max(0));
+        let lag = self.lag_hours(now_ms);
         if lag > self.cfg.lag_alarm_hours && !self.lag_alarm {
             eprintln!(
                 "compact: {lag} h behind (lag_alarm_hours {}): raw hours are at risk",
@@ -425,6 +466,50 @@ impl Service {
     }
 }
 
+/// An hour listed earlier and missing now: only a file that is really gone (`NotFound`) is lost.
+/// A file still there (its day folder failed to list) or any other error is retried next poll.
+pub fn confirm_gone(stat: std::io::Result<()>, path: &Path) -> anyhow::Result<()> {
+    match stat {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => anyhow::bail!(
+            "{} was not listed but still exists (its day folder could not be read?); retrying",
+            path.display()
+        ),
+        Err(e) => {
+            Err(e).with_context(|| format!("stat {} (listed before, missing now)", path.display()))
+        }
+    }
+}
+
+/// Refuse to redo an hour with no raw file when the archive already holds it from its raw file
+/// (a sidecar with a source file, or a merged day): e.g. resumed from an older checkpoint after
+/// the newest one was corrupt, with the raw hour deleted since. Redoing it would replace archived
+/// rows with a gap.
+fn keep_archived(archive_dir: &Path, hour_ms: i64) -> anyhow::Result<()> {
+    let day = archive::day_dir(archive_dir, hour_ms);
+    let side = archive::sidecar_path(&day, archive::hour_number(hour_ms));
+    let merged = archive::merged(&day);
+    let from_file = match std::fs::read(&side) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("read {}", side.display())),
+        // unparsable: assume it holds data (a visible error beats a silent overwrite)
+        Ok(b) => serde_json::from_slice::<HourReport>(&b).map_or(true, |r| r.source_file.is_some()),
+    };
+    anyhow::ensure!(
+        !merged && !from_file,
+        "refusing to redo {}: it is already archived from its raw file ({}), but the raw file is \
+         gone (resumed from an older checkpoint?); the archived hour is kept: restore the newest \
+         checkpoint or the raw file",
+        hour_label(hour_ms),
+        if merged {
+            day.display()
+        } else {
+            side.display()
+        }
+    );
+    Ok(())
+}
+
 /// `Merged::failed` as one message, or None.
 fn failures(failed: &[(String, String)]) -> Option<String> {
     (!failed.is_empty()).then(|| {
@@ -434,4 +519,23 @@ fn failures(failed: &[(String, String)]) -> Option<String> {
             .collect::<Vec<_>>()
             .join("; ")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_file_that_is_really_gone_counts_as_gone() {
+        let p = Path::new("raw/2026-09-23/01.jsonl.zst");
+        assert!(confirm_gone(Err(std::io::ErrorKind::NotFound.into()), p).is_ok());
+        let e = confirm_gone(Ok(()), p).unwrap_err().to_string();
+        assert!(e.contains("still exists"), "{e}");
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(confirm_gone(Err(kind.into()), p).is_err(), "{kind:?}");
+        }
+    }
 }
