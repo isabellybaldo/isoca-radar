@@ -3,7 +3,9 @@
 //! layout, and the scanner engine's book rules (`feed`, Tasks 2–3).
 #![forbid(unsafe_code)]
 
+pub mod feed;
 pub mod files;
 pub mod frame;
 pub mod line;
 pub mod time;
+pub mod universe_view;

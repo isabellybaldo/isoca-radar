@@ -62,9 +62,7 @@ impl Plan {
     }
 }
 
-pub fn canary_key(market_id: &str) -> String {
-    format!("canary:{market_id}")
-}
+pub use tape::universe_view::canary_key;
 
 pub fn units(u: &Universe, rates: &HashMap<String, u64>) -> Vec<Unit> {
     let mut out = Vec::new();
