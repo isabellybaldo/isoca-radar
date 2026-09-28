@@ -115,13 +115,13 @@ A day can be verified, or rebuilt while its raw hours still exist.
 - **Atomic writes:** each hour's parts are written under temporary names and renamed when complete. Only then does the `compact_hours` row become `done`. Re-running an hour overwrites its parts, so re-runs are idempotent.
 - **The scanner's retention changes:**
   - It deletes a raw hour file older than `retention_hours` (**24**) only if `compact_hours` has it as `done`, or as `lost`.
-  - When the capture folder exceeds `max_capture_gb` (**15**), the scanner may delete the oldest hour **whatever its status**, and then inserts it as `lost` (`ON CONFLICT DO NOTHING`) and logs `capture: hour <H> deleted before compaction (disk cap)`.
+  - When the capture folder exceeds `max_capture_gb` (**30**, about 24 h of capture at 25–33 GB a day), the scanner may delete the oldest hour **whatever its status**, and then inserts it as `lost` (`ON CONFLICT DO NOTHING`) and logs `capture: hour <H> deleted before compaction (disk cap)`.
   - The compactor writes a `gaps` row with reason `raw_hour_lost` for every `lost` hour it passes over.
   - If the database is unreachable, the scanner falls back to today's rule (age plus cap) and logs it: capture must never stall on the database.
 
 ### 4.4 Daily merge and the budget
 - **Daily merge:** when all 24 hours of a UTC day are `done` or `lost`, the compactor merges the hourly parts into the daily files, writes `manifest.json`, checks the row counts, then deletes the hourly parts.
-- **Budget:** after each merge, if `archive_bytes` exceeds **55 GB** (config), whole days are deleted oldest first until it's under, each deletion logged, and `oldest_day` is updated. 55 GB plus about 15 GB of raw capture plus the database (about 0.6 GB) stays inside the 75 GB ceiling.
+- **Budget:** after each merge, if `archive_bytes` exceeds **40 GB** (config), whole days are deleted oldest first until it's under, each deletion logged, and `oldest_day` is updated. 40 GB plus about 30 GB of raw capture plus the database (about 0.6 GB) stays inside the 75 GB ceiling.
 
 ### 4.5 Universe snapshots written only when they change (scanner)
 - **The change:** the scanner writes a universe record (`universe-<taken_ms>-<seq>.json.zst`, 9.3 MB each) only when its content hash differs from the last written one. Today it writes one at every refresh (about 2.7 GB a day).
@@ -157,12 +157,12 @@ A day can be verified, or rebuilt while its raw hours still exist.
 - `raw_dir`, `archive_dir`;
 - `depth_every_secs = 300`, `depth_levels = 10`;
 - `l2_before_secs = 300`, `l2_after_secs = 300`, `l2_max_window_secs = 1800`;
-- `archive_budget_gb = 55`;
+- `archive_budget_gb = 40`;
 - `lag_alarm_hours = 3`.
 
 It's validated at startup. Its sha256 goes into the manifest.
 
-**`config/scanner.toml`:** `retention_hours = 24`, `max_capture_gb = 15`.
+**`config/scanner.toml`:** `retention_hours = 24`, `max_capture_gb = 30`.
 
 None of these values are premise inputs. That must be checked (premise sections and `premises.lock` untouched), and the plan includes the check.
 
@@ -206,6 +206,7 @@ This goes after the current 5d redeploy and the other agent's frontend changes.
 - **D5:** the scanner may still delete an uncompacted hour at the hard cap. Capture never stalls; the loss is recorded.
 - **D6:** no archive UI or query service now. DuckDB on the PC reads it.
 - **D7:** `parquet` and `arrow` approved by the owner, 2026-09-27.
+- **D8:** raw cap 30 GB and archive budget 40 GB (owner, 2026-09-28): 15 GB held only about 12 h of capture, not the day §1 asks for. Before the scanner's first read of `compact_hours` only the cap deletes, so a restart never age-deletes hours an alive compactor still needs.
 
 ## 11. Open items for the plan
 

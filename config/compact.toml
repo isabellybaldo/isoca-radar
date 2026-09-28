@@ -7,5 +7,5 @@ depth_levels = 10               # D3: top 10 levels per side, only tokens whose 
 l2_before_secs = 300            # D2: l2 from 5 min before a net-positive arbitrage episode opens
 l2_after_secs = 300             # … to 5 min after it closes
 l2_max_window_secs = 1800       # … capped at 30 min (flagged as truncated in the manifest)
-archive_budget_gb = 55          # §4.4: 55 GB archive + ~15 GB raw + ~0.6 GB database < 75 GB
+archive_budget_gb = 40          # §4.4: 40 GB archive + ~30 GB raw + ~0.6 GB database < 75 GB
 lag_alarm_hours = 3             # §5: the compactor logs (and the dashboard loses a heart) above this

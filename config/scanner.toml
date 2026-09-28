@@ -44,7 +44,7 @@ dir = "/data/capture"
 pause_below_gb = 10             # spec §8.1.2
 resume_above_gb = 15
 retention_hours = 24            # spec 5b §4.3: kept ~a day, deleted by age only once compacted (compact_hours)
-max_capture_gb = 15             # hard cap: deletes the oldest hour whatever its status and marks it lost (spec 5b §4.3)
+max_capture_gb = 30             # ~24 h of capture (25–33 GB/day compressed); hard cap: deletes the oldest hour whatever its status and marks it lost (spec 5b §4.3)
 
 [breaker]
 max_starts = 5                  # spec §8.1.2

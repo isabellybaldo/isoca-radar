@@ -109,12 +109,12 @@ if not: check the key path is quoted with forward slashes and the port is 50158.
 
 ## On the VPS: deploy
 
-15. Disk headroom: with the project at its 75 GB ceiling the disk must keep ≥ 20 GB free (capture pauses below 10 GB free).
+15. Disk headroom: with the project at its 75 GB ceiling (40 archive + 30 raw + ~1 database + images) the disk (~96 GB) must keep ≥ 20 GB free (capture pauses below 10 GB free).
 ```bash
 cd /home/isoca/projects/cute-trading && df -BG --output=size,used,avail /var/lib/docker | tail -1 && du -s --block-size=1G /var/lib/docker/volumes/cute-trading_* | awk '{s += $1} END {print "project_gb", s}'
 ```
 → expected: `<size>G <used>G <avail>G` then `project_gb <p>`; with `other = used − p`, `size − other − 75 ≥ 20`.
-if not: set `archive_budget_gb = size − other − 36` (rounded down, ≥ 1) in `config/compact.toml` on the PC, commit, redo steps 7–14.
+if not: set `archive_budget_gb = size − other − 51` (20 free + 30 raw + 1 database; rounded down, ≥ 1) in `config/compact.toml` on the PC, commit, redo steps 7–14.
 **STOP**
 
 16. Rollback tags on the current images (before step 18's load moves `:dev`).
@@ -276,14 +276,14 @@ if not: memory near the limit: report the line with step 11's `peak_rss_kb`.
 cd /home/isoca/projects/cute-trading && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*) FROM compact_hours WHERE status = 'lost' AND done_ms > $(cat /root/5b_deploy_ms)"; docker compose --profile core logs scanner 2>&1 | grep -c 'deleted before compaction'
 ```
 → expected: `0` then `0`.
-if not: the compactor is too slow for the 15 GB cap: report the lag (step 31) and `docker stats` (step 33).
+if not: the compactor is too slow for the 30 GB cap: report the lag (step 31) and `docker stats` (step 33).
 
 35. Raw capture stays under its cap (run 24 h after step 25).
 ```bash
 du -sh /var/lib/docker/volumes/cute-trading_data/_data/capture && ls /var/lib/docker/volumes/cute-trading_data/_data/capture/$(date -u +%F) | grep -c universe-
 ```
-→ expected: under 15G (never over), then a count far below 12 per hour elapsed today.
-if not: over 15G means the cap isn't enforced: report the scanner log's `capture:` lines.
+→ expected: under 28G (`du -h` shows GiB: 30 GB = 27.9G; never over; ~24 h of hours), then a count far below 12 per hour elapsed today.
+if not: over 28G means the cap isn't enforced: report the scanner log's `capture:` lines.
 
 36. The first merged day (yesterday merges during the catch-up if the first raw hour was yesterday's; otherwise ~01:00–02:00 UTC the next day).
 ```bash

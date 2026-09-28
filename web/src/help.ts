@@ -77,7 +77,7 @@ export const HELP = {
   },
   archive: {
     title: 'What is the archive?',
-    text: 'Raw capture is kept for about a day. Every closed hour is reduced to compact tables (top of book, depth every 5 minutes, full detail around arbitrage episodes, and the stretches where data is missing) and kept for months inside a 55 GB budget, oldest days deleted first. Lag is how many hours the compactor is behind; above 3, raw hours may be deleted before they are reduced, and a heart is lost.',
+    text: 'Raw capture is kept for about a day. Every closed hour is reduced to compact tables (top of book, depth every 5 minutes, full detail around arbitrage episodes, and the stretches where data is missing) and kept for months inside a 40 GB budget, oldest days deleted first. Lag is how many hours the compactor is behind; above 3, raw hours may be deleted before they are reduced, and a heart is lost.',
   },
   perMinute: {
     title: 'What is in the per-minute row?',
