@@ -75,6 +75,10 @@ export const HELP = {
     title: 'What is capture?',
     text: 'The scanner keeps a compressed copy of every raw message for replay. It pauses when the disk budget is tight and deletes the oldest hours first, so the budget is never exceeded.',
   },
+  archive: {
+    title: 'What is the archive?',
+    text: 'Raw capture is kept for about a day. Every closed hour is reduced to compact tables (top of book, depth every 5 minutes, full detail around arbitrage episodes, and the stretches where data is missing) and kept for months inside a 55 GB budget, oldest days deleted first. Lag is how many hours the compactor is behind; above 3, raw hours may be deleted before they are reduced, and a heart is lost.',
+  },
   perMinute: {
     title: 'What is in the per-minute row?',
     text: 'The latest health minute: connections, messages, drops, reconnects, feed lag and REST timings. If it is old, the scanner is not reporting and everything else on the page may be stale.',

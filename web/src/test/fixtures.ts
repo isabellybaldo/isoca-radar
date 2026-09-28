@@ -8,6 +8,8 @@ export function healthFixture(o: Partial<HealthNow> = {}): HealthNow {
     now_ms: 1_790_000_000_000, age_ms: 30_000, run_id: 3, minute_ms: 1_789_999_940_000, tokens: 4000, shards: 40,
     parked_shards: 0, msgs: 258_000, drops: 0, drops_5m: 0, reconnects: 0, lag_p50_ms: 78, lag_p99_ms: 1900,
     rest_p50_ms: 80, rest_p99_ms: 300, clock_offset_ms: 3, ok: true, capture_paused: false, dropped_groups: 0,
+    archive_bytes: 12_400_000_000, archive_oldest_day: '2026-09-28', compact_lag_hours: 1, compact_last_error: null,
+    compact_age_ms: 600_000, compact_started_ms: 1_789_964_000_000,
     ...o,
   };
 }

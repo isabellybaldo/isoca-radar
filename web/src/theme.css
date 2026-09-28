@@ -83,6 +83,7 @@ tr.dim td { color: var(--dim); }
 .title { font-family: var(--px); font-size: 12px; line-height: 1.6; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; }
 .kv dt { color: var(--dim); }
+.kv dd.trunc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .seg { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
 .seg button { font-family: var(--px); font-size: 7px; padding: 4px 6px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; }
 .seg button.on { background: var(--accent); color: var(--accentfg); }

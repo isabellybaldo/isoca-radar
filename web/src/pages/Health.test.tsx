@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { healthFixture, healthPointFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
-import { Health, NO_HEALTH_ROWS } from './Health';
+import { Health, NO_ARCHIVE, NO_HEALTH_ROWS } from './Health';
 
 function Loc() {
   return <output data-testid="loc">{useLocation().search}</output>;
@@ -105,5 +105,31 @@ describe('Health', () => {
     const bars = [...container.querySelectorAll('.cb-bar')] as HTMLElement[];
     expect(bars[0].style.width).toBe('100%');
     expect(bars[1].style.width).toBe('50%');
+  });
+
+  it('shows the archive size, oldest day, compactor lag and last error', async () => {
+    mockApi({
+      '/api/health/now': {
+        health: healthFixture({ archive_bytes: 12_345_678_901, archive_oldest_day: '2026-09-28', compact_lag_hours: 4, compact_last_error: 'read episodes: timeout', compact_age_ms: 120_000 }),
+      },
+      '/api/health/series': { from_ms: 0, to_ms: 1, points: [] },
+      '/api/integrity/summary': integrity,
+    });
+    renderAt('/health');
+    expect(await screen.findByText('12.3 GB')).toBeInTheDocument();
+    expect(screen.getByText('2026-09-28')).toBeInTheDocument();
+    expect(screen.getByText('4 h')).toBeInTheDocument();
+    expect(screen.getByText('BEHIND')).toBeInTheDocument();
+    expect(screen.getByText('read episodes: timeout')).toBeInTheDocument();
+  });
+
+  it('says so when the compactor has not reported yet', async () => {
+    mockApi({
+      '/api/health/now': { health: healthFixture({ archive_bytes: null, archive_oldest_day: null, compact_lag_hours: null, compact_last_error: null, compact_age_ms: null, compact_started_ms: null }) },
+      '/api/health/series': { from_ms: 0, to_ms: 1, points: [] },
+      '/api/integrity/summary': integrity,
+    });
+    renderAt('/health');
+    expect(await screen.findByText(NO_ARCHIVE)).toBeInTheDocument();
   });
 });
