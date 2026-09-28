@@ -280,10 +280,10 @@ if not: the compactor is too slow for the 30 GB cap: report the lag (step 31) an
 
 35. Raw capture stays under its cap (run 24 h after step 25).
 ```bash
-du -sh /var/lib/docker/volumes/cute-trading_data/_data/capture && ls /var/lib/docker/volumes/cute-trading_data/_data/capture/$(date -u +%F) | grep -c universe-
+du -sb /var/lib/docker/volumes/cute-trading_data/_data/capture | awk '{print ($1 <= 30000000000) ? "cap-ok" : "OVER"}' && ls /var/lib/docker/volumes/cute-trading_data/_data/capture/$(date -u +%F) | grep -c universe-
 ```
-→ expected: under 28G (`du -h` shows GiB: 30 GB = 27.9G; never over; ~24 h of hours), then a count far below 12 per hour elapsed today.
-if not: over 28G means the cap isn't enforced: report the scanner log's `capture:` lines.
+→ expected: `cap-ok`, then a count far below 12 per hour elapsed today.
+if not: `OVER` means the cap isn't enforced: report the scanner log's `capture:` lines.
 
 36. The first merged day (yesterday merges during the catch-up if the first raw hour was yesterday's; otherwise ~01:00–02:00 UTC the next day).
 ```bash
