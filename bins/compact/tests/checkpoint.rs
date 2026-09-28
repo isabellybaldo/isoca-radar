@@ -135,3 +135,42 @@ fn load_newest_errs_when_every_checkpoint_is_corrupt() {
     std::fs::remove_dir_all(&raw).ok();
     std::fs::remove_dir_all(&arch).ok();
 }
+
+#[test]
+fn a_streamed_checkpoint_is_zstd_json_and_an_old_one_still_loads() {
+    let (raw, arch) = (tmp("fmt-raw"), tmp("fmt-arch"));
+    three_hours(&raw);
+    let mut red = Reducer::new(rcfg());
+    let rep = process_hour(&mut red, &hour_job(&raw, &arch, 0))
+        .unwrap()
+        .unwrap();
+    let cp = state::Checkpoint {
+        hour_ms: T0,
+        report: rep,
+        reducer: red.state(),
+    };
+    state::save(&arch, &cp).unwrap();
+    let p = state::list(&arch)[0].1.clone();
+    let json = zstd::decode_all(std::fs::read(&p).unwrap().as_slice()).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<state::Checkpoint>(&json).unwrap(),
+        cp,
+        "the same on-disk format: one zstd frame of the checkpoint's JSON"
+    );
+    // a checkpoint written the pre-streaming way (whole JSON, then encode_all) loads
+    let old = state::Checkpoint {
+        hour_ms: T0 + H,
+        ..cp.clone()
+    };
+    let z = zstd::encode_all(serde_json::to_vec(&old).unwrap().as_slice(), 3).unwrap();
+    std::fs::write(
+        arch.join(state::STATE_DIR)
+            .join(format!("checkpoint-{}.bin.zst", T0 + H)),
+        z,
+    )
+    .unwrap();
+    assert_eq!(state::load_newest(&arch).unwrap().unwrap(), old);
+    for d in [&raw, &arch] {
+        std::fs::remove_dir_all(d).ok();
+    }
+}

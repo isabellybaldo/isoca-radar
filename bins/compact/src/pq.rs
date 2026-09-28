@@ -46,10 +46,19 @@ pub fn tmp_of(fin: &Path) -> PathBuf {
 /// Write `bytes` under a temporary name, `fsync` it, then rename over `path` and `fsync` the
 /// directory (never a half-written file, and durable across a crash right after the rename).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with(path, |w| w.write_all(bytes))
+}
+
+/// `write_atomic` with the content streamed by `write` (buffered) instead of held in memory.
+pub fn write_atomic_with(
+    path: &Path,
+    write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let tmp = tmp_of(path);
     {
-        let mut f = File::create(&tmp)?;
-        f.write_all(bytes)?;
+        let mut w = std::io::BufWriter::new(File::create(&tmp)?);
+        write(&mut w)?;
+        let f = w.into_inner().map_err(|e| e.into_error())?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;

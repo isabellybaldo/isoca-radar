@@ -31,9 +31,13 @@ enum Cmd {
         #[arg(long)]
         archive: Option<PathBuf>,
     },
-    /// Compact one raw hour file with no database; print time, rows, bytes and peak memory.
+    /// Compact one raw hour file with no database, checkpoint, reload, compact the next hour
+    /// (or the same one again); print time, rows, bytes and peak memory.
     Bench {
         hour_file: PathBuf,
+        /// The hour to compact from the loaded checkpoint (default: `hour_file` again).
+        #[arg(long)]
+        next: Option<PathBuf>,
         #[arg(long, default_value = "/tmp/compact-bench")]
         out: PathBuf,
     },
@@ -68,8 +72,15 @@ async fn real_main() -> anyhow::Result<()> {
             }
             anyhow::bail!("verify {day}: {} problem(s)", problems.len())
         }
-        Cmd::Bench { hour_file, out } => {
-            println!("{}", compact::bench::bench(&cfg, &hour_file, &out)?);
+        Cmd::Bench {
+            hour_file,
+            next,
+            out,
+        } => {
+            println!(
+                "{}",
+                compact::bench::bench(&cfg, &hour_file, next.as_deref(), &out)?
+            );
             Ok(())
         }
     }

@@ -83,7 +83,7 @@ if not: check the scp line's key path (quoted, forward slashes).
 ```bash
 H=$(cd "$HOME/bench" && ls */*.jsonl.zst) && MSYS_NO_PATHCONV=1 docker run --rm --cpus 0.25 --memory 256m -v "$(cygpath -m "$HOME/bench"):/bench:ro" -v ct-bench-out:/archive --entrypoint /usr/local/bin/compact cute-trading/rust:dev bench "/bench/$H" --out /archive/bench; docker volume rm ct-bench-out
 ```
-→ expected: `bench: <day>/<HH>.jsonl.zst <ms> ms, … per_day_bytes=<n> …, peak_rss_kb=<n>` with `<ms>` < 600000 and `peak_rss_kb` < 200000, then `ct-bench-out`; write the line in Results.
+→ expected: `bench: <day>/<HH>.jsonl.zst <ms> ms, … per_day_bytes=<n> …, checkpoint_bytes=<n>, then <day>/<HH>.jsonl.zst from the loaded checkpoint <ms2> ms, peak_rss_kb=<n>` with `<ms>` < 600000 and `peak_rss_kb` < 200000 (the hour, its checkpoint and a second pass from it), then `ct-bench-out`; write the line in Results.
 if not: over a limit (or exit 137): **STOP**, do not deploy, report the line; `per_day_bytes` over 250 MB with depth over 50 MB a day: set `depth_every_secs = 600` in `config/compact.toml`, commit, redo steps 7–11.
 
 12. (Benchmark, on the PC) Both agreement tests on the real hour, debug build (can take tens of minutes; don't kill it).
