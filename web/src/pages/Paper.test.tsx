@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
@@ -77,13 +77,46 @@ describe('Paper', () => {
     expect(screen.getByText(PAPER_QUIP)).toBeInTheDocument();
     expect(PAPER_QUIP).toBe("The naive strategy is doing great. Until 'Other' wins.");
     expect(screen.getByText(PAPER_LOSS_QUIP)).toBeInTheDocument();
-    expect(screen.getByText('$1,002.56')).toBeInTheDocument();
+    // I4: now also in the Accounts table's EQUITY column, beside the equity chart's end legend.
+    expect(screen.getAllByText('$1,002.56')).toHaveLength(2);
     expect(screen.getByText('−$286.60')).toHaveClass('neg');
     expect(screen.getByText('Fed decision in October?')).toBeInTheDocument();
     expect(await screen.findByText('−$99.84')).toBeInTheDocument();
-    const urls = f.mock.calls.map((c) => String(c[0]));
+    // M6: money/qty columns in the ledger and positions tables get td.num (no mid-value wrap).
+    expect(screen.getByText('−$99.84').closest('td')).toHaveClass('num');
+    const posRow = screen.getByText('Fed decision in October?').closest('tr')!;
+    expect(posRow.querySelectorAll('td.num')).toHaveLength(2); // QTY, BASIS
+    const legend = screen.getByRole('list', { name: 'equity now' });
+    expect(within(legend).getByText('P3 naive')).toBeInTheDocument();
+    expect(within(legend).getByText('$713.40')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: /^ACCOUNTS/ })).toBeInTheDocument();
+    for (const f2 of ['all numbers', 'ledger', 'awaiting resolution']) expect(screen.getByText(f2).closest('details')).not.toHaveAttribute('open');
+    const urls = f.mock.calls.map((c) => String(c[0])); // f2 avoids shadowing the mockApi handle `f` above
     expect(urls.some((u) => u.includes('/api/paper/equity?account=P3-naive%2Fsp-idle&hours=24'))).toBe(true);
     expect(urls.some((u) => u.includes('/api/paper/ledger?account=P0-converter%2Fsp-idle'))).toBe(true);
+  });
+
+  it('orders the equity-now legend by final equity, highest first, regardless of the api order', async () => {
+    mockApi({
+      '/api/paper/accounts': {
+        items: [
+          accountFixture({ account_id: 'P3-naive/sp-idle', policy: 'P3-naive', equity: '713.4' }),
+          accountFixture({ account_id: 'P0-converter/sp-idle', policy: 'P0-converter', equity: '1002.56' }),
+        ],
+      },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper');
+    const legend = await screen.findByRole('list', { name: 'equity now' });
+    const items = within(legend)
+      .getAllByRole('listitem')
+      .map((li) => li.textContent);
+    expect(items[0]).toContain('P0 converter');
+    expect(items[0]).toContain('$1,002.56');
+    expect(items[1]).toContain('P3 naive');
+    expect(items[1]).toContain('$713.40');
   });
 
   it('labels policies and finds extremes without printing floats', () => {
@@ -103,7 +136,7 @@ describe('Paper', () => {
     await screen.findByText(PAPER_EMPTY);
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
     expect(headings[0]).toBe('EDGE CAPTURE');
-    expect(await screen.findByRole('img', { name: 'capture rate by latency' })).toBeInTheDocument();
+    expect(await screen.findByRole('figure', { name: 'capture rate by latency' })).toBeInTheDocument();
   });
 
   it('renders sp-idle-nodelay after another scenario, with fewer accounts there and no marks yet', async () => {
@@ -166,6 +199,7 @@ describe('Paper', () => {
     expect(screen.queryByText('mark')).not.toBeInTheDocument();
     const ledgerUrls = () => f.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/api/paper/ledger'));
     expect(ledgerUrls().every((u) => u.includes('hide_marks=1'))).toBe(true);
+    await userEvent.click(screen.getByText('ledger'));
     await userEvent.click(screen.getByRole('button', { name: 'OLDER →' }));
     await waitFor(() => expect(ledgerUrls().at(-1)).toContain('cursor=3_1'));
     expect(ledgerUrls().at(-1)).toContain('hide_marks=1');
@@ -206,6 +240,6 @@ describe('Paper', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: 'hide P3 (control)' }));
     expect(screen.getByText('low $1,000.00')).toBeInTheDocument();
     expect(screen.queryByText('P3 naive')).not.toBeInTheDocument();
-    expect(screen.getAllByText('P3 · NAIVE').length).toBeGreaterThan(0); // its card and ledger button stay
+    expect(screen.getAllByText('P3 · NAIVE').length).toBeGreaterThan(0); // its accounts row and ledger button stay
   });
 });

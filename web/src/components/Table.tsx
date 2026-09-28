@@ -5,6 +5,13 @@ export interface Column<T> {
   label: string;
   render: (row: T) => ReactNode;
   className?: (row: T) => string | undefined;
+  /** M6: number columns (money, qty) get white-space: nowrap; font-variant-numeric: tabular-nums,
+   *  same as everywhere else numbers are written, so they never wrap mid-value. */
+  num?: boolean;
+}
+
+function tdClass<T>(c: Column<T>, row: T): string | undefined {
+  return [c.num ? 'num' : null, c.className?.(row) ?? null].filter(Boolean).join(' ') || undefined;
 }
 
 export function Table<T>({
@@ -34,7 +41,7 @@ export function Table<T>({
           {rows.map((r) => (
             <tr key={rowKey(r)} className={rowClass?.(r)}>
               {columns.map((c) => (
-                <td key={c.key} className={c.className?.(r)}>
+                <td key={c.key} className={tdClass(c, r)}>
                   {c.render(r)}
                 </td>
               ))}

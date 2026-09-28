@@ -46,3 +46,16 @@ export function parseIsoDay(s: string): number | null {
   const t = Date.parse(`${s}T00:00:00Z`);
   return Number.isNaN(t) ? null : t;
 }
+
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+/** 17:32:11 (UTC), for rows already grouped under a day heading. */
+export function fmtUtcHms(ms: number): string {
+  return new Date(ms).toISOString().slice(11, 19);
+}
+
+/** "27 SEP" (UTC). */
+export function fmtUtcDayMonth(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+}

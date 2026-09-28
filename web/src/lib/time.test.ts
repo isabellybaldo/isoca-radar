@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtAge, fmtDuration, fmtUtcDateTime, fmtUtcTime, isoDay, parseIsoDay } from './time';
+import { fmtAge, fmtDuration, fmtUtcDateTime, fmtUtcDayMonth, fmtUtcHms, fmtUtcTime, isoDay, parseIsoDay } from './time';
 
 describe('time', () => {
   const t = Date.UTC(2026, 8, 25, 1, 12, 4, 210);
@@ -21,5 +21,10 @@ describe('time', () => {
     expect(isoDay(t)).toBe('2026-09-25');
     expect(parseIsoDay('2026-09-25')).toBe(Date.UTC(2026, 8, 25));
     expect(parseIsoDay('25/09/2026')).toBeNull();
+  });
+  it('formats a UTC clock time and a day heading', () => {
+    const t = Date.UTC(2026, 8, 27, 17, 32, 11, 450);
+    expect(fmtUtcHms(t)).toBe('17:32:11');
+    expect(fmtUtcDayMonth(t)).toBe('27 SEP');
   });
 });

@@ -4,7 +4,8 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { cardFixture, CARD_NOW, metaFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
-import { NO_CARDS, PAPERS_SUBTITLE, Papers } from './Papers';
+import { NO_CARDS, Papers } from './Papers';
+import { HELP } from '../help';
 
 function Loc() {
   return <output data-testid="loc">{useLocation().search}</output>;
@@ -34,13 +35,18 @@ describe('Papers', () => {
     expect(await screen.findByRole('article', { name: 'G4 · x' })).toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(4);
     expect(String(fetch.mock.calls.find((c) => String(c[0]).startsWith('/api/cards?'))?.[0])).toBe('/api/cards?win=7d');
-    expect(screen.getByText(PAPERS_SUBTITLE)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'PAPERS' })).toBeInTheDocument();
+    expect(HELP.papers.text.startsWith('Their number, their method on our data, our method. Same market, different weeks.')).toBe(true);
     expect(screen.getByRole('button', { name: '7D' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('coming later: needs the on-chain dataset and somewhere to put it that is not your laptop')).toBeInTheDocument();
     expect(screen.getByText('DROPPED')).toBeInTheDocument();
-    expect(screen.getByText('NOT REPLICATED')).toBeInTheDocument();
+    expect(screen.getByText('not replicated (2)').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByRole('button', { name: 'Help: What is not replicated, and why?' })).toBeInTheDocument();
     expect(screen.getByText(/308,416,666 messages/)).toBeInTheDocument();
     expect(screen.getByText('updated 5 min ago')).not.toHaveClass('stale');
+    // M4: the live paper's box is the page's hero; the dropped/coming-later ones are not.
+    expect(screen.getByText(/^Gebele, Mutzel, Matthes/).closest('section')).toHaveClass('hero');
+    expect(screen.getByText('DROPPED').closest('section')).not.toHaveClass('hero');
     } finally {
       Date.now = real;
     }

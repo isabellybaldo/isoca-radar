@@ -70,6 +70,11 @@ describe('Health', () => {
     expect(await screen.findByText('PAUSED')).toBeInTheDocument();
     expect(screen.getByText('top_mismatch')).toBeInTheDocument();
     await waitFor(() => expect(container.querySelectorAll('rect.marker')).toHaveLength(1));
+    expect(screen.getByRole('heading', { level: 1, name: 'HEALTH' })).toBeInTheDocument();
+    const tiles = screen.getAllByRole('listitem').filter((li) => li.classList.contains('tile')).map((li) => li.textContent);
+    expect(tiles[1]).toBe('shards40/40');
+    expect(screen.getByRole('list', { name: 'integrity by kind' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Help: What is capture?' })).toBeInTheDocument();
   });
 
   it('keeps the window in the URL', async () => {
@@ -84,5 +89,21 @@ describe('Health', () => {
     await userEvent.click(screen.getByRole('button', { name: '6 H' }));
     expect(screen.getByTestId('loc')).toHaveTextContent('?hours=6');
     await waitFor(() => expect(f.mock.calls.map((c) => String(c[0]))).toContain('/api/health/series?hours=6'));
+  });
+
+  it('sorts integrity by_kind by count descending', async () => {
+    const unsorted = {
+      from_ms: 0, to_ms: 1, by_kind: [{ kind: 'drift', count: 1 }, { kind: 'top_mismatch', count: 2 }], total: 3, msgs: 258_000, per_million: '11.63',
+    };
+    mockApi({
+      '/api/health/now': { health: healthFixture() },
+      '/api/health/series': { from_ms: 0, to_ms: 1, points: [] },
+      '/api/integrity/summary': unsorted,
+    });
+    const { container } = renderAt('/health');
+    await screen.findByText('3 events in 258000 messages: 11.63 per million.');
+    const bars = [...container.querySelectorAll('.cb-bar')] as HTMLElement[];
+    expect(bars[0].style.width).toBe('100%');
+    expect(bars[1].style.width).toBe('50%');
   });
 });
