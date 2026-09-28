@@ -220,6 +220,43 @@ fn deliver_acknowledges_only_records_that_reach_disk() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn deliver_drops_a_line_naming_a_record_capture_never_wrote() {
+    let dir = tmp("orphan-line");
+    let m = Metrics::default();
+    let mut w = Writer::new(dir.clone());
+    let file = universe_file_name(T0, 9);
+    let rec = CaptureMsg::Universe(Box::new(UniverseRecord {
+        universe: universe(T0, Status::Live),
+        conn_of: conn(0),
+        file: file.clone(),
+    }));
+    // The record is dropped while paused: never acknowledged (universe_acked_seq stays 0).
+    m.capture_paused.store(true, Ordering::SeqCst);
+    assert!(!deliver(&mut w, &rec, &m));
+    assert_eq!(m.universe_acked_seq.load(Ordering::SeqCst), 0);
+    // The pause clears before its control line is delivered; the line still names seq 9, which
+    // was never written, so it must be dropped too, not appended to the hour file.
+    m.capture_paused.store(false, Ordering::SeqCst);
+    let line = CaptureMsg::Line(Line {
+        recv_ts_us: (T0 + 1_000) * 1000,
+        shard: 0,
+        raw: None,
+        ctl: Some(Ctl::Universe { taken_ms: T0, file }),
+    });
+    assert!(
+        !deliver(&mut w, &line, &m),
+        "names an unacknowledged record"
+    );
+    assert_eq!(m.capture_drops.load(Ordering::SeqCst), 2);
+    w.finish();
+    assert!(
+        !hour_path(&dir, T0 + 1_000).exists(),
+        "the dropped line never reached an hour file"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn book_frame(ts: i64, ask: &str) -> String {
     let items: Vec<String> = (0..3)
         .map(|i| format!(r#"{{"event_type":"book","asset_id":"y{i}","market":"0x","timestamp":"{ts}","hash":"h","bids":[],"asks":[{{"price":"{ask}","size":"10"}}]}}"#))
@@ -330,6 +367,10 @@ fn retention_keeps_the_universe_record_in_force_at_the_oldest_hour() {
     let older = rec(t - 3 * H, 1, t - 3 * H);
     let in_force = rec(t - 2 * H, 2, t - 2 * H); // written before the oldest hour, still named by it
     let fresh = rec(t + 60_000, 3, t + 61_000);
+    // A warm start can reuse an old `taken_ms` for a fresh write: the file name's `taken_ms` is
+    // old, but its write time (mtime) is recent, so the RULE (write time, not `taken_ms`) keeps
+    // it, same as `fresh`.
+    let warm_start = rec(t - 5 * H, 4, t + 120_000);
     assert!(
         stale_universe_files(&dir).is_empty(),
         "no hour files: nothing to compare against"
@@ -338,6 +379,6 @@ fn retention_keeps_the_universe_record_in_force_at_the_oldest_hour() {
     std::fs::create_dir_all(hour.parent().unwrap()).unwrap();
     std::fs::write(&hour, b"x").unwrap();
     assert_eq!(stale_universe_files(&dir), vec![older]);
-    assert!(in_force.exists() && fresh.exists());
+    assert!(in_force.exists() && fresh.exists() && warm_start.exists());
     std::fs::remove_dir_all(&dir).ok();
 }

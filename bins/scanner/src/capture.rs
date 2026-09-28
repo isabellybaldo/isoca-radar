@@ -145,6 +145,19 @@ pub fn deliver(writer: &mut Writer, msg: &CaptureMsg, metrics: &Metrics) -> bool
         metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
         return false;
     }
+    // A control line naming a universe record whose seq is newer than the newest one capture has
+    // acknowledged names a record that was never (yet) written: within a run seqs only increase,
+    // so a reused record's seq is always <= acked_seq. This happens when the record was dropped
+    // (paused, or a write error) but its control line was queued right after and delivered once
+    // capture caught up. Drop the line too, or replay would abort on the missing record file.
+    if let CaptureMsg::Line(line) = msg
+        && let Some(Ctl::Universe { file, .. }) = &line.ctl
+        && let Some(seq) = universe_seq(file)
+        && seq > metrics.universe_acked_seq.load(Ordering::Acquire)
+    {
+        metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     match writer.write(msg) {
         Ok(()) => {
             if let CaptureMsg::Universe(rec) = msg
@@ -197,7 +210,14 @@ impl Writer {
                 }
                 let mut enc = zstd::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
                 enc.write_all(&serde_json::to_vec(rec.as_ref())?)?;
-                std::fs::write(&p, enc.finish()?)
+                let bytes = enc.finish()?;
+                std::fs::write(&p, bytes).inspect_err(|_| {
+                    // Never leave a partial (e.g. ENOSPC mid-write) universe record on disk: a
+                    // half-written file would be named by `Ctl::Universe` but fail to parse on
+                    // replay, aborting hours later. This record was never acknowledged, so the
+                    // dedup will write a fresh one on the next refresh.
+                    let _ = std::fs::remove_file(&p);
+                })
             }
             CaptureMsg::Line(line) => {
                 self.last_ms = self.last_ms.max(line.recv_ts_us.div_euclid(1000));

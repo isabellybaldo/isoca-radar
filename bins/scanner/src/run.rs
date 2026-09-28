@@ -867,8 +867,13 @@ async fn run_live(
         |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| {
             let conn_map: ConnMap = conn_of.iter().map(|(k, v)| (k.clone(), *v)).collect();
             let st = capture::CaptureState::of(&io.metrics);
+            // A record that never reached the capture channel must never be named: `deliver`
+            // would also refuse a line naming an unacknowledged seq, but skipping the line here
+            // keeps a dropped record from ever being written to a hour file at all.
             let ctl = match dedup.plan(&u, &conn_map, st) {
-                capture::UniversePlan::Reuse { taken_ms, file } => Ctl::Universe { taken_ms, file },
+                capture::UniversePlan::Reuse { taken_ms, file } => {
+                    Some(Ctl::Universe { taken_ms, file })
+                }
                 capture::UniversePlan::Write { hash } => {
                     universe_seq += 1;
                     let file = capture::universe_file_name(u.taken_ms, universe_seq);
@@ -883,17 +888,20 @@ async fn run_live(
                         .is_err()
                     {
                         io.metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+                        None
                     } else {
                         dedup.written(hash, u.taken_ms, file.clone(), universe_seq, st.drops);
-                    }
-                    Ctl::Universe {
-                        taken_ms: u.taken_ms,
-                        file,
+                        Some(Ctl::Universe {
+                            taken_ms: u.taken_ms,
+                            file,
+                        })
                     }
                 }
             };
             let t = now_ms();
-            io.ctl(0, ctl, t);
+            if let Some(ctl) = ctl {
+                io.ctl(0, ctl, t);
+            }
             engine.apply_universe(u, conn_of, t)
         };
     let outs = apply(&mut engine, universe.clone(), &plan.conn_of(), &io);
