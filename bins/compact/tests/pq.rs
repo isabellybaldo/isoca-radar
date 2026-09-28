@@ -140,3 +140,15 @@ fn row_groups_hold_262144_rows_so_memory_stays_bounded() {
     assert_eq!(num_rows(&s.fin).unwrap(), 600_000);
     std::fs::remove_dir_all(&d).ok();
 }
+
+#[test]
+fn zero_pushed_rows_still_closes_and_publishes_a_valid_empty_file() {
+    let d = tmp("zero");
+    let rows: Vec<TobRow> = Vec::new();
+    let s = write(d.join("empty.parquet"), &rows);
+    assert_eq!(s.rows, 0);
+    s.publish().unwrap();
+    assert_eq!(num_rows(&s.fin).unwrap(), 0);
+    assert_eq!(read_all::<TobRow>(&s.fin).unwrap(), Vec::<TobRow>::new());
+    std::fs::remove_dir_all(&d).ok();
+}

@@ -2,6 +2,12 @@
 //! until `publish` renames it, and readers. zstd level 3; dictionary encoding (parquet's default)
 //! for every column, which is what `token_idx` needs. Row groups of 262,144 rows bound memory
 //! (plan ruling R2).
+//!
+//! Publish is durable, not just atomic: once an hour is marked done the scanner deletes the raw
+//! hour, so a truncated part after a power loss would be unrecoverable. The tmp file's data is
+//! `sync_all`'d before each rename, and the containing directory is fsync'd after, so a crash
+//! leaves either the old state or the fully-written new one visible under the final name — never
+//! a half-written file (a no-op on non-Unix, which cannot fsync a directory handle).
 use crate::rows::{DepthRow, GapRow, L2Row, TobRow, TokenRow};
 use anyhow::Context;
 use arrow::array::{
@@ -15,6 +21,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,11 +43,32 @@ pub fn tmp_of(fin: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Write `bytes` under a temporary name, then rename over `path` (never a half-written file).
+/// Write `bytes` under a temporary name, `fsync` it, then rename over `path` and `fsync` the
+/// directory (never a half-written file, and durable across a crash right after the rename).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = tmp_of(path);
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        sync_dir(dir)?;
+    }
+    Ok(())
+}
+
+/// `fsync` a directory so a prior rename inside it is durable across a crash. A no-op on
+/// non-Unix platforms, which cannot open a directory as a syncable file handle.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn f(name: &str, t: DataType, nullable: bool) -> Field {
@@ -389,8 +417,13 @@ pub struct Staged {
 }
 
 impl Staged {
+    /// Rename `tmp` to `fin`, then `fsync` the directory: the published file survives a crash.
     pub fn publish(&self) -> std::io::Result<()> {
-        std::fs::rename(&self.tmp, &self.fin)
+        std::fs::rename(&self.tmp, &self.fin)?;
+        if let Some(dir) = self.fin.parent() {
+            sync_dir(dir)?;
+        }
+        Ok(())
     }
 }
 
@@ -436,10 +469,18 @@ impl<R: Table> PartWriter<R> {
         Ok(())
     }
 
-    /// Finish the file under its temporary name. Nothing is visible until `Staged::publish`.
+    /// Finish the file under its temporary name and `fsync` it. Nothing is visible until
+    /// `Staged::publish`.
     pub fn close(mut self) -> anyhow::Result<Staged> {
         self.flush()?;
         let _meta = self.w.close()?;
+        // `ArrowWriter::close` writes the footer and consumes the inner `File` without handing
+        // it back, so the tmp file is reopened here to `fsync` it before it can be renamed.
+        File::options()
+            .write(true)
+            .open(&self.tmp)
+            .with_context(|| format!("reopen {} to fsync", self.tmp.display()))?
+            .sync_all()?;
         Ok(Staged {
             tmp: self.tmp,
             fin: self.fin,
