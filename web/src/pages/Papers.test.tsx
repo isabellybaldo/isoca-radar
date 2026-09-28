@@ -89,4 +89,12 @@ describe('Papers', () => {
     expect(await screen.findByText(NO_CARDS)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'ALL' })).toHaveAttribute('aria-pressed', 'true');
   });
+
+  it('never says analyze has not run while it does not know yet', async () => {
+    mockApi({ '/api/cards': { win: '7d', cards: [] } }); // no /api/cards/meta: it 404s, so meta never loads
+    renderAt('/papers');
+    expect(await screen.findByRole('heading', { level: 1, name: 'PAPERS' })).toBeInTheDocument();
+    await screen.findByRole('alert');
+    expect(screen.queryByText('analyze has not run yet')).toBeNull();
+  });
 });

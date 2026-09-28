@@ -54,19 +54,20 @@ export function Papers() {
   const cards = useApi((s) => api.cards(win, s), [win], [slow]);
   const meta = useApi((s) => api.cardsMeta(s), [], [slow]);
   const now = useNow(30_000);
-  const upd = updatedText(meta.data?.tick?.last_tick_ms ?? null, now);
+  // Until meta answers, we don't know whether analyze has run: say nothing rather than "has not run yet".
+  const upd = meta.data === undefined ? null : updatedText(meta.data.tick?.last_tick_ms ?? null, now);
   return (
     <>
       <PageHead title="PAPERS" help="papers">
         <WindowSwitch win={win} onChange={(w) => setSp(new URLSearchParams({ win: w }))} />
-        <span className={upd.stale ? 'dim stale' : 'dim'}>{upd.text}</span>
+        {upd && <span className={upd.stale ? 'dim stale' : 'dim'}>{upd.text}</span>}
         {meta.data?.last_error && <span className="error">last tick failed: {meta.data.last_error.text}</span>}
       </PageHead>
       <Loadable state={meta} what="the papers">
         {(m) => (
           <>
             {m.papers.map((p) => (
-              <PaperSection key={p.id} paper={p} cards={cards} stale={upd.stale} />
+              <PaperSection key={p.id} paper={p} cards={cards} stale={upd?.stale ?? false} />
             ))}
             <Box help="notReplicated">
               <Fold id="papers:notrep" label={`not replicated (${m.not_replicated.length})`}>

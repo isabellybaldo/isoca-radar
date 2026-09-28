@@ -88,12 +88,16 @@ function EdgeBar({ edge, max }: { edge: string; max: number }) {
   );
 }
 
+/** Every cell names its column (`c-<key>`), so the < 600 px CSS can lay each row out as a card. */
+const cell = (key: string) => () => `c-${key}`;
+
 function episodeColumns(rows: EpisodeSummary[], now: number): Column<EpisodeSummary>[] {
   const maxEdge = Math.max(0, ...rows.map((r) => Number(r.edge)));
   return [
     {
       key: 'kind',
       label: 'KIND',
+      className: cell('kind'),
       render: (r) => {
         const t = kindTag(r.kind);
         return <Tag tone={t.tone}>{t.text}</Tag>;
@@ -102,15 +106,19 @@ function episodeColumns(rows: EpisodeSummary[], now: number): Column<EpisodeSumm
     {
       key: 'event',
       label: 'EVENT',
-      render: (r) => <Link to={`/episodes/${encodeURIComponent(r.id)}`}>{r.event_title ?? r.id}</Link>,
+      className: cell('event'),
+      render: (r) => {
+        const title = r.event_title ?? r.id;
+        return <Link to={`/episodes/${encodeURIComponent(r.id)}`} title={title}>{title}</Link>;
+      },
     },
-    { key: 's', label: 'S', render: (r) => r.s_legs },
-    { key: 'b100', label: 'PROFIT @ $100', render: (r) => <Money value={r.net_budget100} signed tone cents /> },
-    { key: 'net', label: 'NET @ DEPTH', render: (r) => <Money value={r.net} signed tone cents /> },
-    { key: 'gross', label: 'GROSS @ DEPTH', render: (r) => <Money value={r.gross} signed cents /> },
-    { key: 'q', label: 'Q* (SHARES)', render: (r) => formatDecimal(r.q_star) },
-    { key: 'age', label: 'AGE', render: (r) => <Age sinceMs={r.opened_ms} nowMs={now} /> },
-    { key: 'edge', label: 'EDGE', render: (r) => <EdgeBar edge={r.edge} max={maxEdge} /> },
+    { key: 's', label: 'S', className: cell('s'), num: true, render: (r) => r.s_legs },
+    { key: 'b100', label: 'PROFIT @ $100', className: cell('b100'), num: true, render: (r) => <Money value={r.net_budget100} signed tone cents /> },
+    { key: 'net', label: 'NET @ DEPTH', className: cell('net'), num: true, render: (r) => <Money value={r.net} signed tone cents /> },
+    { key: 'gross', label: 'GROSS @ DEPTH', className: cell('gross'), num: true, render: (r) => <Money value={r.gross} signed cents /> },
+    { key: 'q', label: 'Q* (SHARES)', className: cell('q'), num: true, render: (r) => formatDecimal(r.q_star) },
+    { key: 'age', label: 'AGE', className: cell('age'), num: true, render: (r) => <Age sinceMs={r.opened_ms} nowMs={now} /> },
+    { key: 'edge', label: 'EDGE', className: cell('edge'), render: (r) => <EdgeBar edge={r.edge} max={maxEdge} /> },
   ];
 }
 
@@ -142,7 +150,7 @@ function IncompleteSets({ rows, now }: { rows: EpisodeSummary[]; now: number }) 
               {`${open ? 'hide' : 'show'} ${rows.length} ${noun}`}
             </button>
           </div>
-          {open && <Table columns={episodeColumns(rows, now)} rows={rows} rowKey={(r) => r.id} rowClass={() => 'dim'} />}
+          {open && <Table className="arbtable" columns={episodeColumns(rows, now)} rows={rows} rowKey={(r) => r.id} rowClass={() => 'dim'} />}
         </>
       )}
     </Box>
@@ -192,7 +200,7 @@ export function Radar() {
               <EmptyState text={NO_ARB} />
             ) : (
               <>
-                <Table columns={episodeColumns(arb, now)} rows={arb} rowKey={(r) => r.id} />
+                <Table className="arbtable" columns={episodeColumns(arb, now)} rows={arb} rowKey={(r) => r.id} />
                 <ColumnLegend />
               </>
             )
