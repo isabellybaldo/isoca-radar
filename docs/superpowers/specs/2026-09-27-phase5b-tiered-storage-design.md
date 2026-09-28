@@ -50,7 +50,7 @@ api ──reads compact_status──► /api/health/now gains archive fields →
 
 **The `compact` service:**
 - **Binary:** a new binary, `bins/compact`, in the same Rust image as scanner, api and analyze.
-- **Compose:** `core` profile, `cpus: "0.25"`, `mem_limit: 256m`, read-only root filesystem, the `data` volume mounted **read-only** at `/data`, and the new `archive` volume read-write at `/archive`.
+- **Compose:** `core` profile, `cpus: "0.25"`, `mem_limit: 512m` (raised from 256m after the 2026-09-28 benchmark: 38k tokens, peak 330 MB), read-only root filesystem, the `data` volume mounted **read-only** at `/data`, and the new `archive` volume read-write at `/archive`.
 - **No network client** (the arch test bans `reqwest`, `pm-api` and `tokio-tungstenite` from `compact`, as it does for `analyze`). It reaches Postgres only through `store`.
 
 **Reuse, not a second implementation.** Book reconstruction reuses the scanner's replay path:
@@ -103,7 +103,7 @@ A day can be verified, or rebuilt while its raw hours still exist.
 ## 4. Processing and reliability
 
 ### 4.1 Order and carried state
-- **Order:** hours are processed strictly in order, and the compactor keeps every token's `Book` in memory (about 4k tokens, estimated 50–100 MB, inside 256 MB).
+- **Order:** hours are processed strictly in order, and the compactor keeps every token's `Book` in memory (about 38k tokens on 2026-09-28; peak RSS 330 MB with the checkpoint, inside 512 MB).
 - **Carried across days:** books, trust and each token's last top (for `ts_ms` order), not rows: each day opens with a `tob` row and a depth snapshot per trusted token (§3).
 - **Checkpoints:** after each hour, all books, the token dictionary, the day's `token_idx` map, and each token's `l2` state (its latest `l2` `ts_ms`, so `ts_ms` never goes back across hours) are written to `archive/_state/checkpoint-<hour>.bin.zst`, via a temporary name and an atomic rename. Two checkpoints are kept. Open `l2` windows are not carried: each hour re-reads its windows from the episodes and restarts every window's streams with snapshot rows (ruling R5), which gives the same rows.
 - **Restart:** the compactor resumes from the newest checkpoint.
@@ -180,7 +180,7 @@ None of these values are premise inputs. That must be checked (premise sections 
 - **Universe written only on change:** see §4.5.
 - **`compact verify`:** passes on a good day and fails on each kind of corruption.
 - **Arch:** `compact` has no network client and reaches Postgres only through `store`.
-- **Benchmark (`#[ignore]`, run by hand):** one real raw hour, copied once from the VPS by the owner. It measures the time, peak RSS, and bytes per table, extrapolated to a day. It must fit 0.25 CPU (an hour processed in well under an hour of CPU time, target < 10 min in a release build) and 256 MB. The plan sets the final `depth_*` and `l2_*` defaults from these numbers.
+- **Benchmark (`#[ignore]`, run by hand):** one real raw hour, copied once from the VPS by the owner. It measures the time, peak RSS, and bytes per table, extrapolated to a day. It must fit 0.25 CPU (an hour processed in well under an hour of CPU time, target < 10 min in a release build) and 512 MB (peak under ~420 MB). The plan sets the final `depth_*` and `l2_*` defaults from these numbers.
 
 ## 9. Deploy (runbook `docs/superpowers/runbooks/phase5b-storage-vps.md`)
 
@@ -214,6 +214,6 @@ This goes after the current 5d redeploy and the other agent's frontend changes.
 ## 11. Open items for the plan
 
 - **Reuse:** find exactly which replay pieces (`scanner::run::replay_cmd`, capture line reading, book application) can be shared, and whether that means moving them into a library crate.
-- **Parquet writer:** check the memory behaviour of the `parquet`/`arrow` writer with row-group sizes that fit 256 MB, and pick the row-group size.
+- **Parquet writer:** check the memory behaviour of the `parquet`/`arrow` writer with row-group sizes that fit 512 MB, and pick the row-group size.
 - **Benchmark:** the owner copies one raw hour from the VPS for the benchmark (a runbook step). Without it, the defaults stay as in §3.
 - **Timestamps:** confirm `ts_ms` (server) versus `recv_ms` for `tob` ordering when frames arrive out of order across shards. Order by `recv_ms` inside an hour, and keep both.

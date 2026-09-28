@@ -3,7 +3,7 @@
 //! reducer, load the checkpoint back and compact the next hour (the same one again when none is
 //! given) from the loaded state. Prints the first hour's time, rows, bytes per table, a per-day
 //! projection, the checkpoint's size, the second hour's time and the peak memory of all of it.
-//! The deploy runbook runs it in the release image with --cpus 0.25 --memory 256m.
+//! The deploy runbook runs it in the release image with --cpus 0.25 --memory 512m.
 use crate::config::Config;
 use crate::hour::{HourJob, Source, process_hour};
 use crate::reduce::Reducer;
