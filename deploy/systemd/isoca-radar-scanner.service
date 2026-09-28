@@ -1,0 +1,20 @@
+# Starts the scanner once at boot. compose.yml keeps `restart: on-failure:5` for the scanner because
+# its crash-loop breaker exits 0 in safe mode on purpose, and Docker never restarts a clean exit, so
+# after a host shutdown the scanner would otherwise stay down. Not `--no-deps`: compose waits for
+# postgres to be healthy and runs `migrate` (a no-op when nothing is pending) first. The scanner's own
+# breaker still decides live vs safe mode. Keep it down across a reboot: `systemctl disable` this unit.
+[Unit]
+Description=isoca-radar: start the scanner at boot
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/isoca/projects/cute-trading
+ExecStart=/usr/bin/docker compose --profile core up -d --no-build scanner
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
