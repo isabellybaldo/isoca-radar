@@ -187,7 +187,7 @@ cd /home/isoca/projects/cute-trading && PW="$(grep -E '^COMPACT_RW_DB_PASSWORD='
 if not: `pw-bad` = the `.env` line isn't an `openssl rand -hex 24` value: `sed -i '/^COMPACT_RW_DB_PASSWORD=/d' .env`, redo step 20, run again.
 **STOP**
 
-25. Start the new scanner (new retention, delete guard, universe dedup) and note the deploy time.
+25. Start the new scanner (new retention, delete guard, universe dedup) and note the deploy time. Go straight on to steps 26–27: without the compactor, the scanner's lost marks light **compactor has never reported** after 2 h.
 ```bash
 cd /home/isoca/projects/cute-trading && date +%s%3N > /root/5b_deploy_ms && docker compose --profile core up -d --no-build --no-deps scanner && sleep 60 && docker compose --profile core logs --since 70s scanner 2>&1 | grep -E 'capture:|error|panicked' | head
 ```
