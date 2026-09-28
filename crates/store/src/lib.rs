@@ -4,6 +4,7 @@
 
 mod batch;
 mod card_io;
+mod compact_io;
 pub mod error;
 mod paper;
 mod read;
@@ -18,6 +19,10 @@ pub use card_io::{
     CARD_TABLES, CardCellRow, CardEpisode, CardResultRow, ChangedSpan, LatencyMinute,
     MAX_CARD_EPISODES, MAX_CHANGED_PAGE, MAX_SWEET_ROWS, MarkPoint, PremiseRun, SweetAccount,
     SweetEpisodeRow, SweetIntentRow, SweetLedgerRow, SweetMidRow,
+};
+pub use compact_io::{
+    COMPACT_TABLES, CompactEpisode, CompactHourRow, CompactStatusRow, MAX_COMPACT_EPISODES,
+    MAX_COMPACT_HOURS,
 };
 pub use error::StoreError;
 pub use read::{
