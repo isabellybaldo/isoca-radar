@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/arb-core", "crates/pm-api", "crates/store", "crates/sim", "crates/cards", "crates/tape", "spikes/probe", "bins/scanner", "bins/api", "bins/analyze"]
+members = ["crates/arb-core", "crates/pm-api", "crates/store", "crates/sim", "crates/cards", "crates/tape", "spikes/probe", "bins/scanner", "bins/api", "bins/analyze", "bins/compact"]
 
 [workspace.package]
 edition = "2024"
@@ -29,6 +29,9 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.6", default-features = false, features = ["catch-panic"] }
+# Phase 5b, owner-approved 2026-09-27: the compactor's Parquet archive. compact only (deny.toml wrappers, arch test).
+parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd"] }
+arrow = { version = "=60.0.0", default-features = false }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

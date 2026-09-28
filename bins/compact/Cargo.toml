@@ -1,0 +1,30 @@
+[package]
+name = "compact"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# No network client (spec 5b §2): Postgres only through store; the arch test enforces it.
+# parquet and arrow are compact-only (owner-approved 2026-09-27; deny.toml wrappers).
+[dependencies]
+tape = { path = "../../crates/tape" }
+arb-core = { path = "../../crates/arb-core" }
+store = { path = "../../crates/store" }
+tokio = { workspace = true, features = ["signal"] }
+serde.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true
+toml.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+parquet.workspace = true
+arrow.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+
+[lints]
+workspace = true

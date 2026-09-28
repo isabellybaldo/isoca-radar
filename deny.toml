@@ -21,4 +21,6 @@ deny = [
   { name = "reqwest", wrappers = ["pm-api"] },
   { name = "tokio-tungstenite", wrappers = ["pm-api"] },
   { name = "sqlx", wrappers = ["store"] },
+  { name = "parquet", wrappers = ["compact"] },
+  { name = "arrow", wrappers = ["compact"] },
 ]
