@@ -11,7 +11,7 @@ export function CountBars({ items, label }: { items: { label: string; count: num
           <span className="cb-track">
             <span className="cb-bar" style={{ width: `${Math.round((i.count / max) * 100)}%` }} />
           </span>
-          <span className="num">{groupThousands(String(i.count))}</span>
+          <span className="cb-count num">{groupThousands(String(i.count))}</span>
         </li>
       ))}
     </ul>

@@ -227,6 +227,21 @@ describe('Paper', () => {
     expect(equityAxis([], 0, 100)).toEqual({ xMin: 0, xMax: 100 });
   });
 
+  it('rounds the equity axis labels to the cent', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: [accountFixture()] },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': (url: URL) => ({
+        account_id: url.searchParams.get('account'), from_ms: 0, to_ms: 100,
+        points: [{ t_ms: 0, equity: '1000.15581' }, { t_ms: 50, equity: '251.0719' }],
+      }),
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper');
+    expect(await screen.findByText('low $251.07')).toBeInTheDocument();
+    expect(screen.getByText('high $1,000.16')).toBeInTheDocument();
+  });
+
   it('can hide the P3 control line so its drawdown does not flatten the others', async () => {
     mockApi({
       '/api/paper/accounts': { items: accounts },

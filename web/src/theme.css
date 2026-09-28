@@ -236,6 +236,22 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .grid3 .subhead-row { margin-top: 0; border-top: 0; padding-top: 0; }
 @media (max-width: 900px) { .grid3 { grid-template-columns: minmax(0, 1fr); } }
 .countbars { gap: 4px; }
-.countbars li { display: grid; grid-template-columns: minmax(min(100%, 120px), 200px) minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.countbars li { display: grid; grid-template-columns: minmax(min(100%, 120px), 200px) minmax(0, 1fr) 7ch; gap: 10px; align-items: center; }
+/* one fixed count column, so every row's track is the same length and bar lengths compare */
+.cb-count { text-align: right; }
 .cb-track { display: block; height: 12px; background: var(--bg); }
 .cb-bar { display: block; height: 100%; background: var(--accent); }
+.barlegend { list-style: none; margin-top: 4px; }
+/* Radar's arbitrage and incomplete-set tables: one row per card on a phone, like Episodes. */
+@media (max-width: 600px) {
+  .arbtable thead { display: none; }
+  .arbtable tr { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: 'kind event b100' 's net age'; gap: 2px 8px; padding: 6px 0; border-bottom: 1px dashed var(--line2); }
+  .arbtable td { border: 0; padding: 0; }
+  .arbtable .c-kind { grid-area: kind; } .arbtable .c-event { grid-area: event; min-width: 0; } .arbtable .c-b100 { grid-area: b100; justify-self: end; }
+  .arbtable .c-s { grid-area: s; } .arbtable .c-net { grid-area: net; } .arbtable .c-age { grid-area: age; justify-self: end; }
+  .arbtable .c-event a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .arbtable .c-gross, .arbtable .c-q, .arbtable .c-edge { display: none; }
+  .arbtable .c-s::before { content: 'S '; color: var(--dim); }
+  .arbtable .c-net::before { content: 'net '; color: var(--dim); }
+  .arbtable .c-age::before { content: 'age '; color: var(--dim); }
+}

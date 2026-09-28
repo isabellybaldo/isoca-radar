@@ -92,7 +92,7 @@ function IntegrityView({ i }: { i: Integrity }) {
   return (
     <>
       <CountBars label="integrity by kind" items={sorted.map((k) => ({ label: k.kind, count: k.count }))} />
-      <p className="quip">{`${i.total} events in ${i.msgs} messages: ${i.per_million === null ? '—' : formatDecimal(i.per_million)} per million.`}</p>
+      <p className="quip">{`${groupThousands(String(i.total))} events in ${groupThousands(String(i.msgs))} messages: ${i.per_million === null ? '—' : formatDecimal(i.per_million)} per million.`}</p>
     </>
   );
 }
