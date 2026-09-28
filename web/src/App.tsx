@@ -9,9 +9,11 @@ import { Health } from './pages/Health';
 import { Paper } from './pages/Paper';
 import { Papers } from './pages/Papers';
 import { Radar } from './pages/Radar';
+import { Sweet } from './pages/Sweet';
 
 const NAV = [
   { to: '/', label: 'RADAR', end: true },
+  { to: '/sweet', label: 'SWEET', end: false },
   { to: '/episodes', label: 'EPISODES', end: false },
   { to: '/paper', label: 'PAPER', end: false },
   { to: '/papers', label: 'PAPERS', end: false },
@@ -22,7 +24,7 @@ export function Header() {
   const { state } = useStream();
   return (
     <header className="top">
-      <span className="logo">♥ isoca-radar</span>
+      <span className="logo">♥ <span className="logo-word">isoca-radar</span></span>
       <nav className="nav" aria-label="main">
         {NAV.map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => (isActive ? 'on' : undefined)}>
@@ -47,6 +49,7 @@ export function App() {
       <main className="body">
         <Routes>
           <Route path="/" element={<Radar />} />
+          <Route path="/sweet" element={<Sweet />} />
           <Route path="/episodes" element={<Episodes />} />
           <Route path="/episodes/:id" element={<EpisodeDetail />} />
           <Route path="/paper" element={<Paper />} />

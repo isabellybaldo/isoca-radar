@@ -3,16 +3,17 @@ import { api, type EpisodeQuery } from '../api/client';
 import type { EpisodeSummary } from '../api/types';
 import { useApi } from '../api/useApi';
 import { Box } from '../components/Box';
+import { EpisodeStrip } from '../components/EpisodeStrip';
+import { Fold } from '../components/Fold';
 import { Help } from '../components/Help';
 import { EmptyState } from '../components/EmptyState';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
-import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
 import { CENSORED_WORDS, FLAG_WORDS } from '../lib/flags';
 import { kindTag } from '../lib/labels';
 import { formatDecimal } from '../lib/money';
-import { DAY_MS, fmtDuration, fmtLocal, fmtUtcDateTime, parseIsoDay } from '../lib/time';
+import { DAY_MS, fmtDuration, fmtLocal, fmtUtcDayMonth, fmtUtcHms, parseIsoDay } from '../lib/time';
 
 export const NO_EPISODES = 'No episodes match. The filters are working; the market is not.';
 const KINDS: [string, string][] = [
@@ -42,9 +43,9 @@ export function queryFromParams(sp: URLSearchParams): EpisodeQuery {
 function FlagTags({ e }: { e: EpisodeSummary }) {
   return (
     <>
-      {e.suspect && <Tag tone="flag" title={FLAG_WORDS.suspect}>SUSPECT</Tag>}
-      {e.stale && <Tag tone="flag" title={FLAG_WORDS.stale}>STALE</Tag>}
-      {e.censored && <Tag tone="flag" title={CENSORED_WORDS}>CENSORED</Tag>}
+      {e.suspect && <Tag tone="flag" title={FLAG_WORDS.suspect}>!</Tag>}
+      {e.stale && <Tag tone="flag" title={FLAG_WORDS.stale}>S</Tag>}
+      {e.censored && <Tag tone="flag" title={CENSORED_WORDS}>C</Tag>}
     </>
   );
 }
@@ -71,24 +72,50 @@ function FlagLegend() {
   );
 }
 
-const columns: Column<EpisodeSummary>[] = [
-  { key: 'opened', label: 'OPENED', render: (r) => <span title={fmtLocal(r.opened_ms)}>{fmtUtcDateTime(r.opened_ms)}</span> },
-  {
-    key: 'kind',
-    label: 'KIND',
-    render: (r) => {
-      const t = kindTag(r.kind);
-      return <Tag tone={t.tone}>{t.text}</Tag>;
-    },
-  },
-  { key: 'event', label: 'EVENT', render: (r) => <Link to={`/episodes/${encodeURIComponent(r.id)}`}>{r.event_title ?? r.id}</Link> },
-  { key: 's', label: 'S', render: (r) => `${r.s_legs}/${r.n_legs}` },
-  { key: 'net', label: 'NET', render: (r) => <Money value={r.net} signed tone cents /> },
-  { key: 'gross', label: 'GROSS', render: (r) => <Money value={r.gross} signed cents /> },
-  { key: 'q', label: 'Q*', render: (r) => formatDecimal(r.q_star) },
-  { key: 'dur', label: 'DURATION', render: (r) => (r.duration_ms === null ? 'open' : fmtDuration(r.duration_ms)) },
-  { key: 'flags', label: 'FLAGS', render: (r) => <FlagTags e={r} /> },
-];
+const HEADS = ['OPENED', 'KIND', 'EVENT', 'S', 'NET', 'GROSS', 'Q*', 'DURATION', 'FLAGS'];
+
+function EpisodeRow({ r }: { r: EpisodeSummary }) {
+  const t = kindTag(r.kind);
+  const title = r.event_title ?? r.id;
+  return (
+    <tr className="ep">
+      <td className="num c-time" title={fmtLocal(r.opened_ms)}>{fmtUtcHms(r.opened_ms)}</td>
+      <td className="c-kind"><Tag tone={t.tone}>{t.text}</Tag></td>
+      <td className="c-event"><Link to={`/episodes/${encodeURIComponent(r.id)}`} title={title}>{title}</Link></td>
+      <td className="num c-s">{`${r.s_legs}/${r.n_legs}`}</td>
+      <td className="num c-net"><Money value={r.net} signed tone cents /></td>
+      <td className="num c-gross"><Money value={r.gross} signed cents /></td>
+      <td className="num c-q">{formatDecimal(r.q_star)}</td>
+      <td className="num c-dur">{r.duration_ms === null ? 'open' : fmtDuration(r.duration_ms)}</td>
+      <td className="c-flags"><FlagTags e={r} /></td>
+    </tr>
+  );
+}
+
+/** Redesign §4.1: one line per episode, grouped under its UTC day. */
+function EpisodeTable({ rows }: { rows: EpisodeSummary[] }) {
+  const groups: { day: string; rows: EpisodeSummary[] }[] = [];
+  for (const r of rows) {
+    const day = fmtUtcDayMonth(r.opened_ms);
+    if (groups.at(-1)?.day !== day) groups.push({ day, rows: [] });
+    groups[groups.length - 1].rows.push(r);
+  }
+  return (
+    <div className="scroll">
+      <table className="eptable">
+        <thead>
+          <tr>{HEADS.map((h) => <th key={h} scope="col">{h}</th>)}</tr>
+        </thead>
+        {groups.map((g) => (
+          <tbody key={g.day}>
+            <tr className="day"><th colSpan={HEADS.length} scope="colgroup">{g.day}</th></tr>
+            {g.rows.map((r) => <EpisodeRow key={r.id} r={r} />)}
+          </tbody>
+        ))}
+      </table>
+    </div>
+  );
+}
 
 export function Episodes() {
   const [sp, setSp] = useSearchParams();
@@ -110,57 +137,53 @@ export function Episodes() {
   };
   const kind = q.kind ?? '';
   return (
-    <>
-      <Box title="FILTERS" help="filters">
-        <div className="filters">
-          <div className="seg" role="group" aria-label="kind">
-            {KINDS.map(([value, label]) => (
-              <button key={label} type="button" className={kind === value ? 'on' : undefined} aria-pressed={kind === value} onClick={() => update('kind', value || null)}>
-                {label}
-              </button>
-            ))}
-          </div>
-          <label>
-            from <input type="date" value={sp.get('from') ?? ''} onChange={(e) => update('from', e.target.value || null)} />
-          </label>
-          <label>
-            to <input type="date" value={sp.get('to') ?? ''} onChange={(e) => update('to', e.target.value || null)} />
-          </label>
-          <label>
-            <input type="checkbox" checked={q.net ?? false} onChange={(e) => update('net', e.target.checked ? '1' : null)} />
-            net-positive only
-          </label>
-          {FLAGS.map((f) => (
-            <label key={f}>
-              <input type="checkbox" checked={q.flags?.includes(f) ?? false} onChange={() => toggleFlag(f)} />
-              {f}
-            </label>
+    <Box title="EPISODES" help="episodes" hero>
+      <div className="filters">
+        <div className="seg" role="group" aria-label="kind">
+          {KINDS.map(([value, label]) => (
+            <button key={label} type="button" className={kind === value ? 'on' : undefined} aria-pressed={kind === value} onClick={() => update('kind', value || null)}>
+              {label}
+            </button>
           ))}
         </div>
-        <p className="dim">UTC days. Seven days at a time.</p>
-      </Box>
-      <Box title="EPISODES" help="episodes">
-        <Loadable state={page} what="episodes">
-          {(d) =>
-            d.items.length === 0 ? (
-              <EmptyState text={NO_EPISODES} />
-            ) : (
-              <>
-                <Table columns={columns} rows={d.items} rowKey={(r) => r.id} />
+        <label>from <input type="date" value={sp.get('from') ?? ''} onChange={(e) => update('from', e.target.value || null)} /></label>
+        <label>to <input type="date" value={sp.get('to') ?? ''} onChange={(e) => update('to', e.target.value || null)} /></label>
+        <details className="menu">
+          <summary>{`flags${(q.net ? 1 : 0) + (q.flags?.length ?? 0) > 0 ? ` (${(q.net ? 1 : 0) + (q.flags?.length ?? 0)})` : ''}`}</summary>
+          <div className="menu-body">
+            <label className="check">
+              <input type="checkbox" checked={q.net ?? false} onChange={(e) => update('net', e.target.checked ? '1' : null)} />
+              net-positive only
+            </label>
+            {FLAGS.map((f) => (
+              <label key={f} className="check">
+                <input type="checkbox" checked={q.flags?.includes(f) ?? false} onChange={() => toggleFlag(f)} />
+                {f}
+              </label>
+            ))}
+          </div>
+        </details>
+        <Help id="filters" />
+      </div>
+      <Loadable state={page} what="episodes">
+        {(d) =>
+          d.items.length === 0 ? (
+            <EmptyState text={NO_EPISODES} />
+          ) : (
+            <>
+              <EpisodeStrip rows={d.items} />
+              <EpisodeTable rows={d.items} />
+              <div className="pager">
+                <button type="button" disabled={!q.cursor} onClick={() => update('cursor', null)}>NEWEST</button>
+                <button type="button" disabled={!d.next_cursor} onClick={() => d.next_cursor && update('cursor', d.next_cursor)}>OLDER →</button>
+              </div>
+              <Fold id="episodes:flags" label="what the flags mean">
                 <FlagLegend />
-                <div className="pager">
-                  <button type="button" disabled={!q.cursor} onClick={() => update('cursor', null)}>
-                    NEWEST
-                  </button>
-                  <button type="button" disabled={!d.next_cursor} onClick={() => d.next_cursor && update('cursor', d.next_cursor)}>
-                    OLDER →
-                  </button>
-                </div>
-              </>
-            )
-          }
-        </Loadable>
-      </Box>
-    </>
+              </Fold>
+            </>
+          )
+        }
+      </Loadable>
+    </Box>
   );
 }

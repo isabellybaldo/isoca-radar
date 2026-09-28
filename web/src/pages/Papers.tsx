@@ -5,7 +5,9 @@ import { type ApiState, useApi } from '../api/useApi';
 import { Box } from '../components/Box';
 import { CardView } from '../components/CardView';
 import { EmptyState } from '../components/EmptyState';
+import { Fold } from '../components/Fold';
 import { Loadable } from '../components/Loadable';
+import { PageHead } from '../components/PageHead';
 import { Tag } from '../components/Tag';
 import { isWin, WINS, type Win, WindowSwitch } from '../components/WindowSwitch';
 import { updatedText } from '../lib/cards';
@@ -15,14 +17,12 @@ import { useNow, useTicker } from '../lib/hooks';
 // Task 13's EdgeCapture; re-exported here so `WINS` stays available where the brief names it.
 export { WINS };
 export const NO_CARDS = 'No cards yet. analyze has not finished a tick under these premises.';
-export const PAPERS_SUBTITLE = 'Their number, their method on our data, our method. Same market, different weeks.';
 
 function PaperSection({ paper, cards, stale }: { paper: PaperEntry; cards: ApiState<CardsResponse>; stale: boolean }) {
   const tag =
     paper.status === 'live' ? <Tag tone="no">LIVE</Tag> : paper.status === 'coming_later' ? <Tag>COMING LATER</Tag> : <Tag tone="flag">DROPPED</Tag>;
   return (
-    <Box title={paper.cite} help={paper.status === 'live' ? 'gebele' : 'otherPapers'}>
-      {tag}
+    <Box title={paper.cite} help={paper.status === 'live' ? 'gebele' : 'otherPapers'} className="paper" hero={paper.status === 'live'} actions={tag}>
       {paper.status !== 'live' ? (
         <p className="quip">{paper.note ?? ''}</p>
       ) : (
@@ -57,26 +57,25 @@ export function Papers() {
   const upd = updatedText(meta.data?.tick?.last_tick_ms ?? null, now);
   return (
     <>
-      <Box title="PAPERS" help="papers">
-        <p className="quip">{PAPERS_SUBTITLE}</p>
+      <PageHead title="PAPERS" help="papers">
         <WindowSwitch win={win} onChange={(w) => setSp(new URLSearchParams({ win: w }))} />
-        <p className={upd.stale ? 'dim stale' : 'dim'}>{upd.text}</p>
-        {meta.data?.last_error && <p className="error">last tick failed: {meta.data.last_error.text}</p>}
-      </Box>
+        <span className={upd.stale ? 'dim stale' : 'dim'}>{upd.text}</span>
+        {meta.data?.last_error && <span className="error">last tick failed: {meta.data.last_error.text}</span>}
+      </PageHead>
       <Loadable state={meta} what="the papers">
         {(m) => (
           <>
             {m.papers.map((p) => (
               <PaperSection key={p.id} paper={p} cards={cards} stale={upd.stale} />
             ))}
-            <Box title="NOT REPLICATED" help="notReplicated">
-              <ul className="plain">
-                {m.not_replicated.map((n) => (
-                  <li key={n.item}>
-                    <b>{n.item}.</b> {n.why}
-                  </li>
-                ))}
-              </ul>
+            <Box help="notReplicated">
+              <Fold id="papers:notrep" label={`not replicated (${m.not_replicated.length})`}>
+                <ul className="plain">
+                  {m.not_replicated.map((n) => (
+                    <li key={n.item}><b>{n.item}.</b> {n.why}</li>
+                  ))}
+                </ul>
+              </Fold>
             </Box>
           </>
         )}

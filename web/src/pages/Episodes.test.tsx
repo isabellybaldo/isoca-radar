@@ -41,7 +41,7 @@ describe('Episodes', () => {
       expect(url).toContain(part);
     }
     expect(screen.getByText('4.19 s')).toBeInTheDocument();
-    expect(screen.getByText('SUSPECT')).toBeInTheDocument();
+    expect(screen.getByTitle(FLAG_WORDS.suspect)).toHaveTextContent('!');
     expect(screen.getByRole('checkbox', { name: 'net-positive only' })).toBeChecked();
   });
 
@@ -93,13 +93,30 @@ describe('Episodes', () => {
     expect(HELP.flags.text).toContain(FLAG_WORDS.censor_gap);
   });
 
+  it('M7: says UTC once in the filters help, and keeps "Seven days at a time."', () => {
+    expect(HELP.filters.text.match(/UTC/g)).toHaveLength(1);
+    expect(HELP.filters.text).toContain('Seven days at a time.');
+  });
+
   it('gives each flag tag a tooltip with its sentence', async () => {
     mockApi({ '/api/episodes': { items: [episodeSummaryFixture({ suspect: true, stale: true, censored: true })], next_cursor: null } });
     renderAt('/episodes');
     const row = (await screen.findByRole('link', { name: 'Bitcoin price on September 26?' })).closest('tr') as HTMLTableRowElement;
-    expect(within(row).getByText('SUSPECT')).toHaveAttribute('title', FLAG_WORDS.suspect);
-    expect(within(row).getByText('STALE')).toHaveAttribute('title', FLAG_WORDS.stale);
-    const censored = within(row).getByText('CENSORED').getAttribute('title') ?? '';
+    expect(within(row).getByText('!')).toHaveAttribute('title', FLAG_WORDS.suspect);
+    expect(within(row).getByText('S', { selector: '.tag' })).toHaveAttribute('title', FLAG_WORDS.stale);
+    const censored = within(row).getByText('C', { selector: '.tag' }).getAttribute('title') ?? '';
     for (const w of [FLAG_WORDS.censor_left, FLAG_WORDS.censor_right, FLAG_WORDS.censor_gap]) expect(censored).toContain(w);
+  });
+
+  it('groups rows under a UTC day and shows only the time in each row', async () => {
+    mockApi({ '/api/episodes': { items: [
+      episodeSummaryFixture({ id: 'a', opened_ms: Date.UTC(2026, 8, 27, 17, 32, 11) }),
+      episodeSummaryFixture({ id: 'b', opened_ms: Date.UTC(2026, 8, 26, 23, 59, 1), event_title: 'Older' }),
+    ], next_cursor: null } });
+    renderAt('/episodes');
+    expect(await screen.findByRole('columnheader', { name: '27 SEP' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '26 SEP' })).toBeInTheDocument();
+    expect(screen.getByText('17:32:11')).toBeInTheDocument();
+    expect(screen.getByRole('figure', { name: '2 episodes in view, 2 net-positive' })).toBeInTheDocument();
   });
 });

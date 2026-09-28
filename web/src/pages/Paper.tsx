@@ -6,13 +6,13 @@ import { useApi, type ApiState } from '../api/useApi';
 import { Box } from '../components/Box';
 import { EdgeCapture } from '../components/EdgeCapture';
 import { EmptyState } from '../components/EmptyState';
+import { Fold } from '../components/Fold';
 import { LineChart, type Series } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
-import { SweetSpots } from '../components/SweetSpots';
 import { Table, type Column } from '../components/Table';
 import { shortId } from '../lib/labels';
-import { formatDecimal, formatMoney, isZero } from '../lib/money';
+import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, isZero } from '../lib/money';
 import { fmtUtcDateTime, fmtUtcHm } from '../lib/time';
 
 export const PAPER_QUIP = "The naive strategy is doing great. Until 'Other' wins.";
@@ -49,10 +49,10 @@ export function extremes(values: string[]): { min: string; max: string } | null 
 const ledgerColumns: Column<LedgerEntry>[] = [
   { key: 't', label: 'TIME', render: (l) => fmtUtcDateTime(l.t_ms) },
   { key: 'kind', label: 'KIND', render: (l) => l.kind },
-  { key: 'qty', label: 'QTY', render: (l) => formatDecimal(l.qty) },
-  { key: 'cash', label: 'CASH', render: (l) => <Money value={l.cash_delta} signed tone /> },
-  { key: 'fees', label: 'FEES', render: (l) => <Money value={l.fees} /> },
-  { key: 'realized', label: 'REALIZED', render: (l) => <Money value={l.realized_delta} signed tone /> },
+  { key: 'qty', label: 'QTY', render: (l) => formatDecimal(l.qty), num: true },
+  { key: 'cash', label: 'CASH', render: (l) => <Money value={l.cash_delta} signed tone />, num: true },
+  { key: 'fees', label: 'FEES', render: (l) => <Money value={l.fees} />, num: true },
+  { key: 'realized', label: 'REALIZED', render: (l) => <Money value={l.realized_delta} signed tone />, num: true },
 ];
 
 const positionColumns: Column<Position>[] = [
@@ -73,8 +73,8 @@ const positionColumns: Column<Position>[] = [
     ),
   },
   { key: 'side', label: 'SIDE', render: (p) => `${p.outcome.toUpperCase()}${p.returned ? ' (returned)' : ''}` },
-  { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty) },
-  { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} /> },
+  { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty), num: true },
+  { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} />, num: true },
 ];
 
 const CONTROL = 'P3-naive';
@@ -96,7 +96,7 @@ export function equityAxis(
   return { xMin: dataFrom, xMax: windowTo, xLabels: { left: `since ${fmtUtcHm(dataFrom)} UTC`, right: 'now' } };
 }
 
-function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
+function AccountsChart({ accounts }: { accounts: PaperAccount[] }) {
   const ids = accounts.map((a) => a.account_id);
   // Each result carries its own account: a render that still holds the previous scenario's answer
   // (before the refetch lands) never pairs it with this scenario's accounts by position.
@@ -107,7 +107,7 @@ function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
   const [hideControl, setHideControl] = useState(false);
   const hasControl = accounts.some((a) => a.policy === CONTROL);
   return (
-    <Box title={`EQUITY · ${formatMoney(accounts[0]?.bankroll ?? null)} EACH · LAST 24 H`} help="equity">
+    <>
       {hasControl && (
         <label className="check">
           <input type="checkbox" checked={hideControl} onChange={(e) => setHideControl(e.target.checked)} />
@@ -129,48 +129,92 @@ function EquityChart({ accounts }: { accounts: PaperAccount[] }) {
             Math.min(...loaded.map(({ e }) => e.from_ms)),
             Math.max(...loaded.map(({ e }) => e.to_ms)),
           );
+          // Ordered by final equity, highest first, so the legend pairs top-to-bottom with where the
+          // lines end on the right edge of the chart (spec §4.2), not with the accounts' own order.
+          const ends = all
+            .filter(({ e }) => e.points.length > 0)
+            .sort((x, y) => compareDecimal(y.e.points[y.e.points.length - 1].equity, x.e.points[x.e.points.length - 1].equity));
           return (
             <>
-              <LineChart
-                label="equity per account"
-                xMin={axis.xMin}
-                xMax={axis.xMax}
-                xLabels={axis.xLabels}
-                series={series}
-                yLabels={ext ? { bottom: formatMoney(ext.min), top: formatMoney(ext.max) } : undefined}
-              />
+              <div className="eqwrap">
+                <LineChart
+                  label="equity per account"
+                  xMin={axis.xMin}
+                  xMax={axis.xMax}
+                  xLabels={axis.xLabels}
+                  series={series}
+                  legend={false}
+                  yLabels={ext ? { bottom: formatMoney(ext.min), top: formatMoney(ext.max) } : undefined}
+                />
+                {ends.length > 0 && (
+                  <ul className="plain endlegend" aria-label="equity now">
+                    {ends.map(({ a, e }) => (
+                      <li key={a.account_id}>
+                        <span className={`sw ${TONES[a.policy] ?? 'p0'}`} aria-hidden="true" />
+                        <span>{policyLabel(a)}</span> <b className="num">{formatMoneyCents(e.points[e.points.length - 1].equity)}</b>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
               {hasControl && <p className="quip">{PAPER_QUIP}</p>}
               <p className="quip">{PAPER_LOSS_QUIP}</p>
             </>
           );
         }}
       </Loadable>
-    </Box>
+    </>
   );
 }
 
-function Cards({ accounts }: { accounts: PaperAccount[] }) {
+function AccountsTable({ accounts }: { accounts: PaperAccount[] }) {
   return (
-    <div className="cards">
-      {accounts.map((a) => (
-        <div key={a.account_id} className="card">
-          <p className="p">
-            {policyCardTitle(a.policy)}
-            {!isZero(a.fee_bips) && ` · FEE ${a.fee_bips} BP`}
-          </p>
-          <p className="eq">
-            <Money value={a.equity ?? a.bankroll} cents />
-          </p>
-          {a.marked_ms === null ? (
-            <p className="dim">No marks yet. Nothing ventured, nothing lost.</p>
-          ) : (
-            <p>
-              realized <Money value={a.realized} signed tone cents /> · unrealized <Money value={a.unrealized} signed tone cents /> · locked{' '}
-              <Money value={a.locked} cents /> · max dd <Money value={a.max_drawdown} cents /> · {a.n_positions === null ? '—' : a.n_positions} open
-            </p>
-          )}
-        </div>
-      ))}
+    <div className="scroll">
+      <table>
+        <thead>
+          <tr>
+            {['ACCOUNT', 'EQUITY', 'REALIZED', 'UNREALIZED', 'LOCKED', 'MAX DD', 'OPEN'].map((h) => (
+              <th key={h} scope="col">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {accounts.map((a) => (
+            <tr key={a.account_id}>
+              <td>
+                {policyCardTitle(a.policy)}
+                {!isZero(a.fee_bips) && ` · FEE ${a.fee_bips} BP`}
+              </td>
+              {a.marked_ms === null ? (
+                <td colSpan={6} className="dim">
+                  No marks yet. Nothing ventured, nothing lost.
+                </td>
+              ) : (
+                <>
+                  <td className="num">
+                    <Money value={a.equity ?? a.bankroll} cents />
+                  </td>
+                  <td className="num">
+                    <Money value={a.realized} signed tone cents />
+                  </td>
+                  <td className="num">
+                    <Money value={a.unrealized} signed tone cents />
+                  </td>
+                  <td className="num">
+                    <Money value={a.locked} cents />
+                  </td>
+                  <td className="num">
+                    <Money value={a.max_drawdown} cents />
+                  </td>
+                  <td className="num">{a.n_positions === null ? '—' : a.n_positions}</td>
+                </>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -186,9 +230,8 @@ function Ledger({ accounts, account, cursor, marks, onAccount, onCursor, onMarks
   onMarks: (show: boolean) => void;
 }) {
   const page = useApi((s) => api.paperLedger(account, cursor, !marks, s), [account, cursor, marks]);
-  const current = accounts.find((a) => a.account_id === account);
   return (
-    <Box title={`LEDGER · ${current ? policyCardTitle(current.policy) : account}`} help="ledger">
+    <>
       <div className="seg" role="group" aria-label="ledger account">
         {accounts.map((a) => (
           <button key={a.account_id} type="button" className={a.account_id === account ? 'on' : undefined} aria-pressed={a.account_id === account} onClick={() => onAccount(a.account_id)}>
@@ -219,7 +262,7 @@ function Ledger({ accounts, account, cursor, marks, onAccount, onCursor, onMarks
           )
         }
       </Loadable>
-    </Box>
+    </>
   );
 }
 
@@ -241,8 +284,10 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
     setSp(next);
   };
   return (
-    <>
-      <Box title="SCENARIO" help="scenario">
+    <Box
+      title={`ACCOUNTS · ${formatMoney(inScenario[0]?.bankroll ?? null)} EACH · LAST 24 H`}
+      help="equity"
+      actions={
         <div className="seg" role="group" aria-label="latency scenario">
           {scenarios.map((s) => (
             <button key={s} type="button" className={s === scenario ? 'on' : undefined} aria-pressed={s === scenario} onClick={() => set({ scenario: s, account: null, lcursor: null })}>
@@ -250,22 +295,13 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
             </button>
           ))}
         </div>
-      </Box>
-      <EquityChart key={scenario} accounts={inScenario} />
-      <Cards accounts={inScenario} />
-      <div className="grid2">
-        <Box title="AWAITING RESOLUTION" help="awaiting">
-          <Loadable state={positions} what="positions">
-            {(d) => {
-              const rows = d.items.filter((p) => ids.includes(p.account_id));
-              return rows.length === 0 ? (
-                <EmptyState text={NOTHING_AWAITING} />
-              ) : (
-                <Table columns={positionColumns} rows={rows} rowKey={(p) => `${p.account_id}|${p.market_id}|${p.outcome}|${p.returned}`} />
-              );
-            }}
-          </Loadable>
-        </Box>
+      }
+    >
+      <AccountsChart key={scenario} accounts={inScenario} />
+      <Fold id="paper:accounts" label="all numbers">
+        <AccountsTable accounts={inScenario} />
+      </Fold>
+      <Fold id="paper:ledger" label="ledger">
         {account !== undefined && (
           <Ledger
             accounts={inScenario}
@@ -277,8 +313,20 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
             onMarks={(show) => set({ marks: show ? '1' : null, lcursor: null })}
           />
         )}
-      </div>
-    </>
+      </Fold>
+      <Fold id="paper:awaiting" label="awaiting resolution">
+        <Loadable state={positions} what="positions">
+          {(d) => {
+            const rows = d.items.filter((p) => ids.includes(p.account_id));
+            return rows.length === 0 ? (
+              <EmptyState text={NOTHING_AWAITING} />
+            ) : (
+              <Table columns={positionColumns} rows={rows} rowKey={(p) => `${p.account_id}|${p.market_id}|${p.outcome}|${p.returned}`} />
+            );
+          }}
+        </Loadable>
+      </Fold>
+    </Box>
   );
 }
 
@@ -288,7 +336,6 @@ export function Paper() {
   return (
     <>
       <EdgeCapture />
-      <SweetSpots />
       <Loadable state={accounts} what="paper accounts">
         {(d) =>
           d.items.length === 0 ? (

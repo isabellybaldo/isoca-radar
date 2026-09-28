@@ -14,18 +14,33 @@ const renderCard = (card: CardBody, stale = false) =>
     </MemoryRouter>,
   );
 
+/** The row's label appears twice (the claim's dim caption and the folded table's rowlabel cell); find the <tr>. */
+const tableRowFor = (text: string, count: number): HTMLTableRowElement => {
+  const matches = screen.getAllByText(text);
+  expect(matches).toHaveLength(count);
+  const tr = matches.map((el) => el.closest('tr')).find((t): t is HTMLTableRowElement => t !== null);
+  if (!tr) throw new Error(`no table row for ${text}`);
+  return tr;
+};
+
 describe('CardView', () => {
   it('renders a live card: three columns, n, the short hash with the full one on hover, a (?)', () => {
     renderCard(cardFixture());
     const card = screen.getByRole('article', { name: 'G1 · Side asymmetry' });
     expect(within(card).getByText('LIVE')).toBeInTheDocument();
     for (const h of ['PAPER', 'THEIR METHOD', 'OUR METHOD']) expect(within(card).getByText(h)).toBeInTheDocument();
-    expect(within(card).getByText('2,098')).toBeInTheDocument();
+    expect(within(card).getAllByText('2,098').length).toBe(2);
     expect(within(card).getByText('30.26×')).toBeInTheDocument();
     expect(within(card).getByText('#3f2a9c1b7d4e')).toHaveAttribute('title', cardFixture().hash);
     expect(within(card).getByText(/n = 1240/)).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Help: What is side asymmetry?' })).toBeInTheDocument();
     expect(within(card).getByRole('img', { name: 'YES 1150, NO 38' })).toBeInTheDocument();
+    const claim = card.querySelector('dl.claim') as HTMLElement;
+    expect(within(claim).getByText('paper')).toBeInTheDocument();
+    expect(within(claim).getByText('ours')).toBeInTheDocument();
+    expect(claim).not.toHaveClass('dim');
+    expect(within(card).getByText('all numbers').closest('details')).not.toHaveAttribute('open');
+    expect(within(card).getByText("how it's computed").closest('details')).not.toHaveAttribute('open');
   });
 
   it('renders warming with since and days of data', () => {
@@ -48,14 +63,17 @@ describe('CardView', () => {
     expect(screen.getByText('THIN')).toBeInTheDocument();
     expect(screen.getByText('thin: NO side: n = 0 < 10, so the ratio is not reliable')).toBeInTheDocument();
     expect(screen.getAllByText('—')).toHaveLength(2);
-    expect(screen.getAllByText('0')).toHaveLength(2);
-    expect(screen.getByText('NO-side episodes').closest('tr')).toHaveClass('dim');
+    expect(screen.getAllByText('0')).toHaveLength(4);
+    expect(tableRowFor('NO-side episodes', 2)).toHaveClass('dim');
   });
 
   it('renders under review', () => {
     renderCard(cardFixture({ status: 'under_review' }));
     expect(screen.getByText('UNDER REVIEW')).toBeInTheDocument();
     expect(screen.getByText(UNDER_REVIEW)).toBeInTheDocument();
+    // so a catch-up 0 never reads as a result: the claim dims too, not just the folded table.
+    const card = screen.getByRole('article', { name: 'G1 · Side asymmetry' });
+    expect(card.querySelector('dl.claim')).toHaveClass('dim');
   });
 
   it('hides empty method columns and links the biggest opportunity', () => {
@@ -68,7 +86,8 @@ describe('CardView', () => {
     );
     expect(screen.queryByText('PAPER')).toBeNull();
     expect(screen.getByText('VALUE')).toBeInTheDocument();
-    expect(screen.getByText('$12.50')).toBeInTheDocument();
+    // the claim (first row, big type) and the folded table both print the headline value.
+    expect(screen.getAllByText('$12.50')).toHaveLength(2);
     expect(screen.getByRole('link', { name: 'biggest opportunity →' })).toHaveAttribute('href', '/episodes/live-9-00000042');
   });
 
@@ -83,14 +102,18 @@ describe('CardView', () => {
         series: {},
       }),
     );
-    const rounded = screen.getByText('$12.57');
-    expect(rounded).toHaveAttribute('title', '$12.567755');
+    // the claim (first row) and the folded table both print the rounded headline value.
+    const rounded = screen.getAllByText('$12.57');
+    expect(rounded).toHaveLength(2);
+    for (const el of rounded) expect(el).toHaveAttribute('title', '$12.567755');
     expect(screen.getByText('biggest single opportunity').closest('tr')).toHaveTextContent('—');
   });
 
   it('dims every number when the results are stale', () => {
     renderCard(cardFixture(), true);
-    expect(screen.getByText('YES-side episodes').closest('tr')).toHaveClass('dim');
+    expect(tableRowFor('YES-side episodes', 2)).toHaveClass('dim');
+    const card = screen.getByRole('article', { name: 'G1 · Side asymmetry' });
+    expect(card.querySelector('dl.claim')).toHaveClass('dim');
   });
 
   it('shows the premise key in the footer, next to n and the hash, dim and wrapping', () => {
@@ -106,7 +129,7 @@ describe('CardView', () => {
 
   it('dims the rows while the premises are under review, so a catch-up 0 never reads as a result', () => {
     renderCard(cardFixture({ status: 'under_review' }));
-    expect(screen.getByText('YES-side episodes').closest('tr')).toHaveClass('dim');
+    expect(tableRowFor('YES-side episodes', 2)).toHaveClass('dim');
   });
 
   it('says how long ago its own body was computed, UTC on the page and local time on hover', () => {

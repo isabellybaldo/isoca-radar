@@ -12,6 +12,7 @@ import { Help } from '../components/Help';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
+import { SweetCard } from '../components/SweetCard';
 import { Table, type Column } from '../components/Table';
 import { Tag } from '../components/Tag';
 import { teaserAmountExact, teaserLine, withThinEdge } from '../lib/cards';
@@ -182,6 +183,7 @@ export function Radar() {
           )}
         </Loadable>
       </Box>
+      <SweetCard />
       <Box title={`ARBITRAGE (YES / NO) · ${arb.length}`} help="open">
         {staleHealth && <Tag tone="flag">{OPEN_STALE}</Tag>}
         <Loadable state={open} what="open episodes">
