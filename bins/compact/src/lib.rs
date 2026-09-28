@@ -3,7 +3,9 @@
 //! only compact_hours and compact_status.
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod guard;
+pub mod rows;
 
 /// git sha baked in at image build time (the image's SCANNER_VERSION build arg), "dev" otherwise.
 pub fn version() -> &'static str {
