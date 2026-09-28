@@ -859,34 +859,41 @@ async fn run_live(
     // Unique across runs AND within a run (F3): run ids are unique, so a warm start that reuses
     // an earlier `taken_ms` in a new process can never overwrite a previous run's record.
     let mut universe_seq: u64 = u64::try_from(run_id).unwrap_or(0).saturating_mul(1_000_000);
+    // Spec 5b §4.5: a new record only when the content changed; an unchanged refresh still
+    // captures its control line, naming the last record capture acknowledged, so replay sees the
+    // same inputs (ruling R16).
+    let mut dedup = capture::UniverseDedup::default();
     let mut apply =
         |engine: &mut Engine, u: Arc<Universe>, conn_of: &HashMap<String, usize>, io: &Io| {
-            universe_seq += 1;
-            let file = capture::universe_file_name(u.taken_ms, universe_seq);
-            let rec = UniverseRecord {
-                universe: (*u).clone(),
-                conn_of: conn_of
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect::<ConnMap>(),
-                file: file.clone(),
+            let conn_map: ConnMap = conn_of.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let st = capture::CaptureState::of(&io.metrics);
+            let ctl = match dedup.plan(&u, &conn_map, st) {
+                capture::UniversePlan::Reuse { taken_ms, file } => Ctl::Universe { taken_ms, file },
+                capture::UniversePlan::Write { hash } => {
+                    universe_seq += 1;
+                    let file = capture::universe_file_name(u.taken_ms, universe_seq);
+                    let rec = UniverseRecord {
+                        universe: (*u).clone(),
+                        conn_of: conn_map,
+                        file: file.clone(),
+                    };
+                    if io
+                        .capture
+                        .try_send(CaptureMsg::Universe(Box::new(rec)))
+                        .is_err()
+                    {
+                        io.metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        dedup.written(hash, u.taken_ms, file.clone(), universe_seq, st.drops);
+                    }
+                    Ctl::Universe {
+                        taken_ms: u.taken_ms,
+                        file,
+                    }
+                }
             };
-            if io
-                .capture
-                .try_send(CaptureMsg::Universe(Box::new(rec)))
-                .is_err()
-            {
-                io.metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
-            }
             let t = now_ms();
-            io.ctl(
-                0,
-                Ctl::Universe {
-                    taken_ms: u.taken_ms,
-                    file,
-                },
-                t,
-            );
+            io.ctl(0, ctl, t);
             engine.apply_universe(u, conn_of, t)
         };
     let outs = apply(&mut engine, universe.clone(), &plan.conn_of(), &io);

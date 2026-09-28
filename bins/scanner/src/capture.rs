@@ -10,6 +10,7 @@ use crate::config::CaptureCfg;
 use crate::metrics::Metrics;
 use crate::universe::{ConnMap, Universe};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,133 @@ pub struct UniverseRecord {
 pub enum CaptureMsg {
     Line(Line),
     Universe(Box<UniverseRecord>),
+}
+
+/// What to capture for a universe refresh (spec 5b §4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UniversePlan {
+    /// The content changed: write a new record (then call `UniverseDedup::written`).
+    Write { hash: String },
+    /// Same content as the last record written: capture only a control line naming it.
+    Reuse { taken_ms: i64, file: String },
+}
+
+/// sha256 of the content a replay uses: the groups, the canary pairs and the connection map.
+/// `taken_ms` is left out on purpose: it changes every refresh, the content often does not.
+pub fn universe_hash(u: &Universe, conn_of: &ConnMap) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(&(&u.groups, &u.canary, conn_of))?;
+    Ok(Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// What the dedup needs to know about the capture thread (spec 5b §4.5, ruling R16).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureState {
+    /// Seq of the newest universe record the capture thread wrote to disk.
+    pub acked_seq: u64,
+    pub paused: bool,
+    /// Capture messages dropped so far.
+    pub drops: u64,
+}
+
+impl CaptureState {
+    pub fn of(m: &Metrics) -> CaptureState {
+        CaptureState {
+            acked_seq: m.universe_acked_seq.load(Ordering::Acquire),
+            paused: m.capture_paused.load(Ordering::Relaxed),
+            drops: m.capture_drops.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LastRecord {
+    hash: String,
+    taken_ms: i64,
+    file: String,
+    seq: u64,
+    drops: u64,
+}
+
+/// The last universe record handed to the capture thread.
+#[derive(Debug, Clone, Default)]
+pub struct UniverseDedup {
+    last: Option<LastRecord>,
+}
+
+impl UniverseDedup {
+    /// Reuse the last record only when its content is the same AND capture really wrote it
+    /// (acknowledged), is not paused, and dropped nothing since; otherwise write a new record.
+    pub fn plan(&self, u: &Universe, conn_of: &ConnMap, st: CaptureState) -> UniversePlan {
+        match universe_hash(u, conn_of) {
+            Ok(h) => match &self.last {
+                Some(l)
+                    if l.hash == h
+                        && st.acked_seq >= l.seq
+                        && !st.paused
+                        && st.drops == l.drops =>
+                {
+                    UniversePlan::Reuse {
+                        taken_ms: l.taken_ms,
+                        file: l.file.clone(),
+                    }
+                }
+                _ => UniversePlan::Write { hash: h },
+            },
+            // Can't hash it: always write (an empty hash is never remembered).
+            Err(_) => UniversePlan::Write {
+                hash: String::new(),
+            },
+        }
+    }
+
+    /// Call once record `seq` was handed to the capture thread (`drops`: the drop count then).
+    pub fn written(&mut self, hash: String, taken_ms: i64, file: String, seq: u64, drops: u64) {
+        self.last = (!hash.is_empty()).then_some(LastRecord {
+            hash,
+            taken_ms,
+            file,
+            seq,
+            drops,
+        });
+    }
+}
+
+/// `<seq>` of a `universe-<taken_ms>-<seq>.json.zst` file name.
+fn universe_seq(name: &str) -> Option<u64> {
+    name.strip_prefix("universe-")?
+        .strip_suffix(".json.zst")?
+        .rsplit_once('-')?
+        .1
+        .parse()
+        .ok()
+}
+
+/// Write one capture message unless capture is paused. A universe record that reaches disk is
+/// acknowledged (`metrics.universe_acked_seq`), so the dedup never names a record that was
+/// dropped. Returns whether it was written.
+pub fn deliver(writer: &mut Writer, msg: &CaptureMsg, metrics: &Metrics) -> bool {
+    if metrics.capture_paused.load(Ordering::Relaxed) {
+        metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    match writer.write(msg) {
+        Ok(()) => {
+            if let CaptureMsg::Universe(rec) = msg
+                && let Some(seq) = universe_seq(&rec.file)
+            {
+                metrics.universe_acked_seq.fetch_max(seq, Ordering::Release);
+            }
+            true
+        }
+        Err(e) => {
+            metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
+            eprintln!("capture: write failed: {e}");
+            false
+        }
+    }
 }
 
 /// zstd level for hour files and universe records. Ruling S3a-2 (2026-09-25): it stays 3. Phase 0
@@ -197,35 +325,24 @@ pub fn over_budget_hours(dir: &Path, max_bytes: u64, keep: Option<&Path>) -> Vec
     out
 }
 
-/// Universe record files older than the oldest hour file still on disk. Once the retention/
-/// budget housekeeping has decided which hour files survive, any universe record whose
-/// `taken_ms` predates all of them documents a universe no replay can reach anymore.
-/// `None` (no hour files at all) deletes nothing: there is nothing yet to be "older than".
+/// Universe records no remaining hour can name (spec 5b §4.5). A control line names the record in
+/// force when it was captured: one written during or after the oldest remaining hour, or the newest
+/// one written before it (an unchanged refresh keeps naming that older record). So every record
+/// written (mtime) at or after the oldest hour's start is kept, plus the newest one before it; the
+/// rest are returned. A record whose write time can't be read is kept. No hour files: nothing.
 pub fn stale_universe_files(dir: &Path) -> Vec<PathBuf> {
-    let mut hour_starts: Vec<i64> = Vec::new();
-    let mut universes: Vec<(PathBuf, i64)> = Vec::new();
-    let Ok(days) = std::fs::read_dir(dir) else {
+    let l = tape::files::listing(dir);
+    let Some(oldest) = l.hours.iter().map(|h| h.start_ms).min() else {
         return Vec::new();
     };
-    for day in days.flatten() {
-        let day_name = day.file_name().to_string_lossy().to_string();
-        let Ok(entries) = std::fs::read_dir(day.path()) else {
-            continue;
-        };
-        for f in entries.flatten() {
-            let name = f.file_name().to_string_lossy().to_string();
-            if let Some(start) = hour_start_ms(&day_name, &name) {
-                hour_starts.push(start);
-            } else if let Some(taken_ms) = universe_taken_ms(&name) {
-                universes.push((f.path(), taken_ms));
-            }
-        }
-    }
-    let Some(oldest_hour) = hour_starts.into_iter().min() else {
-        return Vec::new();
-    };
-    universes.retain(|(_, taken_ms)| *taken_ms < oldest_hour);
-    let mut out: Vec<PathBuf> = universes.into_iter().map(|(p, _)| p).collect();
+    let mut before: Vec<(i64, PathBuf)> = l
+        .universes
+        .into_iter()
+        .filter_map(|u| u.mtime_ms.filter(|m| *m < oldest).map(|m| (m, u.path)))
+        .collect();
+    before.sort();
+    before.pop(); // the newest record written before the oldest hour is still in force
+    let mut out: Vec<PathBuf> = before.into_iter().map(|(_, p)| p).collect();
     out.sort();
     out
 }
@@ -280,14 +397,7 @@ pub fn spawn(
                 );
                 metrics.capture_deletes.fetch_add(n, Ordering::Relaxed);
             }
-            if metrics.capture_paused.load(Ordering::Relaxed) {
-                metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if let Err(e) = writer.write(&msg) {
-                metrics.capture_drops.fetch_add(1, Ordering::Relaxed);
-                eprintln!("capture: write failed: {e}");
-            }
+            deliver(&mut writer, &msg, &metrics);
         }
         writer.finish();
     })

@@ -23,6 +23,9 @@ pub struct Metrics {
     pub shards: AtomicU64,
     pub dropped_groups: AtomicU64,
     pub capture_paused: AtomicBool,
+    /// Seq of the newest universe record the capture thread wrote to disk (spec 5b §4.5): the
+    /// universe dedup names only acknowledged records.
+    pub universe_acked_seq: AtomicU64,
     pub lags: Mutex<Vec<i64>>,
     pub rest_ms: Mutex<Vec<i64>>,
     pub rtt_ms: Mutex<Vec<i64>>,
