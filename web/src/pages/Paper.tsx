@@ -24,7 +24,6 @@ export const PAPER_QUIP = "The naive strategy is doing great. Until 'Other' wins
 export const PAPER_LOSS_QUIP = 'Paper losses, real lessons. At 145 ms the arbitrage is gone before we arrive; we pay the spread to leave.';
 export const PAPER_EMPTY = 'No paper trades yet. Nothing ventured, nothing lost.';
 export const NOTHING_AWAITING = 'Nothing awaiting resolution. Patience is free.';
-export const NO_EPOCHS = 'No epoch data yet.';
 export const NO_EARLIER = 'No earlier epochs. This is the first one.';
 export const EPOCHS_NOTE = 'Final paper equity of each P0 account at fee 0: its last mark before the next epoch began.';
 const TONES: Record<string, string> = { 'P0-converter': 'p0', 'P1-settlement': 'p1', 'P2-combo': 'p2', 'P3-naive': 'p3' };
@@ -435,7 +434,14 @@ function PaperBody({ accounts, positions, epochs, bump }: {
         </Loadable>
       </Fold>
       <Fold id="paper:epochs" label="earlier epochs">
-        {(open) => (!open ? null : epochs.data ? <EarlierEpochs epochs={epochs.data} accounts={accounts} /> : <EmptyState text={NO_EPOCHS} />)}
+        {(open) =>
+          open && (
+            // A failed /api/paper/epochs shows its error here, never "no epoch data".
+            <Loadable state={epochs} what="epochs">
+              {(d) => <EarlierEpochs epochs={d} accounts={accounts} />}
+            </Loadable>
+          )
+        }
       </Fold>
       <ResetFold epochs={epochs} />
     </Box>

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EPOCH1_START, accountFixture, edgeFixture, epochsFixture, ledgerFixture, positionFixture } from '../test/fixtures';
-import { mockApi } from '../test/mockApi';
+import { jsonResponse, mockApi } from '../test/mockApi';
 import { PAPER_EMPTY, PAPER_LOSS_QUIP, PAPER_QUIP, Paper, equityAxis, extremes, policyLabel } from './Paper';
 
 const equityRoute = (url: URL) => ({
@@ -306,6 +306,21 @@ describe('Paper', () => {
     expect(new Set(epochCalls().map((u) => new URL(u, 'http://x').searchParams.get('account')))).toEqual(
       new Set(['P0-converter/rung-0', 'P0-converter/colo-idle', 'P0-converter/sp-idle']),
     );
+  });
+
+  it('earlier epochs: a failed /api/paper/epochs shows the error, not "no epoch data" (M4)', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+      '/api/paper/epochs': () => jsonResponse(503, { error: 'db_unavailable', detail: 'Epochs are resting. Try again.' }),
+    });
+    renderAt('/paper');
+    await userEvent.click(await screen.findByText('earlier epochs'));
+    const fold = screen.getByText('earlier epochs').closest('details') as HTMLDetailsElement;
+    expect(await within(fold).findByText('Epochs are resting. Try again.')).toBeInTheDocument();
+    expect(within(fold).queryByText('No epoch data yet.')).toBeNull();
   });
 
   it('labels P3 as the control that ignores fees', async () => {
