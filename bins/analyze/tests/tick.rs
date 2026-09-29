@@ -1569,3 +1569,69 @@ async fn a_sweet_only_read_failure_fails_the_whole_tick_and_the_next_one_heals()
     rw.close().await;
     db.drop(owner).await;
 }
+
+async fn epoch(owner: &Store, run_id: i64, epoch: i32, start_ms: i64) {
+    owner
+        .write_batch(&Batch {
+            paper_epochs: vec![PaperEpochRow {
+                epoch,
+                start_ms,
+                cause: "reset".into(),
+                request_id: None,
+                run_id,
+                policies_sha256: "x".into(),
+            }],
+            ..Batch::default()
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_first_mark_of_a_new_epoch_counts_from_the_bankroll() {
+    for with_mark_now in [true, false] {
+        let Some((owner, db)) = common::fresh().await else {
+            return;
+        };
+        let r = run(&owner, T0 - 3 * H).await;
+        owner
+            .insert_run_premises(&premises(r, "1+aa"))
+            .await
+            .unwrap();
+        write(
+            &owner,
+            vec![ep(
+                "a",
+                r,
+                "no_basket",
+                T0 - 2 * H,
+                Some(T0 - 2 * H + 1_000),
+            )],
+        )
+        .await;
+        let mut marks = vec![
+            mark(r, T0 - H + 10 * M, dec!(1010)),
+            mark(r, T0 - H + 20 * M, dec!(1003)),
+        ];
+        if with_mark_now {
+            marks.push(mark(r, T0 - H + 15 * M, dec!(1000))); // the reset's mark_now row
+        }
+        paper(&owner, vec![p0(r, dec!(1000))], marks).await;
+        epoch(&owner, r, 1, T0 - H + 15 * M).await;
+        let rw = rw(&db).await;
+        Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+            .await
+            .unwrap()
+            .tick(T0 + 30 * M)
+            .await
+            .unwrap();
+        assert_eq!(
+            cell(&body(&rw, "24h", "EDGE").await, CAPTURED, "ours"),
+            "13",
+            "with_mark_now={with_mark_now}: +10 vs the bankroll, then +3 vs the new epoch's \
+             bankroll (a delta from the old epoch's mark would give 3)"
+        );
+        rw.close().await;
+        db.drop(owner).await;
+    }
+}

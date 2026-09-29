@@ -564,6 +564,10 @@ type Deltas = BTreeMap<i64, Vec<(String, Decimal)>>;
 /// have the same policies the account was restored, so the delta telescopes across keys (booking
 /// the downtime revaluation into this key's first hour); other policies count from the bankroll;
 /// unknown policies skip the mark. An account's very first mark counts against its bankroll.
+/// Spec 7a §6: an account's first mark at or after a paper epoch's start also counts from the
+/// bankroll (the reset started every account there); with the reset's `mark_now` row that delta
+/// is 0, without it the real P&L after the reset still counts. Epochs are read AFTER the marks,
+/// in the same tick, so a reset committed between the two reads is never half-seen.
 async fn edge_inputs<C: CellData>(
     env: &Env<'_>,
     fam: &Family<C>,
@@ -584,6 +588,7 @@ async fn edge_inputs<C: CellData>(
         .collect();
     let ids: Vec<String> = env.accounts.iter().map(|(a, _)| a.clone()).collect();
     let marks = env.store.marks_with_prev(&ids, from, to).await?;
+    let epoch_starts = env.store.paper_epoch_starts().await?;
     // each run's policies, as the config part of its `sim` premise version (see `policies_of`)
     let sim: BTreeMap<i64, &str> = env
         .runs
@@ -607,7 +612,10 @@ async fn edge_inputs<C: CellData>(
             continue;
         };
         let fresh = || bankroll_for(env, &sim, m.run_id, &m.account_id).map(|b| m.equity - b);
+        // a paper epoch started in (p, m]: every account restarted there
+        let new_epoch = |p: &MarkPoint| epoch_starts.iter().any(|&s| p.t_ms < s && s <= m.t_ms);
         let delta = match p {
+            Some(p) if new_epoch(p) => fresh(),
             Some(p) if fam.runs.contains_key(&p.run_id) => Some(m.equity - p.equity),
             // the previous mark is another premise key's run. Scanner `restore_trader` starts
             // every account fresh only when the policies file changed: other policies -> this
