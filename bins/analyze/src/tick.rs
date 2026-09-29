@@ -573,10 +573,8 @@ async fn edge_inputs<C: CellData>(
 ) -> anyhow::Result<(Latency, Deltas)> {
     let mut lat = Latency::new();
     for m in env.store.health_latency(run_ids, from, to).await? {
-        if let (Some(l), Some(r)) = (m.lag_p50_ms, m.rest_rtt_p50_ms) {
-            lat.entry(hour_of(m.minute_ms))
-                .or_default()
-                .push(i64::from(l) + i64::from(r) / 2);
+        if let Some(v) = cards::ladder::minute_latency(m.lag_p50_ms, m.rest_rtt_p50_ms) {
+            lat.entry(hour_of(m.minute_ms)).or_default().push(v);
         }
     }
     let scenario: BTreeMap<&str, &str> = env

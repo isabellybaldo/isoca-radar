@@ -6,15 +6,7 @@ use cards::body::ScenarioLat;
 pub fn parse(text: &str) -> anyhow::Result<Vec<ScenarioLat>> {
     let sim: sim::config::SimConfig = toml::from_str(text).context("parse policies")?;
     sim.validate().context("validate policies")?;
-    Ok(sim
-        .scenarios
-        .iter()
-        .map(|s| ScenarioLat {
-            name: s.name.clone(),
-            net_ms: s.net_ms,
-            latency_ms: s.proc_ms + s.net_ms + s.match_ms,
-        })
-        .collect())
+    cards::scenarios::parse(text).map_err(anyhow::Error::msg)
 }
 
 pub fn load(path: &str) -> anyhow::Result<Vec<ScenarioLat>> {
