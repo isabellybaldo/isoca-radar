@@ -5,7 +5,7 @@ import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
 import {
-  LADDER, type LadderModel, MIN_EXEC, NOT_MONOTONE, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
+  type LadderModel, MIN_EXEC, NOT_MONOTONE, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
   slotX, stackRung, usBand, usText, yDomain,
 } from '../lib/ladder';
 
@@ -29,6 +29,7 @@ const LEGEND: [string, string][] = [
   ['settle', 'settled at resolution'],
   ['unrealized', 'unrealized, marked now'],
   ['net', 'net on paper'],
+  ['extra', 'an extra, net on paper'],
 ];
 const HEADS = ['RUNG', 'N', 'LEG RISK', 'MISSED', 'BASKET GAINS', 'LEG-RISK COST', 'SETTLED', 'UNREALIZED', 'NET'];
 
@@ -37,19 +38,6 @@ const geo = (v: string) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
-
-/** The right edge of the 300 ms slot: the extras' slot starts here and the us-band stops here. */
-const LADDER_EDGE = LADDER.length / SLOTS;
-/** The narrowest band drawn (viewBox units), so a measurement far past the ladder still shows. */
-const MIN_BAND = 8;
-
-/** The us-band in viewBox units: clamped before the extras' slot, never narrower than MIN_BAND. */
-function usRect(m: { latency_ms: number }): { x: number; width: number } {
-  const b = usBand(m);
-  const x1 = Math.min(b.x1, LADDER_EDGE) * W;
-  const x0 = Math.min(b.x0 * W, x1 - MIN_BAND);
-  return { x: x0, width: x1 - x0 };
-}
 
 function Markets({ model }: { model: LadderModel }) {
   const { status, rows } = model.markets;
@@ -100,7 +88,7 @@ function LadderTable({ rungs }: { rungs: LadderRung[] }) {
 /**
  * Spec 7a §7.2, "at what latency would this pay?": one stacked bar per rung on an ordinal axis (basket
  * gains up, leg-risk cost down, settle and unrealized by their sign, unrealized hatched), a net dot,
- * the zero line, the "us" band (stopped before the extras' slot), the extras beside the 300 ms rung, and the break-even line. The one big
+ * the zero line, the "us" band (stopped before the extras' slot), the extras as squares beside the 300 ms rung, and the break-even line. The one big
  * number is the break-even; every other label is HTML beside the SVG (preserveAspectRatio="none").
  * Pure: it draws `model` and never fetches.
  */
@@ -112,7 +100,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
   const zero = sy(0);
   const be = breakEvenText(model);
   const thin = model.breakEven.kind === 'thin';
-  const band = model.measured ? usRect(model.measured) : null;
+  const band = model.measured ? usBand(model.measured) : null;
   const beX = model.breakEven.kind === 'at' ? latencyX(model.breakEven.latency_ms) * W : null;
   return (
     <figure className="ladder" aria-label="at what latency would this pay">
@@ -127,7 +115,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
             <rect className="ll-hatch-line" x={0} y={0} width={2} height={6} />
           </pattern>
         </defs>
-        {band && <rect className="ll-us" x={band.x} y={0} width={band.width} height={H} />}
+        {band && <rect className="ll-us" x={band.x0 * W} y={0} width={(band.x1 - band.x0) * W} height={H} />}
         {model.columns.map((c, i) => {
           const cx = slotX(i) * W;
           if (c.kind === 'missing') {
@@ -153,7 +141,9 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
         })}
         {model.extras.map((r, j) => {
           const cx = slotX(SLOTS - 1) * W + (j % 2 === 0 ? -14 : 14);
-          return <rect key={r.account_id} className="ll-extra" data-scenario={r.scenario} x={cx - 5} y={sy(geo(r.net)) - 5} width={10} height={10} />;
+          // A zero-length line with a square cap and a non-scaling stroke: a square at any stretch (a rect would squash).
+          const y = sy(geo(r.net));
+          return <line key={r.account_id} className="ll-extra" data-scenario={r.scenario} x1={cx} x2={cx} y1={y} y2={y} />;
         })}
         <line className="ll-zero" x1={0} x2={W} y1={zero} y2={zero} />
         {beX !== null && <line className="ll-be" x1={beX} x2={beX} y1={0} y2={H} />}

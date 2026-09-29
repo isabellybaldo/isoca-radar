@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { BreakEven } from '../api/types';
 import { ladderFixture, ladderLiveFixture, ladderRung } from '../test/fixtures';
 import {
-  LADDER, MIN_EXEC, SLOTS, asOfText, breakEvenText, epochText, extraText, ladderModel, latencyX, rungCountText, rungMsText,
+  LADDER, MIN_BAND, MIN_EXEC, SLOTS, asOfText, breakEvenText, epochText, extraText, ladderModel, latencyX, rungCountText, rungMsText,
   slotX, stackRung, usBand, usText, yDomain,
 } from './ladder';
 
@@ -88,9 +88,21 @@ describe('the ordinal axis', () => {
     expect(low.x0).toBeLessThan(slotX(2));
     expect(low.x1).toBeGreaterThan(slotX(3));
     expect(low.x1).toBeLessThan(slotX(4));
-    expect(usBand({ latency_ms: 5000 })).toEqual({ x0: 1, x1: 1 });
+    expect(latencyX(5150)).toBe(1);
     expect(latencyX(-40)).toBe(slotX(0));
     expect(Number.isFinite(latencyX(Number.MAX_SAFE_INTEGER))).toBe(true);
+  });
+
+  it('stops the us-band before the extras slot and never lets it collapse, at any slot count', () => {
+    for (const slots of [SLOTS, LADDER.length]) {
+      const edge = LADDER.length / slots; // the right edge of the 300 ms slot
+      for (const latency_ms of [155, 250, 5000]) {
+        const b = usBand({ latency_ms }, slots);
+        expect(b.x1, `${slots} slots, measured ${latency_ms}`).toBeLessThanOrEqual(edge);
+        expect(b.x1 - b.x0, `${slots} slots, measured ${latency_ms}`).toBeGreaterThanOrEqual(MIN_BAND - 1e-12);
+      }
+    }
+    expect(usBand({ latency_ms: 5000 }).x1).toBe(LADDER.length / SLOTS);
   });
 });
 

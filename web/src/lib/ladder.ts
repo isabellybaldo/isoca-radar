@@ -89,9 +89,17 @@ export function latencyX(ms: number, slots: number = SLOTS): number {
   return Math.min(1, Math.max(slotX(0, slots), x));
 }
 
-/** Spec §2: "us" is a band from measured + 50 to measured + 150 ms (matching), never a point. */
+/** The narrowest us-band, as a fraction of the width, so a measurement far past the ladder still shows. */
+export const MIN_BAND = 0.012;
+
+/**
+ * Spec §2: "us" is a band from measured + 50 to measured + 150 ms (matching), never a point. It stops at
+ * the right edge of the last LADDER slot (never into the extras' slot) and is never narrower than MIN_BAND.
+ */
 export function usBand(m: { latency_ms: number }, slots: number = SLOTS): { x0: number; x1: number } {
-  return { x0: latencyX(m.latency_ms + 50, slots), x1: latencyX(m.latency_ms + 150, slots) };
+  const x1 = Math.min(latencyX(m.latency_ms + 150, slots), LADDER.length / slots);
+  const x0 = Math.min(latencyX(m.latency_ms + 50, slots), x1 - MIN_BAND);
+  return { x0, x1 };
 }
 
 export interface Segment {

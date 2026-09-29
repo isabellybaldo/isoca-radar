@@ -37,7 +37,16 @@ describe('LatencyLadder', () => {
     const id = /^url\(#(.+)\)$/.exec(fill)?.[1];
     expect(id).toMatch(/^ll-hatch-/);
     expect(container.querySelector(`pattern[id="${id}"]`)).not.toBeNull();
-    expect(container.querySelectorAll('rect.ll-extra')).toHaveLength(2);
+    // square at any stretch: a zero-length capped line, never a rect with a width that preserveAspectRatio="none" squashes
+    const extras = container.querySelectorAll('line.ll-extra');
+    expect(extras).toHaveLength(2);
+    expect(container.querySelector('rect.ll-extra')).toBeNull();
+    for (const x of extras) {
+      expect(x.hasAttribute('width')).toBe(false);
+      expect(num(x, 'x1')).toBe(num(x, 'x2'));
+      expect(num(x, 'y1')).toBe(num(x, 'y2'));
+      expect(num(x, 'x1')).toBeGreaterThan((6 / 7) * W);
+    }
     const dot = g?.querySelector('circle.ll-net') ?? null; // D-13: the net marker is a dot
     expect(num(dot, 'cx')).toBeCloseTo(slotX(2) * W);
     expect(num(dot, 'cy')).toBeLessThan(zero); // colo-idle nets +3.10
@@ -91,7 +100,7 @@ describe('LatencyLadder', () => {
     expect(rungItems().slice(0, 6).map((li) => li.lastChild?.textContent)).toEqual(['2 / 30', '2 / 30', '1 / 30', '1 / 30', '0 / 30', '0 / 30']);
     expect(screen.getByText('as of 20:09 UTC')).toBeInTheDocument();
     expect(container.querySelector('line.ll-be')).toBeNull();
-    expect(container.querySelectorAll('rect.ll-extra')).toHaveLength(2);
+    expect(container.querySelectorAll('line.ll-extra')).toHaveLength(2);
   });
 
   it('a rung with no account is an empty column labelled so, and the answer says why (review focus 1)', () => {

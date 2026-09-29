@@ -281,7 +281,7 @@ ul.plain.lg-legend { gap: 2px; font-size: 13px; color: var(--dim); }
 .ll-svg .ll-unrealized { stroke: var(--teal); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-hatch-line { fill: var(--teal); }
 .ll-svg .ll-net { fill: var(--fg); stroke: var(--fg); stroke-width: 9px; vector-effect: non-scaling-stroke; }
-.ll-svg .ll-extra { fill: var(--bg); stroke: var(--fg); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-extra { stroke: var(--dim); stroke-width: 8px; stroke-linecap: square; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-missing { fill: none; stroke: var(--line2); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-us { fill: var(--rose); opacity: 0.35; }
 .ll-svg .ll-zero { stroke: var(--fg); stroke-width: 1px; vector-effect: non-scaling-stroke; }
@@ -296,5 +296,6 @@ ul.plain.ll-legend { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15
 .ll-sw.settle { background: var(--mint); }
 .ll-sw.unrealized { background: repeating-linear-gradient(45deg, var(--teal) 0 2px, transparent 2px 5px); border: 1px solid var(--teal); }
 .ll-sw.net { background: var(--fg); border-radius: 50%; }
+.ll-sw.extra { background: var(--dim); }
 .ll-sw.us { background: var(--rose); opacity: 0.6; }
 ul.plain.ll-extras { gap: 2px; font-size: 13px; }
