@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [react()],
   // No inline scripts anywhere (spec §3 CSP): no modulepreload polyfill.
   build: { modulePreload: { polyfill: false }, sourcemap: false },
-  // fs.allow: ladder.test.ts reads ../config/policies.toml (?raw) to check the LADDER against it.
-  server: { proxy: { '/api': 'http://127.0.0.1:8081' }, fs: { allow: ['..'] } },
+  // fs.allow: web itself, plus ../config only: ladder.test.ts reads ../config/policies.toml (?raw) to check the LADDER.
+  server: { proxy: { '/api': 'http://127.0.0.1:8081' }, fs: { allow: ['.', '../config'] } },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
