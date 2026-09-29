@@ -46,6 +46,38 @@ net_ms = 145
 match_ms = 150
 honor_seconds_delay = false
 
+# Phase 7a latency ladder (spec 2026-09-29 §2, §3): exact latencies, no burst steps. d = proc +
+# net + match is the time from the exchange showing the edge to our order matching; rung-0 is the
+# impossible baseline (filled on the book that showed the edge). sp-burst and sp-idle-nodelay stay
+# extras beside the ladder.
+[[scenarios]]
+name = "rung-0"
+proc_ms = 0
+net_ms = 0
+match_ms = 0
+honor_seconds_delay = true
+
+[[scenarios]]
+name = "rung-25"
+proc_ms = 0
+net_ms = 0
+match_ms = 25
+honor_seconds_delay = true
+
+[[scenarios]]
+name = "rung-100"                       # a bot in the exchange's cloud region
+proc_ms = 5
+net_ms = 45
+match_ms = 50
+honor_seconds_delay = true
+
+[[scenarios]]
+name = "rung-200"                       # us on a good day
+proc_ms = 5
+net_ms = 95
+match_ms = 100
+honor_seconds_delay = true
+
 [[accounts]]
 policy = "P0-converter"
 scenario = "colo-idle"
@@ -135,5 +167,29 @@ per_trade = "100"
 [[accounts]]
 policy = "P3-naive"
 scenario = "sp-burst"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]                            # Phase 7a latency ladder (spec 2026-09-29 §3)
+policy = "P0-converter"
+scenario = "rung-0"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "rung-25"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "rung-100"
+bankroll = "1000"
+per_trade = "100"
+
+[[accounts]]
+policy = "P0-converter"
+scenario = "rung-200"
 bankroll = "1000"
 per_trade = "100"

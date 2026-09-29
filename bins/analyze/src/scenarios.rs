@@ -35,7 +35,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_repo_policies_give_four_scenarios() {
+    fn the_repo_policies_give_eight_scenarios() {
         let s = load(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/policies.toml"
@@ -51,7 +51,11 @@ mod tests {
                 ("colo-idle", 1, 52),
                 ("sp-idle", 145, 300),
                 ("sp-burst", 145, 450),
-                ("sp-idle-nodelay", 145, 300)
+                ("sp-idle-nodelay", 145, 300),
+                ("rung-0", 0, 0),
+                ("rung-25", 0, 25),
+                ("rung-100", 45, 100),
+                ("rung-200", 95, 200)
             ]
         );
     }

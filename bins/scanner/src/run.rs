@@ -71,6 +71,24 @@ pub fn secs_to_ms_saturating(secs: u64) -> i64 {
     i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000)
 }
 
+/// `VmHWM` (peak resident set) in kB from a `/proc/<pid>/status` text; None when absent.
+pub fn vm_hwm_kb(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+}
+
+/// This process's peak RSS (Linux only; None elsewhere, e.g. the Windows PC). Spec 7a §3's cost
+/// gate reads it from `scanner replay --dry-run`, the compact bench pattern.
+pub fn peak_rss_kb() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .as_deref()
+        .and_then(vm_hwm_kb)
+}
+
 /// Graceful-stop budget for `run_live` from the shutdown signal (S3a). With END_RUN_TIMEOUT for
 /// the `runs` exit row, the whole stop fits compose's 30 s stop_grace_period.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
@@ -1183,6 +1201,7 @@ pub async fn replay_cmd(
             .context("paper trader")
     };
     if dry_run {
+        let started = Instant::now();
         let mut eps: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut paper_rows = 0_u64;
         let stats = replay_dir_paper_with(
@@ -1198,10 +1217,12 @@ pub async fn replay_cmd(
             },
         )?;
         println!(
-            "frames {} parse_errors {} episodes {} paper_rows {paper_rows}",
+            "frames {} parse_errors {} episodes {} paper_rows {paper_rows} wall_ms {} peak_rss_kb {}",
             stats.frames,
             stats.parse_errors,
-            eps.len()
+            eps.len(),
+            started.elapsed().as_millis(),
+            peak_rss_kb().map_or_else(|| "n/a".to_string(), |k| k.to_string())
         );
         return Ok(());
     }
@@ -1273,6 +1294,23 @@ pub async fn replay_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_hwm_is_read_from_a_proc_status_text() {
+        let status = "Name:	scanner
+VmPeak:	  900 kB
+VmHWM:	  123456 kB
+VmRSS:	 100 kB
+";
+        assert_eq!(vm_hwm_kb(status), Some(123_456));
+        assert_eq!(
+            vm_hwm_kb(
+                "Name:	x
+"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn percentiles_us_sorts_then_indexes_with_integer_math() {
