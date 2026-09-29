@@ -20,6 +20,10 @@ step 3.
   replay ledgers still agree across a reset. A dropped `PaperReset` line (capture is best-effort)
   voids the comparison across it, like a dropped `Resolved`. Replay writes no `paper_epochs` row.
   Pre-7a images can neither replay nor compact an hour holding one.
+- **A start-time epoch (a request pending at start, new policies, an empty `paper_state`) is not
+  captured.** Live seeds the paper clock at the epoch's `start_ms`; replay doesn't, so an open from
+  a REST snapshot before the run's first ws frame is stamped `start_ms` live but its server `ts` in
+  replay. Live-vs-replay ledgers may differ for those opens; compare from the first ws frame on.
 - **Live-vs-replay ledgers match only for a run started from fresh accounts.** A scanner restart
   restores `paper_state`, and a restart also forgets consumed liquidity (S3c fix round 1: consumed
   liquidity is in-memory only, never persisted), so a restored trader can re-take liquidity it had
