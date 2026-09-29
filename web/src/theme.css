@@ -302,3 +302,10 @@ ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 
 /* Spec 7a §6: since when the paper accounts count. */
 .epochline { color: var(--dim); padding: 0 2px; }
+
+/* Spec 7a §5.3: the reset form. */
+.resetform { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.resetform label { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.resetform input { font: inherit; background: var(--chip); color: var(--fg); border: 2px solid var(--line); padding: 0 4px; width: 9ch; }
+.resetform button { font-family: var(--px); font-size: 7px; padding: 5px 8px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; }
+.resetform button:disabled { opacity: 0.4; cursor: default; }

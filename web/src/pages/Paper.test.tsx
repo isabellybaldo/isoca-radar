@@ -352,4 +352,19 @@ describe('Paper', () => {
       await waitFor(() => keys.forEach((k, i) => expect(count(`/api/paper/${k}`)).toBeGreaterThan(before[i])));
     });
   });
+  it('puts the reset fold last on the page, closed', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+      '/api/paper/epochs': epochsFixture(),
+    });
+    const { container } = renderAt('/paper');
+    await screen.findByText('since new policies 2026-09-29 19:58 UTC · epoch 1');
+    const summaries = [...container.querySelectorAll('details.fold > summary')].map((s) => s.textContent);
+    expect(summaries.at(-1)).toBe('reset paper money');
+    expect(summaries.at(-2)).toBe('earlier epochs');
+    expect((screen.getByText('reset paper money').closest('details') as HTMLDetailsElement).open).toBe(false);
+  });
 });

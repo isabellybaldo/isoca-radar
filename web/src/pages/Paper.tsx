@@ -11,6 +11,7 @@ import { Fold } from '../components/Fold';
 import { LineChart, type Series } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
+import { ResetFold } from '../components/ResetFold';
 import { Table, type Column } from '../components/Table';
 import { EPOCH_HOURS, type EpochSpan, P3_NOTE, earlierEpochs, epochAccounts, epochLine } from '../lib/epochs';
 import { shortId } from '../lib/labels';
@@ -401,6 +402,7 @@ function PaperBody({ accounts, positions, epochs, bump }: {
       <Fold id="paper:epochs" label="earlier epochs">
         {(open) => (!open ? null : epochs.data ? <EarlierEpochs epochs={epochs.data} accounts={accounts} /> : <EmptyState text={NO_EPOCHS} />)}
       </Fold>
+      <ResetFold epochs={epochs} />
     </Box>
   );
 }
