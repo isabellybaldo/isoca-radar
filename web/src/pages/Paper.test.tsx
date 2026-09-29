@@ -1,8 +1,8 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
-import { describe, expect, it } from 'vitest';
-import { accountFixture, edgeFixture, ledgerFixture, positionFixture } from '../test/fixtures';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EPOCH1_START, accountFixture, edgeFixture, epochsFixture, ledgerFixture, positionFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { PAPER_EMPTY, PAPER_LOSS_QUIP, PAPER_QUIP, Paper, equityAxis, extremes, policyLabel } from './Paper';
 
@@ -252,9 +252,104 @@ describe('Paper', () => {
     renderAt('/paper?scenario=sp-idle');
     expect(await screen.findByText('low $713.40')).toBeInTheDocument();
     expect(screen.getByText('P3 naive')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('checkbox', { name: 'hide P3 (control)' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'hide P3 (control: ignores fees)' }));
     expect(screen.getByText('low $1,000.00')).toBeInTheDocument();
     expect(screen.queryByText('P3 naive')).not.toBeInTheDocument();
     expect(screen.getAllByText('P3 · NAIVE').length).toBeGreaterThan(0); // its accounts row and ledger button stay
+  });
+
+  const S2 = Date.UTC(2026, 8, 30, 8, 0);
+  const twoEpochs = epochsFixture({
+    epochs: [{ epoch: 1, start_ms: EPOCH1_START, cause: 'policies' }, { epoch: 2, start_ms: S2, cause: 'reset' }],
+    current: 2,
+  });
+
+  it('says since when and which epoch, above ACCOUNTS', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+      '/api/paper/epochs': twoEpochs,
+    });
+    renderAt('/paper');
+    const line = await screen.findByText('since reset 2026-09-30 08:00 UTC · epoch 2');
+    const head = await screen.findByRole('heading', { level: 2, name: /^ACCOUNTS/ });
+    expect(line.compareDocumentPosition(head) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('earlier epochs: nothing fetched until the fold opens, then each epoch with its P0 fee-0 final equity', async () => {
+    const f = mockApi({
+      '/api/paper/accounts': { items: [...accounts, accountFixture({ account_id: 'P0-converter/rung-0', scenario: 'rung-0' })] },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': (url: URL) =>
+        url.searchParams.has('epoch')
+          ? {
+              account_id: url.searchParams.get('account'), from_ms: 0, to_ms: 1,
+              points: [{ t_ms: 0, equity: '1000' }, { t_ms: 1, equity: url.searchParams.get('epoch') === '0' ? '476.2' : '1003.5' }],
+            }
+          : equityRoute(url),
+      '/api/paper/ledger': { items: [], next_cursor: null },
+      '/api/paper/epochs': twoEpochs,
+    });
+    renderAt('/paper');
+    await screen.findByText('since reset 2026-09-30 08:00 UTC · epoch 2');
+    const epochCalls = () => f.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('epoch='));
+    expect(epochCalls()).toEqual([]);
+    await userEvent.click(screen.getByText('earlier epochs'));
+    const fold = screen.getByText('earlier epochs').closest('details') as HTMLDetailsElement;
+    await waitFor(() => expect(within(fold).getAllByText('$476.20')).toHaveLength(3));
+    expect(within(fold).getAllByText('$1,003.50')).toHaveLength(3);
+    expect(within(fold).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['EPOCH', 'FROM', 'TO', 'CAUSE', 'RUNG-0', 'COLO-IDLE', 'SP-IDLE']);
+    expect(within(fold).getByText('before epochs')).toBeInTheDocument();
+    expect(epochCalls().every((u) => u.includes('hours=6'))).toBe(true);
+    expect(new Set(epochCalls().map((u) => new URL(u, 'http://x').searchParams.get('account')))).toEqual(
+      new Set(['P0-converter/rung-0', 'P0-converter/colo-idle', 'P0-converter/sp-idle']),
+    );
+  });
+
+  it('labels P3 as the control that ignores fees', async () => {
+    mockApi({
+      '/api/paper/accounts': { items: accounts },
+      '/api/paper/positions': { items: [] },
+      '/api/paper/equity': equityRoute,
+      '/api/paper/ledger': { items: [], next_cursor: null },
+    });
+    renderAt('/paper?scenario=sp-idle');
+    expect(await screen.findByRole('checkbox', { name: 'hide P3 (control: ignores fees)' })).toBeInTheDocument();
+    const legend = await screen.findByRole('list', { name: 'equity now' });
+    expect(within(legend).getByText('· control: ignores fees')).toBeInTheDocument();
+    expect(within(legend).getByText('P3 naive')).toBeInTheDocument();
+  });
+
+  describe('a reset applied while the page is open (D-03)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      localStorage.clear();
+    });
+
+    it('refetches accounts, positions, equity and the ledger together', async () => {
+      localStorage.setItem('fold:paper:ledger', '1');
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      let epochAsks = 0;
+      const f = mockApi({
+        '/api/paper/accounts': { items: accounts },
+        '/api/paper/positions': { items: [] },
+        '/api/paper/equity': equityRoute,
+        '/api/paper/ledger': { items: [], next_cursor: null },
+        // first answer: epoch 1 with a reset pending (so it is polled); then the scanner applied it: epoch 2
+        '/api/paper/epochs': () => (++epochAsks === 1 ? epochsFixture({ pending_request: { id: 1, requested_ms: 1 } }) : twoEpochs),
+      });
+      renderAt('/paper?scenario=sp-idle');
+      await screen.findByText('since new policies 2026-09-29 19:58 UTC · epoch 1');
+      await screen.findByRole('list', { name: 'equity now' });
+      const count = (path: string) => f.mock.calls.filter((c) => String(c[0]).startsWith(path)).length;
+      const keys = ['accounts', 'positions', 'equity', 'ledger'];
+      await waitFor(() => expect(count('/api/paper/ledger')).toBeGreaterThan(0));
+      const before = keys.map((k) => count(`/api/paper/${k}`));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await screen.findByText('since reset 2026-09-30 08:00 UTC · epoch 2');
+      await waitFor(() => keys.forEach((k, i) => expect(count(`/api/paper/${k}`)).toBeGreaterThan(before[i])));
+    });
   });
 });

@@ -22,7 +22,7 @@ function writeOpen(id: string, open: boolean): void {
 /** Spec §3.1: closed by default, remembered per id. M3: the summary click is native (no
  *  preventDefault); `open` follows the element's own toggle via onToggle, so keyboard activation
  *  (space/enter on the native summary) and a click behave the same way. */
-export function Fold({ id, label, children }: { id: string; label: string; children: ReactNode }) {
+export function Fold({ id, label, children }: { id: string; label: string; children: ReactNode | ((open: boolean) => ReactNode) }) {
   const [open, setOpen] = useState(() => readOpen(id));
   return (
     <details
@@ -35,7 +35,8 @@ export function Fold({ id, label, children }: { id: string; label: string; child
       }}
     >
       <summary>{label}</summary>
-      <div className="fold-body">{children}</div>
+      {/* Spec 7a §6: a function child renders only while open, so a costly fold fetches nothing closed. */}
+      <div className="fold-body">{typeof children === 'function' ? children(open) : children}</div>
     </details>
   );
 }

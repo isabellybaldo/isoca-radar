@@ -1,25 +1,30 @@
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { api } from '../api/client';
-import type { LedgerEntry, PaperAccount, Position } from '../api/types';
+import type { Epochs, LedgerEntry, PaperAccount, Position } from '../api/types';
 import { useApi, type ApiState } from '../api/useApi';
+import { useEpochBump, useEpochs } from '../api/useEpochs';
 import { Box } from '../components/Box';
 import { EdgeCapture } from '../components/EdgeCapture';
-import { EmptyState } from '../components/EmptyState';
+import { EmptyState, errorText } from '../components/EmptyState';
 import { Fold } from '../components/Fold';
 import { LineChart, type Series } from '../components/LineChart';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
 import { Table, type Column } from '../components/Table';
+import { EPOCH_HOURS, type EpochSpan, P3_NOTE, earlierEpochs, epochAccounts, epochLine } from '../lib/epochs';
 import { shortId } from '../lib/labels';
 import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, isZero } from '../lib/money';
-import { fmtUtcDateTime, fmtUtcHm } from '../lib/time';
+import { fmtUtcDateTime, fmtUtcDayHm, fmtUtcHm } from '../lib/time';
 
 export const PAPER_QUIP = "The naive strategy is doing great. Until 'Other' wins.";
 /** The flicker finding, in one line: P0 buys the basket, the flicker is gone before the fill, and it sells the pieces back at a loss. */
 export const PAPER_LOSS_QUIP = 'Paper losses, real lessons. At 145 ms the arbitrage is gone before we arrive; we pay the spread to leave.';
 export const PAPER_EMPTY = 'No paper trades yet. Nothing ventured, nothing lost.';
 export const NOTHING_AWAITING = 'Nothing awaiting resolution. Patience is free.';
+export const NO_EPOCHS = 'No epoch data yet.';
+export const NO_EARLIER = 'No earlier epochs. This is the first one.';
+export const EPOCHS_NOTE = 'Final paper equity of each P0 account at fee 0: its last mark before the next epoch began.';
 const TONES: Record<string, string> = { 'P0-converter': 'p0', 'P1-settlement': 'p1', 'P2-combo': 'p2', 'P3-naive': 'p3' };
 
 /** "P0-converter" → "P0 converter" (+ the fee sensitivity when set). */
@@ -96,13 +101,14 @@ export function equityAxis(
   return { xMin: dataFrom, xMax: windowTo, xLabels: { left: `since ${fmtUtcHm(dataFrom)} UTC`, right: 'now' } };
 }
 
-function AccountsChart({ accounts }: { accounts: PaperAccount[] }) {
+function AccountsChart({ accounts, bump }: { accounts: PaperAccount[]; bump: number }) {
   const ids = accounts.map((a) => a.account_id);
   // Each result carries its own account: a render that still holds the previous scenario's answer
   // (before the refetch lands) never pairs it with this scenario's accounts by position.
   const eq = useApi(
     (s) => Promise.all(accounts.map((a) => api.paperEquity(a.account_id, 24, s).then((e) => ({ a, e })))),
     [ids.join('|')],
+    [bump],
   );
   const [hideControl, setHideControl] = useState(false);
   const hasControl = accounts.some((a) => a.policy === CONTROL);
@@ -111,7 +117,7 @@ function AccountsChart({ accounts }: { accounts: PaperAccount[] }) {
       {hasControl && (
         <label className="check">
           <input type="checkbox" checked={hideControl} onChange={(e) => setHideControl(e.target.checked)} />
-          hide P3 (control)
+          {`hide P3 (${P3_NOTE})`}
         </label>
       )}
       <Loadable state={eq} what="equity">
@@ -151,7 +157,9 @@ function AccountsChart({ accounts }: { accounts: PaperAccount[] }) {
                     {ends.map(({ a, e }) => (
                       <li key={a.account_id}>
                         <span className={`sw ${TONES[a.policy] ?? 'p0'}`} aria-hidden="true" />
-                        <span>{policyLabel(a)}</span> <b className="num">{formatMoneyCents(e.points[e.points.length - 1].equity)}</b>
+                        <span>{policyLabel(a)}</span>
+                        {a.policy === CONTROL && <span className="dim"> · {P3_NOTE}</span>}{' '}
+                        <b className="num">{formatMoneyCents(e.points[e.points.length - 1].equity)}</b>
                       </li>
                     ))}
                   </ul>
@@ -219,8 +227,9 @@ function AccountsTable({ accounts }: { accounts: PaperAccount[] }) {
   );
 }
 
-function Ledger({ accounts, account, cursor, marks, onAccount, onCursor, onMarks }: {
+function Ledger({ accounts, bump, account, cursor, marks, onAccount, onCursor, onMarks }: {
   accounts: PaperAccount[];
+  bump: number;
   account: string;
   cursor: string | null;
   /** Show the minute `mark` rows (hidden by default). */
@@ -229,7 +238,7 @@ function Ledger({ accounts, account, cursor, marks, onAccount, onCursor, onMarks
   onCursor: (c: string | null) => void;
   onMarks: (show: boolean) => void;
 }) {
-  const page = useApi((s) => api.paperLedger(account, cursor, !marks, s), [account, cursor, marks]);
+  const page = useApi((s) => api.paperLedger(account, cursor, !marks, s), [account, cursor, marks], [bump]);
   return (
     <>
       <div className="seg" role="group" aria-label="ledger account">
@@ -266,7 +275,69 @@ function Ledger({ accounts, account, cursor, marks, onAccount, onCursor, onMarks
   );
 }
 
-function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; positions: ApiState<{ items: Position[] }> }) {
+function EpochRow({ span, accounts }: { span: EpochSpan; accounts: PaperAccount[] }) {
+  const ids = accounts.map((a) => a.account_id);
+  const finals = useApi(
+    (s) => Promise.all(ids.map((id) => api.paperEquity(id, EPOCH_HOURS, s, span.epoch))),
+    [span.epoch, ids.join('|')],
+  );
+  return (
+    <tr>
+      <td className="num">{span.epoch}</td>
+      <td>{span.start_ms === null ? '—' : fmtUtcDayHm(span.start_ms)}</td>
+      <td>{fmtUtcDayHm(span.end_ms)}</td>
+      <td>{span.cause}</td>
+      {finals.error !== undefined && finals.data === undefined ? (
+        <td colSpan={ids.length} className="error">{errorText(finals.error)}</td>
+      ) : (
+        ids.map((id, i) => {
+          const pts = finals.data?.[i]?.points ?? [];
+          return (
+            <td key={id} className="num">
+              {finals.data === undefined ? '…' : <Money value={pts.length > 0 ? pts[pts.length - 1].equity : null} cents />}
+            </td>
+          );
+        })
+      )}
+    </tr>
+  );
+}
+
+/** Spec 7a §6: each earlier epoch with start, end, cause and each P0 fee-0 account's final equity. */
+function EarlierEpochs({ epochs, accounts }: { epochs: Epochs; accounts: PaperAccount[] }) {
+  const spans = earlierEpochs(epochs);
+  const cols = epochAccounts(accounts);
+  if (spans.length === 0) return <EmptyState text={NO_EARLIER} />;
+  return (
+    <>
+      <p className="dim">{EPOCHS_NOTE}</p>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              {['EPOCH', 'FROM', 'TO', 'CAUSE', ...cols.map((a) => a.scenario.toUpperCase())].map((h) => (
+                <th key={h} scope="col">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {spans.map((s) => (
+              <EpochRow key={s.epoch} span={s} accounts={cols} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function PaperBody({ accounts, positions, epochs, bump }: {
+  accounts: PaperAccount[];
+  positions: ApiState<{ items: Position[] }>;
+  epochs: ApiState<Epochs>;
+  /** D-03: one refresh key for the page; a reset applied bumps it and every fetch asks again. */
+  bump: number;
+}) {
   const [sp, setSp] = useSearchParams();
   const scenarios = [...new Set(accounts.map((a) => a.scenario))].sort();
   const wanted = sp.get('scenario');
@@ -297,7 +368,7 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
         </div>
       }
     >
-      <AccountsChart key={scenario} accounts={inScenario} />
+      <AccountsChart key={scenario} accounts={inScenario} bump={bump} />
       <Fold id="paper:accounts" label="all numbers">
         <AccountsTable accounts={inScenario} />
       </Fold>
@@ -305,6 +376,7 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
         {account !== undefined && (
           <Ledger
             accounts={inScenario}
+            bump={bump}
             account={account}
             cursor={sp.get('lcursor')}
             marks={sp.get('marks') === '1'}
@@ -326,16 +398,23 @@ function PaperBody({ accounts, positions }: { accounts: PaperAccount[]; position
           }}
         </Loadable>
       </Fold>
+      <Fold id="paper:epochs" label="earlier epochs">
+        {(open) => (!open ? null : epochs.data ? <EarlierEpochs epochs={epochs.data} accounts={accounts} /> : <EmptyState text={NO_EPOCHS} />)}
+      </Fold>
     </Box>
   );
 }
 
 export function Paper() {
-  const accounts = useApi((s) => api.paperAccounts(s), []);
-  const positions = useApi((s) => api.paperPositions(s), []);
+  const epochs = useEpochs();
+  // A reset applied while the page is open: every fetch below asks again once (D-03).
+  const bump = useEpochBump(epochs.data?.current);
+  const accounts = useApi((s) => api.paperAccounts(s), [], [bump]);
+  const positions = useApi((s) => api.paperPositions(s), [], [bump]);
   return (
     <>
       <EdgeCapture />
+      {epochs.data && <p className="epochline">{epochLine(epochs.data)}</p>}
       <Loadable state={accounts} what="paper accounts">
         {(d) =>
           d.items.length === 0 ? (
@@ -343,7 +422,7 @@ export function Paper() {
               <EmptyState text={PAPER_EMPTY} />
             </Box>
           ) : (
-            <PaperBody accounts={d.items} positions={positions} />
+            <PaperBody accounts={d.items} positions={positions} epochs={epochs} bump={bump} />
           )
         }
       </Loadable>

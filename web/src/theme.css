@@ -299,3 +299,6 @@ ul.plain.ll-legend { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15
 .ll-sw.extra { background: var(--dim); }
 .ll-sw.us { background: var(--rose); opacity: 0.6; }
 ul.plain.ll-extras { gap: 2px; font-size: 13px; }
+
+/* Spec 7a §6: since when the paper accounts count. */
+.epochline { color: var(--dim); padding: 0 2px; }
