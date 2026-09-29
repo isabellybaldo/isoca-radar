@@ -155,13 +155,13 @@ cd /home/isoca/projects/cute-trading && docker compose --env-file .env.example -
 if not: the bundle's compose files are old: re-bundle (step 12).
 **STOP**
 
-19. Stop the scanner, analyze and compact (capture pauses until step 23); postgres keeps running.
+19. Stop the scanner, analyze and compact (capture pauses until step 23), then recreate postgres on purpose (its environment gained `RESET_RW_DB_PASSWORD`; the Radar shows errors for a few seconds) and check the data is the same before and after.
 ```bash
-cd /home/isoca/projects/cute-trading && docker compose --profile core stop --timeout 60 scanner analyze compact && docker inspect -f '{{.State.Health.Status}}' cute-trading-postgres-1
+cd /home/isoca/projects/cute-trading && docker compose --profile core stop --timeout 60 scanner analyze compact && B="$(docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT (SELECT max(version) FROM _sqlx_migrations WHERE success) || '|' || (SELECT count(*) FROM runs) || '|' || (SELECT count(*) FROM paper_accounts)")" && echo "before $B" && docker compose up -d --no-build --timeout 60 postgres && for i in $(seq 90); do [ "$(docker inspect -f '{{.State.Health.Status}}' cute-trading-postgres-1)" = healthy ] && break; sleep 2; done; docker inspect -f '{{.State.Health.Status}}' cute-trading-postgres-1; A="$(docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT (SELECT max(version) FROM _sqlx_migrations WHERE success) || '|' || (SELECT count(*) FROM runs) || '|' || (SELECT count(*) FROM paper_accounts)")"; echo "after $A"; [ -n "$B" ] && [ "$A" = "$B" ] && echo data-kept
 ```
-→ expected: scanner, analyze and compact `Stopped`, then `healthy`.
-if not: `docker compose logs --tail 50 postgres`; start nothing else.
-Note: postgres is NOT recreated: `RESET_RW_DB_PASSWORD` in its environment matters only to `01-roles.sh` on an empty volume; step 22 sets the role password.
+→ expected: scanner, analyze and compact `Stopped`, `before 8|<runs>|<accounts>`, `Container cute-trading-postgres-1 Recreated` then `Started`, `healthy`, the same line as `after 8|<runs>|<accounts>`, then `data-kept`.
+if not: `Running` instead of `Recreated` = the env did not change (step 14 not run): run step 14, then this step again; no `healthy` or no `data-kept` = `docker compose logs --tail 50 postgres`, start nothing else, report.
+Note: recreating postgres here consumes the config drift, so the boot unit's `up scanner` (no `--no-deps`) does not recreate postgres at the next reboot; the role password itself still comes from step 22 (`01-roles.sh` runs only on an empty volume).
 **STOP**
 
 20. Migrate ALONE (it also builds the paper_ledger index while nothing inserts).
@@ -296,12 +296,13 @@ if not: `2 passed` missing = the local 0009 differs from production (CRLF? edit?
 
 ## Rollback
 
-36. Back to the pre-7a images and policies (the old policies file is baked into `rust:pre7a`). Migration 0009 is additive and stays.
+36. Back to the pre-7a images and policies (the old policies file is baked into `rust:pre7a`). Migration 0009 is additive and stays; the boot unit is removed (the pre-7a `migrate` refuses the applied 0009, so the unit could not start this scanner).
 ```bash
-cd /home/isoca/projects/cute-trading && docker compose --profile core stop --timeout 60 scanner analyze && docker tag cute-trading/rust:pre7a cute-trading/rust:dev && docker compose --profile core up -d --no-build --no-deps scanner analyze && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api && docker inspect -f '{{.Name}} {{.Image}}' cute-trading-scanner-1 cute-trading-analyze-1 cute-trading-api-1
+cd /home/isoca/projects/cute-trading && docker compose --profile core stop --timeout 60 scanner analyze && docker tag cute-trading/rust:pre7a cute-trading/rust:dev && docker compose --profile core up -d --no-build --no-deps scanner analyze && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api && { [ ! -f /etc/systemd/system/isoca-radar-scanner.service ] || { systemctl disable --now isoca-radar-scanner.service && rm /etc/systemd/system/isoca-radar-scanner.service && systemctl daemon-reload && echo unit-removed; }; } && docker inspect -f '{{.Name}} {{.Image}}' cute-trading-scanner-1 cute-trading-analyze-1 cute-trading-api-1
 ```
-→ expected: all three on the `rust:pre7a` ID.
-if not: `docker image inspect -f '{{.Id}}' cute-trading/rust:pre7a` and retag.
+→ expected: `unit-removed` (if the 5b unit was installed), then all three on the `rust:pre7a` ID.
+if not: a container on another ID = `docker image inspect -f '{{.Id}}' cute-trading/rust:pre7a` and retag; no `unit-removed` while `systemctl is-enabled isoca-radar-scanner.service` prints `enabled` = run the `{ … }` part again.
+Note: after rollback the scanner no longer starts at boot: after any reboot run `docker compose --profile core up -d --no-build --no-deps scanner` (without `--no-deps` the pre-7a `migrate` fails on 0009); reinstall the unit (phase5b step 30) only with a 7a image back on `:dev`.
 Note: a pre-7a scanner never writes `paper_epochs`; its own epoch is recorded only at the next 7a start (sha mismatch).
 Note: if a reset happened (step 32), leave compact on the 7a image (a pre-7a compact hard-errors on an hour holding a `paper_reset` line); otherwise also run `docker compose --profile core up -d --no-build --no-deps compact`.
 Note: a full restore from `/root/ct-pre-7a.dump` is a last resort only (it loses every row since step 16).
