@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
@@ -20,15 +20,18 @@ const rows = [
 ];
 
 describe('Sweet page', () => {
-  it('asks for 30D, shows the one-line caveat, tiles, and the sp-idle chart', async () => {
+  it('asks for 30D, shows the one-line caveat, tiles, and the ladder grid', async () => {
     const fetch = mockApi({ '/api/cards': (u: URL) => ({ win: u.searchParams.get('win'), cards: [card(rows)] }) });
     renderPage();
     expect(await screen.findByText(ONE_LINE_CAVEAT)).toBeInTheDocument();
     expect(String(fetch.mock.calls[0][0])).toBe('/api/cards?win=30d');
     const tiles = screen.getAllByRole('listitem').filter((li) => li.classList.contains('tile')).map((li) => li.textContent);
     expect(tiles).toEqual(['NO candidates0', 'YES candidates0', 'rows tested2', 'headline scenariosp-idle']); // dt comes before dd in the DOM
-    const chart = screen.getByRole('list', { name: 'NO · ALL · sp-idle' });
-    expect(within(chart).getByText('NEGATIVE')).toBeInTheDocument();
+    const g = screen.getByRole('table', { name: 'NO · ALL' });
+    expect(within(g).getByRole('button', { name: 'all at colo-idle (52 ms): candidate' })).toHaveTextContent('●');
+    expect(within(g).getByRole('button', { name: 'all at sp-idle (300 ms): negative' })).toHaveTextContent('○');
+    expect(within(g).getByRole('button', { name: 'all at rung-0 (0 ms): no attempts' })).toHaveTextContent('·');
+    expect(screen.getByText('z = 1.96 across 2 rows tested: the more rows, the wider each interval.')).toBeInTheDocument();
     expect(screen.getByText(NOTHING_PAYS)).toBeInTheDocument();
     // no 10 bips fee entry in this fixture: I3's feeLine renders nothing.
     expect(screen.queryByText(/whole NO side at 10 bips/)).toBeNull();
@@ -45,17 +48,22 @@ describe('Sweet page', () => {
     expect(await screen.findByText('whole NO side at 10 bips: NEGATIVE, mean −$0.10')).toBeInTheDocument();
   });
 
-  it('switches scenario, side and slice, hides CATEGORY without tags', async () => {
-    mockApi({ '/api/cards': { win: '30d', cards: [card([...rows, sweetRow({ side: 'yes', label: 'dead_on_paper' })], {}, { category_available: false })] } });
+  it('has no scenario chips: six NO columns, two YES columns, CATEGORY hidden without tags', async () => {
+    mockApi({
+      '/api/cards': {
+        win: '30d',
+        cards: [card([...rows, sweetRow({ side: 'yes', label: 'dead_on_paper' }), sweetRow({ side: 'yes', scenario: 'sp-burst', latency_ms: 450, label: 'candidate' })], {}, { category_available: false })],
+      },
+    });
     renderPage();
-    const scen = await screen.findByRole('group', { name: 'scenario' });
-    expect(within(scen).getByRole('button', { name: /co-located trader/i })).toBeInTheDocument();
-    await userEvent.click(within(scen).getByRole('button', { name: /co-located trader/i }));
-    expect(within(screen.getByRole('list', { name: 'NO · ALL · colo-idle' })).getByText('CANDIDATE')).toBeInTheDocument();
+    const g = await screen.findByRole('table', { name: 'NO · ALL' });
+    expect(within(g).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['ms', '0', '25', '52', '100', '200', '300']);
+    expect(screen.queryByRole('group', { name: 'scenario' })).toBeNull();
     expect(within(screen.getByRole('group', { name: 'dimension' })).queryByRole('button', { name: 'CATEGORY' })).toBeNull();
     await userEvent.click(within(screen.getByRole('group', { name: 'side' })).getByRole('button', { name: 'YES' }));
-    // Review focus 3: colo-idle has no YES rows, so the chart falls back to the first YES scenario
-    expect(within(screen.getByRole('list', { name: 'YES · ALL · sp-idle' })).getByText('DEAD ON PAPER')).toBeInTheDocument();
+    const yes = screen.getByRole('table', { name: 'YES · ALL' });
+    expect(within(yes).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['ms', '52', '300']);
+    expect(within(yes).getByRole('button', { name: 'all at sp-idle (300 ms): dead on paper' })).toHaveTextContent('✗');
   });
 
   it('keeps the picked side chip pressed across a window switch (M1: state lives in Sweet(), not SweetBody)', async () => {
@@ -103,6 +111,22 @@ describe('Sweet page', () => {
     renderPage();
     expect(await screen.findByText(recomputingText(review.computed_ms))).toBeInTheDocument();
     expect(screen.getByText('UNDER REVIEW')).toBeInTheDocument();
-    expect(screen.queryByRole('list', { name: /sp-idle/ })).toBeNull();
+    expect(screen.queryByRole('table', { name: /NO · ALL/ })).toBeNull();
+  });
+
+  it('slices by category: the all row first, then its buckets; focus shows one detail line', async () => {
+    const withCrypto = [
+      ...rows,
+      sweetRow({ dimension: 'category', bucket: 'crypto', scenario: 'rung-25', latency_ms: 25, label: 'thin', mean: '0.3', n_exec: 12, clusters: 9 }),
+    ];
+    mockApi({ '/api/cards': { win: '30d', cards: [card(withCrypto)] } });
+    renderPage();
+    await userEvent.click(within(await screen.findByRole('group', { name: 'dimension' })).getByRole('button', { name: 'CATEGORY' }));
+    const g = screen.getByRole('table', { name: 'NO · CATEGORY' });
+    expect(within(g).getAllByRole('rowheader').map((h) => h.textContent)).toEqual(['all', 'crypto']);
+    const cell = within(g).getByRole('button', { name: 'crypto at rung-25 (25 ms): thin, mean > 0' });
+    expect(cell).toHaveTextContent('◐');
+    fireEvent.focus(cell);
+    expect(screen.getByText('crypto · rung-25 · n 12 · C 9 · captured at 25 ms, per $100: +$0.30 · too few trades or events to say anything.')).toBeInTheDocument();
   });
 });
