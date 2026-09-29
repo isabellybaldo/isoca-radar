@@ -74,7 +74,7 @@ if not: `OVER BUDGET` = `docker image prune -f`, then `LIMIT_GB=75 sh scripts/di
 cd /home/isoca/projects/cute-trading && date -u +%H:%M && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT (SELECT msgs FROM health ORDER BY minute_ms DESC LIMIT 1) < (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY msgs) FROM health WHERE minute_ms > (extract(epoch FROM now()) * 1000)::bigint - 86400000)"
 ```
 → expected: the UTC time, then `t`.
-if not: `f` = a busy minute: wait 15 minutes and run this step again; never go on during a burst.
+if not: `f` = a busy minute: wait 15 minutes and run this step again; never go on during a burst; an empty line = no health rows: **STOP**, report.
 Note: run step 10 within 2 minutes of the `t`; later, run this step again first.
 **STOP**
 
@@ -99,10 +99,11 @@ if not: reconnects > 0: do NOT roll back; write the count and the UTC time in Re
 for p in / /sweet /api/paper/ladder; do curl -sS -o /dev/null -w "$p %{http_code}\n" "https://radar.isoca.space$p"; done
 ```
 → expected: `/ 302`, `/sweet 302`, `/api/paper/ladder 302` (or `401`).
-if not: `/` or `/sweet` `200` = forward-auth is off (a web rollback does not fix it): stop web with `cd /home/isoca/projects/cute-trading && docker compose -f compose.yml -f compose.web.yml --profile web stop web` and report; `/api/paper/ladder` `200` = also stop the api (`docker compose -f compose.yml -f compose.web.yml --profile web stop api`) and report.
+if not: `/` or `/sweet` `200` = forward-auth is off (a web rollback does not fix it): on the VPS stop web with `cd /home/isoca/projects/cute-trading && docker compose -f compose.yml -f compose.web.yml --profile web stop web` and report; `/api/paper/ladder` `200` = on the VPS also stop the api with `cd /home/isoca/projects/cute-trading && docker compose -f compose.yml -f compose.web.yml --profile web stop api` and report.
+**STOP**
 
 13. (Chrome, window 1440 px wide) open `https://radar.isoca.space/`, DevTools Network filtered on `ladder`, click the `EXPLAIN ▸` tab on the right edge.
-→ expected: a drawer opens left of the tab (the tab stays visible, 1440 < 1500 so no dock); exactly one `/api/paper/ladder` request; `At what latency would this pay?` is open with the big VT323 line (`≈ N ms`, `none`, `pays at every rung`, `too few trades yet` or `a rung has no account yet`), six columns `0 25 52 100 200 300` plus the extras slot, counts `n / 30` while thin (`no account` under a missing rung), `as of HH:MM UTC`, the pink us band starting just right of the 200 column (measured + 50, ≈205 ms at measured ≈155) and running to the right edge of the 300 column, never into the extras slot, labelled `us (measured ≈N + matching)`, the `sp-idle-nodelay (… ms, secondsDelay ignored)` and `sp-burst (… ms idle, more in bursts)` lines, and the folds `which markets` (a grid, or `recomputing after the ladder` / `no markets data`) and `the numbers`.
+→ expected: a drawer opens left of the tab (the tab stays visible, 1440 < 1500 so no dock); exactly one `/api/paper/ladder` request; `At what latency would this pay?` is open with the big VT323 line (`≈ N ms`, `none`, `pays at every rung`, `too few trades yet` or `a rung has no account yet`), six columns `0 25 52 100 200 300` plus the extras slot, counts `n / 30` while thin (`no account` under a missing rung), `as of HH:MM UTC`, the pink us band from just right of the 200 rung (measured + 50, ≈205 ms at measured ≈155) to just right of the 300 rung (measured + 150, ≈305 ms at ≈155), never into the extras slot, labelled `us (measured ≈N + matching)`, the `sp-idle-nodelay (… ms, secondsDelay ignored)` and `sp-burst (… ms idle, more in bursts)` lines, and the folds `which markets` (a grid, or `recomputing after the ladder` / `no markets data`) and `the numbers`.
 if not: a label drawn inside the SVG or stretched = report (spec §7.2); more than one request = the fetch rule broke: report.
 
 14. (Chrome, same tab) keep the panel open 2 minutes, then press Esc and wait 2 more minutes.
