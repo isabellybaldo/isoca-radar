@@ -2,6 +2,7 @@ import { Link, useSearchParams } from 'react-router';
 import { api, type EpisodeQuery } from '../api/client';
 import type { EpisodeSummary } from '../api/types';
 import { useApi } from '../api/useApi';
+import { useExplainPage, useExplainSelect } from '../explain/ExplainContext';
 import { Box } from '../components/Box';
 import { EpisodeStrip } from '../components/EpisodeStrip';
 import { Fold } from '../components/Fold';
@@ -74,11 +75,11 @@ function FlagLegend() {
 
 const HEADS = ['OPENED', 'KIND', 'EVENT', 'S', 'NET', 'GROSS', 'Q*', 'DURATION', 'FLAGS'];
 
-function EpisodeRow({ r }: { r: EpisodeSummary }) {
+function EpisodeRow({ r, onPick }: { r: EpisodeSummary; onPick: (r: EpisodeSummary) => void }) {
   const t = kindTag(r.kind);
   const title = r.event_title ?? r.id;
   return (
-    <tr className="ep">
+    <tr className="ep pick" onClick={() => onPick(r)}>
       <td className="num c-time" title={fmtLocal(r.opened_ms)}>{fmtUtcHms(r.opened_ms)}</td>
       <td className="c-kind"><Tag tone={t.tone}>{t.text}</Tag></td>
       <td className="c-event"><Link to={`/episodes/${encodeURIComponent(r.id)}`} title={title}>{title}</Link></td>
@@ -93,7 +94,7 @@ function EpisodeRow({ r }: { r: EpisodeSummary }) {
 }
 
 /** Redesign §4.1: one line per episode, grouped under its UTC day. */
-function EpisodeTable({ rows }: { rows: EpisodeSummary[] }) {
+function EpisodeTable({ rows, onPick }: { rows: EpisodeSummary[]; onPick: (r: EpisodeSummary) => void }) {
   const groups: { day: string; rows: EpisodeSummary[] }[] = [];
   for (const r of rows) {
     const day = fmtUtcDayMonth(r.opened_ms);
@@ -109,7 +110,7 @@ function EpisodeTable({ rows }: { rows: EpisodeSummary[] }) {
         {groups.map((g) => (
           <tbody key={g.day}>
             <tr className="day"><th colSpan={HEADS.length} scope="colgroup">{g.day}</th></tr>
-            {g.rows.map((r) => <EpisodeRow key={r.id} r={r} />)}
+            {g.rows.map((r) => <EpisodeRow key={r.id} r={r} onPick={onPick} />)}
           </tbody>
         ))}
       </table>
@@ -122,6 +123,8 @@ export function Episodes() {
   const key = sp.toString();
   const q = queryFromParams(sp);
   const page = useApi((s) => api.episodes(queryFromParams(sp), s), [key]);
+  useExplainPage('episodes', { items: page.data?.items });
+  const select = useExplainSelect();
   const update = (name: string, value: string | null) => {
     const next = new URLSearchParams(sp);
     if (value) next.set(name, value);
@@ -172,7 +175,7 @@ export function Episodes() {
           ) : (
             <>
               <EpisodeStrip rows={d.items} />
-              <EpisodeTable rows={d.items} />
+              <EpisodeTable rows={d.items} onPick={(r) => select({ kind: 'episode', episode: r })} />
               <div className="pager">
                 <button type="button" disabled={!q.cursor} onClick={() => update('cursor', null)}>NEWEST</button>
                 <button type="button" disabled={!d.next_cursor} onClick={() => d.next_cursor && update('cursor', d.next_cursor)}>OLDER →</button>

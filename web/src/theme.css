@@ -340,3 +340,6 @@ ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 .explain .fold { border: 0; border-top: 1px dashed var(--line2); }
 .explain .fold > summary { padding: 4px 0; }
 .explain .fold-body { padding: 4px 0 8px; }
+
+/* Spec 7a §9.3: rows that set the explain selection. */
+tr.pick { cursor: pointer; }

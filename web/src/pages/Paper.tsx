@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import type { Epochs, LedgerEntry, PaperAccount, Position } from '../api/types';
 import { useApi, type ApiState } from '../api/useApi';
 import { useEpochBump, useEpochs } from '../api/useEpochs';
+import { useExplainPage, useExplainSelect } from '../explain/ExplainContext';
 import { Box } from '../components/Box';
 import { EdgeCapture } from '../components/EdgeCapture';
 import { EmptyState, errorText } from '../components/EmptyState';
@@ -340,6 +341,7 @@ function PaperBody({ accounts, positions, epochs, bump }: {
   bump: number;
 }) {
   const [sp, setSp] = useSearchParams();
+  const select = useExplainSelect();
   const scenarios = [...new Set(accounts.map((a) => a.scenario))].sort();
   const wanted = sp.get('scenario');
   const scenario = wanted !== null && scenarios.includes(wanted) ? wanted : scenarios[0];
@@ -394,7 +396,12 @@ function PaperBody({ accounts, positions, epochs, bump }: {
             return rows.length === 0 ? (
               <EmptyState text={NOTHING_AWAITING} />
             ) : (
-              <Table columns={positionColumns} rows={rows} rowKey={(p) => `${p.account_id}|${p.market_id}|${p.outcome}|${p.returned}`} />
+              <Table
+                columns={positionColumns}
+                rows={rows}
+                rowKey={(p) => `${p.account_id}|${p.market_id}|${p.outcome}|${p.returned}`}
+                onRowClick={(p) => select({ kind: 'position', position: p })}
+              />
             );
           }}
         </Loadable>
@@ -413,6 +420,7 @@ export function Paper() {
   const bump = useEpochBump(epochs.data?.current);
   const accounts = useApi((s) => api.paperAccounts(s), [], [bump]);
   const positions = useApi((s) => api.paperPositions(s), [], [bump]);
+  useExplainPage('paper', { accounts: accounts.data?.items, positions: positions.data?.items });
   return (
     <>
       <EdgeCapture />
