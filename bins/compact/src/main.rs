@@ -40,6 +40,12 @@ enum Cmd {
         next: Option<PathBuf>,
         #[arg(long, default_value = "/tmp/compact-bench")]
         out: PathBuf,
+        /// Start from the newest checkpoint in `<DIR>/_state` instead of cold.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Episodes for the l2 windows: `psql -tA` output of the service's episode query.
+        #[arg(long)]
+        episodes: Option<PathBuf>,
     },
 }
 
@@ -76,10 +82,23 @@ async fn real_main() -> anyhow::Result<()> {
             hour_file,
             next,
             out,
+            from,
+            episodes,
         } => {
+            let eps = match &episodes {
+                Some(p) => compact::bench::parse_episodes(&std::fs::read_to_string(p)?)?,
+                None => Vec::new(),
+            };
             println!(
                 "{}",
-                compact::bench::bench(&cfg, &hour_file, next.as_deref(), &out)?
+                compact::bench::bench(
+                    &cfg,
+                    &hour_file,
+                    next.as_deref(),
+                    &out,
+                    from.as_deref(),
+                    &eps
+                )?
             );
             Ok(())
         }

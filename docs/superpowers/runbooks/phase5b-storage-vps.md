@@ -81,7 +81,7 @@ if not: check the scp line's key path (quoted, forward slashes).
 
 11. (Benchmark, on the PC) The release compactor on that hour under the service's limits.
 ```bash
-H=$(cd "$HOME/bench" && ls */*.jsonl.zst) && MSYS_NO_PATHCONV=1 docker run --rm --cpus 0.25 --memory 512m -v "$(cygpath -m "$HOME/bench"):/bench:ro" -v ct-bench-out:/archive --entrypoint /usr/local/bin/compact cute-trading/rust:dev bench "/bench/$H" --out /archive/bench; docker volume rm ct-bench-out
+H=$(cd "$HOME/bench" && ls */*.jsonl.zst) && MSYS_NO_PATHCONV=1 docker run --rm --cpus 0.25 --memory 512m -e MALLOC_ARENA_MAX=1 -v "$(cygpath -m "$HOME/bench"):/bench:ro" -v ct-bench-out:/archive --entrypoint /usr/local/bin/compact cute-trading/rust:dev bench "/bench/$H" --out /archive/bench; docker volume rm ct-bench-out
 ```
 → expected: `bench: <day>/<HH>.jsonl.zst <ms> ms, … per_day_bytes=<n> …, checkpoint_bytes=<n>, then <day>/<HH>.jsonl.zst from the loaded checkpoint <ms2> ms, peak_rss_kb=<n>` with `<ms>` < 600000 and `peak_rss_kb` < 420000 (the hour, its checkpoint and a second pass from it), then `ct-bench-out`; write the line in Results.
 if not: over a limit (or exit 137): **STOP**, do not deploy, report the line; `40e9 / per_day_bytes` = days the archive keeps (2026-09-28: 546 MB/day ≈ 73 days).

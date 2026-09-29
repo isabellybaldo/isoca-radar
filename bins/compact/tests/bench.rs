@@ -47,6 +47,8 @@ fn bench_reports_time_rows_and_bytes_for_one_hour_then_its_checkpoint_round_trip
         &tape::files::hour_path(&raw, T0 + 13 * H),
         None,
         &out,
+        None,
+        &[],
     )
     .unwrap();
     assert!(
@@ -92,6 +94,8 @@ fn bench_runs_the_next_hour_from_the_loaded_checkpoint() {
         &tape::files::hour_path(&raw, T0 + 13 * H),
         Some(&tape::files::hour_path(&raw, T0 + 14 * H)),
         &out,
+        None,
+        &[],
     )
     .unwrap();
     assert!(
@@ -108,6 +112,53 @@ fn bench_runs_the_next_hour_from_the_loaded_checkpoint() {
     std::fs::remove_dir_all(&out).ok();
 }
 
+#[test]
+fn bench_starts_from_a_live_checkpoint_with_the_episodes_l2_windows() {
+    let (raw, live, out) = (
+        tmp("bench-from-raw"),
+        tmp("bench-from-live"),
+        tmp("bench-from-out"),
+    );
+    bench_hours(&raw);
+    // the live _state: hour 13's checkpoint
+    compact::bench::bench(
+        &config(),
+        &tape::files::hour_path(&raw, T0 + 13 * H),
+        None,
+        &live,
+        None,
+        &[],
+    )
+    .unwrap();
+    let eps = compact::bench::parse_episodes(&format!(
+        "ep-1|e1|{}|{}
+",
+        T0 + 14 * H + 500,
+        T0 + 14 * H + 2_000
+    ))
+    .unwrap();
+    let line = compact::bench::bench(
+        &config(),
+        &tape::files::hour_path(&raw, T0 + 14 * H),
+        None,
+        &out,
+        Some(&live),
+        &eps,
+    )
+    .unwrap();
+    assert!(line.contains(" windows=1 "), "{line}");
+    assert!(line.contains("peak_rss_kb after start="), "{line}");
+    // cold, hour 14's change has no book (y1's snapshot is in hour 13): no tob row
+    assert!(
+        line.contains(" tob=1 "),
+        "hour 14 starts from the book in --from's checkpoint: {line}"
+    );
+    eprintln!("{line}");
+    for d in [&raw, &live, &out] {
+        std::fs::remove_dir_all(d).ok();
+    }
+}
+
 /// Spec §8 benchmark, by hand: `COMPACT_BENCH_HOUR=<dir>/YYYY-MM-DD/HH.jsonl.zst` (the universe
 /// records the hour names in the same tree). Debug build: a correctness run on real data, not the
 /// timing (the timing is the release run in the runbook, §1).
@@ -121,7 +172,7 @@ fn bench_one_real_hour() {
     let out = tmp("bench-real");
     eprintln!(
         "{}",
-        compact::bench::bench(&config(), Path::new(&p), None, &out).unwrap()
+        compact::bench::bench(&config(), Path::new(&p), None, &out, None, &[]).unwrap()
     );
     std::fs::remove_dir_all(&out).ok();
 }

@@ -108,6 +108,11 @@ services:
     command: ["run"]
     environment:
       DATABASE_URL: postgres://compact_rw:${COMPACT_RW_DB_PASSWORD:?set COMPACT_RW_DB_PASSWORD in .env}@postgres:5432/cute_trading
+      # One glibc arena: the reducer (~255 MB of books) is loaded on the runtime thread and mutated
+      # on a spawn_blocking thread; with an arena per thread every replaced book is freed in one and
+      # reallocated in the other (bench: 503 MB peak vs 331 MB with this, same time). Two memcg OOM
+      # kills at 512m on 2026-09-29 before it.
+      MALLOC_ARENA_MAX: "1"
     depends_on:
       postgres:
         condition: service_healthy
