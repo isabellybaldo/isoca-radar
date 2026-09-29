@@ -359,3 +359,20 @@ tr.pick { cursor: pointer; }
 .dbars .db-bar.open { fill: var(--rose); }
 .dbars .db-tick { fill: var(--fg); }
 .db-label { margin: 2px 0 0; font-size: 13px; color: var(--dim); }
+/* Spec 7a §9.2: would we have caught it, and why money is locked (no box inside the panel). */
+.cbar { display: grid; gap: 4px; margin: 0; }
+.cbar .cb-svg { display: block; width: 100%; height: 36px; background: var(--bg); }
+.cbar .cb-dur { fill: var(--teal); }
+.cbar .cb-us { fill: var(--rose); opacity: 0.35; }
+.cbar .cb-rung.in { fill: var(--fg); }
+.cbar .cb-rung.late { fill: var(--bg); stroke: var(--salmon); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.cb-axis { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); text-align: center; font-size: 13px; line-height: 1.3; }
+.cb-axis li { display: grid; min-width: 0; }
+.cb-axis .num { font-family: var(--big); font-size: 18px; }
+.cb-axis li.late { color: var(--dim); }
+.locked { display: grid; gap: 6px; margin: 0; }
+.locked .lk-row { display: flex; gap: 2px; height: 28px; }
+.locked .lk-block { flex: 1 1 0; min-width: 4px; background: var(--rose); }
+.locked .lk-block.sel { background: var(--salmon); }
+.lk-list { display: grid; gap: 2px; font-size: 13px; }
+.lk-list li.sel { font-weight: 600; }

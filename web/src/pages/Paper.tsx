@@ -15,7 +15,7 @@ import { Money } from '../components/Money';
 import { ResetFold } from '../components/ResetFold';
 import { Table, type Column } from '../components/Table';
 import { EPOCH_HOURS, type EpochSpan, P3_NOTE, earlierEpochs, epochAccounts, epochLine } from '../lib/epochs';
-import { shortId } from '../lib/labels';
+import { accountPolicyTag, shortId } from '../lib/labels';
 import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, isZero } from '../lib/money';
 import { fmtUtcDateTime, fmtUtcDayHm, fmtUtcHm } from '../lib/time';
 
@@ -63,7 +63,7 @@ const ledgerColumns: Column<LedgerEntry>[] = [
 ];
 
 const positionColumns: Column<Position>[] = [
-  { key: 'acct', label: 'ACCT', render: (p) => p.account_id.split('-')[0] },
+  { key: 'acct', label: 'ACCT', render: (p) => accountPolicyTag(p.account_id) },
   {
     key: 'market',
     label: 'MARKET',

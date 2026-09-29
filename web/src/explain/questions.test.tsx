@@ -4,9 +4,9 @@ import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import type { EpisodeSummary } from '../api/types';
 import { EPISODE_DEF } from '../help';
-import { episodeSummaryFixture, ladderFixture } from '../test/fixtures';
+import { accountFixture, episodeDetailFixture, episodeSummaryFixture, ladderFixture, positionFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
-import { COPY } from './copy';
+import { COPY, caughtText } from './copy';
 import { Explain } from './Explain';
 import { type ExplainPage, ExplainProvider, type PageData, type Selection, useExplainPage, useExplainSelect } from './ExplainContext';
 import { OTHER } from './models';
@@ -109,6 +109,102 @@ describe('Episodes: What is an episode?', () => {
   });
 });
 
+const DETAIL = { detail: episodeDetailFixture({ category: 'crypto' }) }; // a NO basket that lasted 4.19 s
+const OPEN_DETAIL = { detail: episodeDetailFixture({ closed_ms: null, duration_ms: null }) };
+const FAST = { detail: episodeDetailFixture({ duration_ms: 60, closed_ms: Date.UTC(2026, 8, 25, 1, 12, 4, 270) }) };
+const POSITIONS = {
+  accounts: [accountFixture()],
+  positions: [
+    positionFixture(),
+    positionFixture({ market_id: 'm2', end_date: null, event_title: 'Who wins the cup?' }),
+    positionFixture({ market_id: 'm3', returned: true, event_title: 'Returned one' }),
+  ],
+};
+const NOTHING = { accounts: [accountFixture()], positions: [] };
+const GONE = positionFixture({ market_id: 'm9', event_title: 'Left the list', basis: '7' });
+const TODAY = { accounts: [], positions: [positionFixture({ end_date: new Date().toISOString().slice(0, 10) })] };
+const NO_DETAIL = {};
+
+describe('Episode detail: Would we have caught it?', () => {
+  it('puts its duration on the ladder axis: every rung faster than it arrives in time', () => {
+    const p = ask(<Pub page="episode" data={DETAIL} />, 'Would we have caught it?');
+    const axis = within(p).getByRole('list', { name: 'rungs in time' });
+    expect(within(axis).getAllByRole('listitem').map((li) => li.lastChild?.textContent)).toEqual(Array(6).fill('in time'));
+    expect(within(p).getByText('It stayed on the table for 4.19 s: rungs faster than that arrive in time.')).toBeInTheDocument();
+    expect(within(p).getByText(COPY.caughtNotFilled)).toBeInTheDocument();
+    expect(p.querySelectorAll('svg.cb-svg')).toHaveLength(1);
+    expect(within(p).queryByRole('table')).toBeNull();
+  });
+
+  it('a 60 ms episode: the rungs at 100 ms and beyond are too late', () => {
+    const p = ask(<Pub page="episode" data={FAST} />, 'Would we have caught it?');
+    const axis = within(p).getByRole('list', { name: 'rungs in time' });
+    expect(within(axis).getAllByRole('listitem').map((li) => li.lastChild?.textContent)).toEqual([
+      'in time', 'in time', 'in time', 'too late', 'too late', 'too late',
+    ]);
+    expect(p.querySelectorAll('rect.cb-rung.late')).toHaveLength(3);
+    expect(within(p).getByText('It stayed on the table for 0.06 s: rungs faster than that arrive in time.')).toBeInTheDocument();
+  });
+
+  it('a still-open episode says so and every rung is in time so far', () => {
+    const p = ask(<Pub page="episode" data={OPEN_DETAIL} />, 'Would we have caught it?');
+    expect(within(p).getByText(caughtText(null))).toBeInTheDocument();
+    expect(p.querySelectorAll('rect.cb-rung.in')).toHaveLength(6);
+  });
+
+  it('waits when the page has not published its episode', () => {
+    const p = ask(<Pub page="episode" data={NO_DETAIL} />, 'Would we have caught it?');
+    expect(within(p).getByText(COPY.caughtWaiting)).toBeInTheDocument();
+  });
+});
+
+describe('Paper: Why is money locked?', () => {
+  it('draws open positions as blocks sized by basis, each with days to resolution; returned ones are not locked', () => {
+    const p = ask(<Pub page="paper" data={POSITIONS} />, 'Why is money locked?');
+    const items = within(within(p).getByRole('list', { name: 'locked positions' })).getAllByRole('listitem').map((li) => li.textContent);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatch(/^Fed decision in October\? · P3 · \$18\.00 locked on paper · resolves in \d+ days?$/);
+    expect(items[1]).toBe('Who wins the cup? · P3 · $18.00 locked on paper · resolution date unknown');
+    expect(p.querySelectorAll('.lk-block')).toHaveLength(2);
+    expect(within(p).queryByText(/Returned one/)).toBeNull();
+    expect(within(p).getByText(COPY.locked)).toBeInTheDocument();
+  });
+
+  it('highlights the selected position', () => {
+    const p = ask(<Pub page="paper" data={POSITIONS} sel={{ kind: 'position', position: POSITIONS.positions[1] }} />, 'Why is money locked?');
+    expect(p.querySelectorAll('.lk-block.sel')).toHaveLength(1);
+    expect(within(p).getByText(/^Who wins the cup\?/).closest('li')).toHaveClass('sel');
+    expect(p.querySelectorAll('.lk-block')).toHaveLength(2);
+  });
+
+  it('a selected position that has left the list stays drawn, first (a snapshot)', () => {
+    const p = ask(<Pub page="paper" data={POSITIONS} sel={{ kind: 'position', position: GONE }} />, 'Why is money locked?');
+    const items = within(within(p).getByRole('list', { name: 'locked positions' })).getAllByRole('listitem');
+    expect(items).toHaveLength(3);
+    expect(items[0]).toHaveTextContent(/^Left the list · P3 · \$7\.00 locked on paper/);
+    expect(items[0]).toHaveClass('sel');
+    expect(p.querySelectorAll('.lk-block.sel')).toHaveLength(1);
+  });
+
+  it('a snapshot of a position that was since returned is not drawn as locked', () => {
+    const returned = positionFixture({ market_id: 'm9', returned: true, event_title: 'Left the list' });
+    const p = ask(<Pub page="paper" data={NOTHING} sel={{ kind: 'position', position: returned }} />, 'Why is money locked?');
+    expect(within(p).getByText(COPY.nothingLocked)).toBeInTheDocument();
+  });
+
+  it('says so when nothing is locked', () => {
+    const p = ask(<Pub page="paper" data={NOTHING} />, 'Why is money locked?');
+    expect(within(p).getByText(COPY.nothingLocked)).toBeInTheDocument();
+    expect(p.querySelectorAll('.lk-block')).toHaveLength(0);
+  });
+
+  it('an end date that is today is not past (D-07)', () => {
+    const p = ask(<Pub page="paper" data={TODAY} />, 'Why is money locked?');
+    expect(p).toHaveTextContent('resolves in 1 day');
+    expect(p).not.toHaveTextContent('past its end date');
+  });
+});
+
 describe('D-04: one drawing and at most two sentences per answer', () => {
   const sentences = (t: string) => t.split(/(?<=[.!?])\s+/).filter(Boolean).length;
   const answers: Record<string, string[]> = {
@@ -116,6 +212,10 @@ describe('D-04: one drawing and at most two sentences per answer', () => {
     'make money (no)': [COPY.makeMoneyNo],
     'make money (incomplete)': [COPY.makeMoneyIncomplete],
     'what is an episode': [COPY.whatEpisode, COPY.episodeBar],
+    'caught (closed)': [caughtText(4190), COPY.caughtNotFilled],
+    'caught (open)': [caughtText(null), COPY.caughtNotFilled],
+    locked: [COPY.locked],
+    'nothing locked': [COPY.nothingLocked],
   };
   for (const [name, copy] of Object.entries(answers)) {
     it(`${name}: at most 2 sentences`, () => {

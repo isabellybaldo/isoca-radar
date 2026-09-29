@@ -1,6 +1,6 @@
 // Panel-side models (09-27 §2): structure only; every money figure shown comes from the api.
-import type { EpisodeSummary } from '../api/types';
-import { fmtDuration } from '../lib/time';
+import type { EpisodeSummary, Position } from '../api/types';
+import { DAY_MS, fmtDuration } from '../lib/time';
 
 /** The ✗ column of an incomplete YES set: EpisodeSummary does not say which outcome is uncovered. */
 export const OTHER = 'an outcome not in the set';
@@ -71,6 +71,24 @@ export function durationRows(row: EpisodeSummary | null, nowMs: number): Duratio
     example,
     { kind: 'row', label: row.event_title ?? row.id, ms: row.duration_ms ?? Math.max(0, nowMs - row.opened_ms), open: row.duration_ms === null, ticks: [] },
   ];
+}
+
+export const positionKey = (p: Position): string => `${p.account_id}|${p.market_id}|${p.outcome}`;
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * 09-27 §7.4: days to resolution from `Position.end_date` (stored text), or "unknown". A date-only value
+ * is the END of that UTC day (D-07): on the end date itself it is not past.
+ */
+export function daysText(endDate: string | null, nowMs: number): string {
+  if (endDate === null) return 'resolution date unknown';
+  const t = Date.parse(endDate);
+  if (Number.isNaN(t)) return 'resolution date unknown';
+  const end = DATE_ONLY.test(endDate) ? t + DAY_MS : t;
+  const d = Math.ceil((end - nowMs) / DAY_MS);
+  if (d <= 0) return 'past its end date, awaiting resolution';
+  return d === 1 ? 'resolves in 1 day' : `resolves in ${d} days`;
 }
 
 export function durationText(r: DurationRow): string {
