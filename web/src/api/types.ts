@@ -206,6 +206,8 @@ export interface Position {
   basis: Dec;
   returned: boolean;
   event_title: string | null;
+  /** The event's end date as stored (`events.end_date`, text); null when unknown (spec 7a §9.2). */
+  end_date: string | null;
 }
 export interface LedgerEntry {
   run_id: number;
@@ -333,4 +335,67 @@ export interface CardsMeta {
   catch_up: Record<string, { key: string; next_hour: number; done: boolean }>;
   papers: PaperEntry[];
   not_replicated: { item: string; why: string }[];
+}
+
+/** Phase 7a §7.1: one paper account of the latency ladder since the epoch start, cut at `as_of_ms`. */
+export interface LadderRung {
+  account_id: string;
+  scenario: string;
+  /** proc + net + match from the api's policies file; null when the api has none. */
+  latency_ms: number | null;
+  /** sp-burst / sp-idle-nodelay: drawn beside the ladder, never in the break-even. */
+  extra: boolean;
+  n_exec: number;
+  n_leg_risk: number;
+  /** Execs with q_eff = 0 (SWEET's meaning). */
+  n_missed: number;
+  /** Σ realized_delta of converts: basket gains, fees included. */
+  gains: Dec;
+  /** Σ realized_delta of unwind sells: leg-risk cost, fees included. */
+  leg_risk: Dec;
+  /** Σ realized_delta of settlements. */
+  settle: Dec;
+  unrealized: Dec;
+  /** Latest common mark's equity − bankroll = gains + leg_risk + settle + unrealized, exactly. */
+  net: Dec;
+}
+/** `cards::ladder::BreakEven`: internally tagged by `kind`; `not_monotone` is sent only when true. */
+export type BreakEven =
+  | { kind: 'thin' }
+  | { kind: 'all' }
+  | { kind: 'none' }
+  | { kind: 'at'; latency_ms: number; direction: 'loses_beyond' | 'pays_beyond'; not_monotone?: boolean };
+export type MarketsStatus = 'live' | 'warming' | 'under_review' | 'missing';
+/** GET /api/paper/ladder. */
+export interface Ladder {
+  epoch: number;
+  /** null in epoch 0 (no epoch row yet). */
+  start_ms: number | null;
+  /** The latest instant every ladder account has a mark; every sum stops there. */
+  as_of_ms: number | null;
+  /** LADDER rungs by latency, then the extras; a LADDER rung with no account is left out. */
+  rungs: LadderRung[];
+  /** SWEET's 30d NO rows at fee 0 for the LADDER scenarios, dimensions all + category. */
+  markets: SweetRow[];
+  measured: { latency_ms: number; host: string } | null;
+  markets_status: MarketsStatus;
+  break_even: BreakEven;
+}
+export interface PaperEpoch {
+  epoch: number;
+  start_ms: number;
+  cause: 'policies' | 'reset';
+}
+/** GET /api/paper/epochs; `current` is 0 before the first epoch row. */
+export interface Epochs {
+  epochs: PaperEpoch[];
+  current: number;
+  pending_request: { id: number; requested_ms: number } | null;
+  /** The next UTC midnight after today's request, or now. */
+  next_allowed_ms: number;
+}
+/** POST /api/paper/reset → 202. */
+export interface ResetQueued {
+  request_id: number;
+  requested_ms: number;
 }
