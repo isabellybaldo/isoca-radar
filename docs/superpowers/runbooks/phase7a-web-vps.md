@@ -54,12 +54,13 @@ if not: check the key path is quoted with forward slashes and the port is 50158.
 
 ## On the VPS: deploy
 
-7. Rollback tag `web:pre7b` on the web that runs now (before step 8's load moves `web:dev`); `web:pre7a` is only compared, never retagged.
+7. Rollback tag `web:pre7b` on the web that runs now (before step 8's load moves `web:dev`), only if `web:pre7b` does not exist yet; `web:pre7a` is only compared, never retagged.
 ```bash
-cd /home/isoca/projects/cute-trading && docker tag cute-trading/web:dev cute-trading/web:pre7b && docker image inspect -f '{{.Id}}' cute-trading/web:pre7b cute-trading/web:pre7a; docker inspect -f '{{.Image}}' cute-trading-web-1
+cd /home/isoca/projects/cute-trading && { docker image inspect cute-trading/web:pre7b >/dev/null 2>&1 || docker tag cute-trading/web:dev cute-trading/web:pre7b; } && docker image inspect -f '{{.Id}}' cute-trading/web:pre7b cute-trading/web:pre7a; docker inspect -f '{{.Image}}' cute-trading-web-1
 ```
 → expected: three identical `sha256:…` lines (pre7b, pre7a, the running web).
 if not: the running ID differs from the first line = `docker tag <the running sha256 ID> cute-trading/web:pre7b` and run the last two commands again until the first and third lines match; only `pre7a` differs or is missing = write it in Results and go on (never retag `pre7a`).
+if not: a re-run after step 10 shows pre7b equal to the NEW running web = `docker tag <the previous web sha256 ID (the pre7a ID if that is what ran before)> cute-trading/web:pre7b` and report.
 **STOP**
 
 8. Load the new image (moves `web:dev`; `web:pre7b` and `web:pre7a` stay).
@@ -110,7 +111,7 @@ if not: a label drawn inside the SVG or stretched = report (spec §7.2); more th
 → expected: one more `/api/paper/ladder` per minute while open; Esc closes it with the focus on the `EXPLAIN ▸` tab; no request while closed.
 if not: requests while closed or more than one per minute = report (no rollback needed).
 
-15. (Chrome) the panel on each page: `/` (How can this make money?), `/episodes` (click a row, then What is an episode?), an episode detail (Would we have caught it?), `/paper` (click an awaiting row, then Why is money locked?), `/sweet`, `/papers`, `/health` (the hero only).
+15. (Chrome) the panel on each page: `/` (How can this make money?), `/episodes` (click a row, then What is an episode?), an episode detail (Would we have caught it?), `/paper` (open the `awaiting resolution` fold, click an awaiting row, then Why is money locked?), `/sweet`, `/papers`, `/health` (the hero only).
 → expected: each answer is one drawing plus at most two sentences; `as selected: …` after a row click, gone after `back to the page` and after leaving the page; no word `earn`, `earned`, `made`, `income` or `profitable` anywhere in the panel.
 if not: a forbidden word = screenshot and report (a copy fix on a branch; no rollback needed).
 
