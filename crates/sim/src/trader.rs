@@ -401,6 +401,34 @@ impl PaperTrader {
         out
     }
 
+    /// Spec 7a §4.2: every account back to its bankroll IN PLACE (a paper reset). Cash,
+    /// reservations, realized, fees, positions, returned YES, peak equity and drawdown restart
+    /// from the account's spec; consumed liquidity, due work and the minute-mark schedule are
+    /// cleared. Kept: `cfg`, `scenario_ix`, `rate` (a market measure), and each account's ledger
+    /// `seq` (review C1: `paper_ledger`'s key is (run_id, account_id, seq) with ON CONFLICT DO
+    /// NOTHING, so a restarted seq would silently drop the new epoch's ledger). `next_seq` only
+    /// orders the now-empty due queue and carries on too. Callers `close` first.
+    pub fn reset(&mut self) {
+        for a in &mut self.accounts {
+            let seq = a.seq;
+            *a = Account::new(a.spec.clone());
+            a.seq = seq;
+        }
+        for c in &mut self.consumed {
+            *c = ConsumedLiquidity::default();
+        }
+        self.due.clear();
+        self.next_mark_ms = None;
+    }
+
+    /// Spec 7a §4.2: mark every account at `t_ms` now (a reset's start), exactly as a minute mark
+    /// would: one `mark` ledger row and one `AccountRow` each. The minute schedule is untouched.
+    pub fn mark_now(&mut self, t_ms: i64, books: &impl Books) -> Vec<SimOut> {
+        let mut out = Vec::new();
+        self.mark_all(t_ms, books, &mut out);
+        out
+    }
+
     pub fn state(&self) -> TraderState {
         TraderState {
             accounts: self.accounts.clone(),

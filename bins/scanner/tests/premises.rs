@@ -69,7 +69,8 @@ fn run_rows_cover_every_area_but_host_with_config_hashed_versions() {
     let sim = rows.iter().find(|r| r.area == "sim").unwrap();
     assert_eq!(
         sim.version,
-        effective_version("1", &format!("policies_sha256={}", pol.sha256))
+        effective_version("2", &format!("policies_sha256={}", pol.sha256)),
+        "spec 7a: PaperTrader::reset/mark_now bumped the sim code version"
     );
     // paper trading off: no sim row, so Edge capture never counts the run
     assert!(run_rows(9, &cfg, None).iter().all(|r| r.area != "sim"));

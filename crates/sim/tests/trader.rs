@@ -616,3 +616,136 @@ fn an_unapproved_pair_on_a_consumed_book_is_pair_not_approved() {
         "{outs:?}"
     );
 }
+
+fn ledger_rows(outs: &[SimOut]) -> Vec<(i64, u64)> {
+    outs.iter()
+        .filter_map(|o| match o {
+            SimOut::Ledger(e) => Some((e.t_ms, e.seq)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn reset_keeps_each_accounts_ledger_seq_so_the_new_epoch_never_collides() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[(PolicyKind::P0Converter, "1000")])).unwrap();
+    let mut rows = Vec::new();
+    rows.extend(t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3)));
+    rows.extend(t.on_frame(1100, &books)); // three buys
+    rows.extend(t.close(1500, &books)); // the conversion (due 3100) completes at 1500, then a mark
+    t.reset();
+    rows.extend(t.mark_now(1501, &books));
+    rows.extend(t.on_open(&ctx("e2", 1600, &g, detect_no_basket(&g).unwrap(), &NO3)));
+    let e2 = t.on_frame(1700, &books);
+    assert_eq!(
+        fills(&e2),
+        vec![
+            ("m0".into(), d("51.2")),
+            ("m1".into(), d("51.2")),
+            ("m2".into(), d("51.2"))
+        ],
+        "the reset cleared consumed liquidity: the new epoch retakes the depth"
+    );
+    rows.extend(e2);
+    let seqs: Vec<u64> = ledger_rows(&rows).into_iter().map(|(_, s)| s).collect();
+    assert_eq!(
+        seqs,
+        (1..=9).collect::<Vec<u64>>(),
+        "seq carries on across the reset (review C1): paper_ledger's key would drop a restarted seq"
+    );
+}
+
+#[test]
+fn close_reset_mark_now_starts_every_account_at_its_bankroll_after_the_close_rows() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut t = PaperTrader::new(cfg(&[
+        (PolicyKind::P0Converter, "1000"),
+        (PolicyKind::P3Naive, "500"),
+    ]))
+    .unwrap();
+    t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
+    t.on_frame(1100, &books);
+    let close = t.close(1500, &books);
+    assert!(!ledger_rows(&close).is_empty());
+    assert!(
+        ledger_rows(&close).iter().all(|&(at, _)| at == 1500),
+        "close rows are stamped at t, before the epoch start t + 1"
+    );
+    t.reset();
+    for a in t.accounts() {
+        assert_eq!(
+            (a.cash, a.reserved, a.realized, a.fees_paid),
+            (a.spec.bankroll, d("0"), d("0"), d("0")),
+            "{}",
+            a.id
+        );
+        assert!(a.positions.is_empty() && a.returned.is_empty(), "{}", a.id);
+        assert_eq!(
+            (a.peak_equity, a.max_drawdown),
+            (a.spec.bankroll, d("0")),
+            "{}",
+            a.id
+        );
+    }
+    let start = t.mark_now(1501, &books);
+    let marks: Vec<(String, i64, Decimal)> = start
+        .iter()
+        .filter_map(|o| match o {
+            SimOut::Account(a) => Some((a.account.clone(), a.t_ms, a.equity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        vec![
+            ("P0-converter/t".to_string(), 1501, d("1000")),
+            ("P3-naive/t".to_string(), 1501, d("500"))
+        ]
+    );
+    assert!(ledger_rows(&start).iter().all(|&(at, _)| at == 1501));
+}
+
+#[test]
+fn reset_keeps_the_frame_rate_so_a_burst_scenario_stays_in_its_burst() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut c = cfg(&[(PolicyKind::P0Converter, "1000")]);
+    c.scenarios[0].burst = vec![sim::config::BurstStep {
+        frames_per_s_above: 0,
+        multiplier: 3,
+    }];
+    let mut t = PaperTrader::new(c).unwrap();
+    for i in 0..20 {
+        t.on_frame(100 + i * 10, &books); // 20 frames in the 10 s window: 2 frames/s
+    }
+    t.close(400, &books);
+    t.reset();
+    let outs = t.on_open(&ctx("e1", 500, &g, detect_no_basket(&g).unwrap(), &NO3));
+    assert!(
+        matches!(&outs[..], [SimOut::Intent(i)] if i.exec_ms == Some(800)),
+        "match 100 × 3: the frame rate is a market measure, kept across the reset: {outs:?}"
+    );
+}
+
+#[test]
+fn a_zero_ms_scenario_is_valid_and_fills_on_the_book_that_showed_the_edge() {
+    let g = no_group(FeeSchedule::ZERO);
+    let books = books_of(&g);
+    let mut c = cfg(&[(PolicyKind::P0Converter, "1000")]);
+    c.scenarios[0].match_ms = 0; // proc = net = match = 0 (spec 7a §3: rung-0)
+    c.validate().unwrap();
+    let mut t = PaperTrader::new(c).unwrap();
+    let outs = t.on_open(&ctx("e1", 1000, &g, detect_no_basket(&g).unwrap(), &NO3));
+    assert!(matches!(&outs[..], [SimOut::Intent(i)] if i.exec_ms == Some(1000)));
+    assert_eq!(
+        fills(&t.on_frame(1000, &books)),
+        vec![
+            ("m0".into(), d("51.2")),
+            ("m1".into(), d("51.2")),
+            ("m2".into(), d("51.2"))
+        ]
+    );
+}
