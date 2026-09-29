@@ -60,6 +60,25 @@ fn markets_status(body: &Value) -> &'static str {
     }
 }
 
+/// `markets_status` and `markets` from SWEET's 30d body. No row, or a body that doesn't parse
+/// (logged once per request), is `missing` with no rows: the rungs never 500 over the markets.
+fn sweet_markets(body: Option<&str>) -> (&'static str, Vec<Value>) {
+    let Some(body) = body else {
+        return ("missing", Vec::new());
+    };
+    let v: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("api: unreadable card SWEET: {e}; ladder markets missing");
+            return ("missing", Vec::new());
+        }
+    };
+    match markets_status(&v) {
+        s @ ("live" | "warming") => (s, ladder_rows(&v)),
+        s => (s, Vec::new()),
+    }
+}
+
 /// NO-side rows at fee 0 for the LADDER scenarios, dimensions `all` and `category`.
 fn ladder_rows(body: &Value) -> Vec<Value> {
     body["series"]["sweet"]["rows"]
@@ -186,25 +205,8 @@ pub async fn ladder(State(st): State<AppState>) -> Result<Json<LadderDto>, ApiEr
             })
         }
     };
-    let sweet = st
-        .store
-        .card_results_for("30d")
-        .await?
-        .into_iter()
-        .find(|(c, _)| c == "SWEET");
-    let (markets_status, markets) = match sweet {
-        None => ("missing", Vec::new()),
-        Some((_, body)) => {
-            let v: Value = serde_json::from_str(&body).map_err(|e| {
-                eprintln!("api: unreadable card SWEET: {e}");
-                ApiError::Internal
-            })?;
-            match markets_status(&v) {
-                s @ ("live" | "warming") => (s, ladder_rows(&v)),
-                s => (s, Vec::new()),
-            }
-        }
-    };
+    let sweet = st.store.card_result("SWEET", "30d").await?;
+    let (markets_status, markets) = sweet_markets(sweet.as_deref());
     Ok(Json(LadderDto {
         epoch,
         start_ms,
@@ -215,4 +217,22 @@ pub async fn ladder(State(st): State<AppState>) -> Result<Json<LadderDto>, ApiEr
         markets_status,
         break_even: be,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sweet_body_that_does_not_parse_is_missing_markets_not_a_500() {
+        let (status, rows) = sweet_markets(Some("{not json"));
+        assert_eq!((status, rows.len()), ("missing", 0));
+        assert_eq!(sweet_markets(None), ("missing", Vec::new()));
+        let (status, rows) = sweet_markets(Some(
+            r#"{"status":"live","series":{"sweet":{"rows":[
+                {"side":"no","fee_bips":0,"scenario":"rung-0","dimension":"all"},
+                {"side":"yes","fee_bips":0,"scenario":"rung-0","dimension":"all"}]}}}"#,
+        ));
+        assert_eq!((status, rows.len()), ("live", 1));
+    }
 }

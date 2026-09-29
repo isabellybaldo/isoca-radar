@@ -553,6 +553,21 @@ impl Store {
         .await?)
     }
 
+    /// The api: one card's body in one window (the ladder reads SWEET 30d). None before
+    /// migration 0006 or when that card has no row.
+    pub async fn card_result(&self, card: &str, win: &str) -> Result<Option<String>, StoreError> {
+        if !self.cards_ready().await? {
+            return Ok(None);
+        }
+        Ok(
+            sqlx::query_scalar("SELECT body::text FROM card_results WHERE card = $1 AND win = $2")
+                .bind(card)
+                .bind(win)
+                .fetch_optional(self.pool())
+                .await?,
+        )
+    }
+
     /// The api: every (key, value) of card_meta. Empty before migration 0006.
     pub async fn card_meta_all(&self) -> Result<Vec<(String, String)>, StoreError> {
         if !self.cards_ready().await? {

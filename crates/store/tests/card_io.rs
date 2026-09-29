@@ -654,6 +654,13 @@ async fn card_cells_results_and_meta_round_trip_and_the_api_reads_them() {
     assert_eq!(v["columns"][0]["ours"], "0");
     assert!(v["columns"][0]["their"].is_null());
     assert!(api.card_results_for("24h").await.unwrap().is_empty());
+    assert_eq!(
+        api.card_result("G1", "7d").await.unwrap(),
+        Some(rows[0].1.clone()),
+        "one card's body, the same text as the window read"
+    );
+    assert_eq!(api.card_result("G1", "24h").await.unwrap(), None);
+    assert_eq!(api.card_result("SWEET", "7d").await.unwrap(), None);
     let meta = api.card_meta_all().await.unwrap();
     assert_eq!(
         meta.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(),
