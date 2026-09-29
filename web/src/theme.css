@@ -374,6 +374,10 @@ tr.pick.nopick { cursor: default; }
 .cb-axis li { display: grid; min-width: 0; }
 .cb-axis .num { font-family: var(--big); font-size: 18px; }
 .cb-axis li.late { color: var(--dim); }
+.cb-cap { display: grid; gap: 2px; font-size: 13px; }
+ul.plain.cb-legend { gap: 2px; }
+.cb-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+.cb-sw.us { background: var(--rose); opacity: 0.6; }
 .locked { display: grid; gap: 6px; margin: 0; }
 .locked .lk-row { display: flex; gap: 2px; height: 28px; }
 .locked .lk-block { flex: 1 1 0; min-width: 4px; background: var(--rose); }

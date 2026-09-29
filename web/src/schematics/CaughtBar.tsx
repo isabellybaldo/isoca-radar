@@ -1,4 +1,4 @@
-import { LADDER, latencyX, slotX, usBand } from '../lib/ladder';
+import { LADDER, latencyX, slotX, usBand, usText } from '../lib/ladder';
 import { fmtDuration } from '../lib/time';
 
 const W = 600;
@@ -20,7 +20,8 @@ export function CaughtBar({ durationMs, measured }: { durationMs: number | null;
     <figure className="cbar" aria-label="would we have caught it">
       <svg className="cb-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="presentation">
         {band && <rect className="cb-us" x={band.x0 * W} y={0} width={(band.x1 - band.x0) * W} height={H} />}
-        <rect className="cb-dur" x={0} y={H / 2 - 4} width={Math.max(1, end * W)} height={8} />
+        {/* 0 ms: no bar at all (even rung 0 is too late); any other duration is at least a sliver. */}
+        <rect className="cb-dur" x={0} y={H / 2 - 4} width={durationMs === 0 ? 0 : Math.max(1, end * W)} height={8} />
         {LADDER.map((l, i) => (
           <rect
             key={l.scenario}
@@ -44,9 +45,16 @@ export function CaughtBar({ durationMs, measured }: { durationMs: number | null;
           );
         })}
       </ol>
-      {durationMs !== null && durationMs > last && (
-        <figcaption className="dim">{`ms on the axis; the bar runs past the last rung: ${fmtDuration(durationMs)}`}</figcaption>
-      )}
+      {/* The pink band's key, as the ladder's legend has it: a label, not a sentence of the answer (D-04). */}
+      <figcaption className="dim cb-cap">
+        <ul className="plain cb-legend" aria-label="legend">
+          <li>
+            <span className="cb-sw us" aria-hidden="true" />
+            {usText(measured)}
+          </li>
+        </ul>
+        {durationMs !== null && durationMs > last && <span>{`ms on the axis; the bar runs past the last rung: ${fmtDuration(durationMs)}`}</span>}
+      </figcaption>
     </figure>
   );
 }
