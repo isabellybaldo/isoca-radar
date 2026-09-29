@@ -15,6 +15,7 @@ export function Help({ id }: { id: HelpId }) {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.preventDefault(); // this Esc is spent: the explain panel's bubble listener sees defaultPrevented
         setOpen(false);
         btn.current?.focus();
       }
@@ -23,10 +24,12 @@ export function Help({ id }: { id: HelpId }) {
       if (e.target instanceof Node && root.current?.contains(e.target)) return;
       setOpen(false);
     };
-    document.addEventListener('keydown', onKey);
+    // Capture phase: runs before any bubble listener on document (the explain panel's, registered
+    // earlier while it was open), whatever the registration order.
+    document.addEventListener('keydown', onKey, true);
     document.addEventListener('pointerdown', onPointer);
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
       document.removeEventListener('pointerdown', onPointer);
     };
   }, [open]);

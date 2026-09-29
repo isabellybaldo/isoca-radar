@@ -1,4 +1,4 @@
-import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { EpisodeDetail, EpisodeSummary, PaperAccount, Position } from '../api/types';
 import { readOpen, writeOpen } from './storage';
 
@@ -62,6 +62,13 @@ export function useExplainSelect(): (s: Selection) => void {
   return useContext(C).select;
 }
 
+/** Same keys, each value the same identity: a fresh wrapper around the same api data is no change. */
+function shallowEqual(a: object, b: object): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+}
+
 /**
  * Spec 7a §9.3: pages publish what they already fetched; the panel only reads it. Pass api data
  * identities (useApi's `data`), never fresh literals: each new identity republishes. Unmounting (leaving
@@ -69,11 +76,19 @@ export function useExplainSelect(): (s: Selection) => void {
  */
 export function useExplainPage<P extends ExplainPage>(page: P, d: NonNullable<PageData[P]>): void {
   const { publish } = useContext(C);
-  const deps = Object.values(d);
+  const last = useRef<object | null>(null);
+  // No dependency list (its size must never change, and `d` may gain or lose keys): the shallow compare
+  // against the last published object decides, so a fresh wrapper with the same values is not a publish.
   useEffect(() => {
+    if (last.current !== null && shallowEqual(last.current, d)) return;
+    last.current = d;
     publish(page, d);
-    // `d` is a fresh object each render; its values say when it really changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, publish, ...deps]);
-  useEffect(() => () => publish(page, null), [page, publish]);
+  });
+  useEffect(
+    () => () => {
+      last.current = null; // a new page (or a remount) publishes afresh
+      publish(page, null);
+    },
+    [page, publish],
+  );
 }

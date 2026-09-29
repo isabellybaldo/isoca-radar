@@ -1,12 +1,13 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import type { ReactElement } from 'react';
+import { type ReactElement, useState } from 'react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EpisodeSummary } from '../api/types';
+import { Help } from '../components/Help';
 import { episodeSummaryFixture, ladderFixture } from '../test/fixtures';
 import { mockApi } from '../test/mockApi';
 import { Explain, LADDER_POLL_MS } from './Explain';
-import { ExplainProvider, useExplainPage, useExplainSelect } from './ExplainContext';
+import { ExplainProvider, useExplainCtx, useExplainPage, useExplainSelect } from './ExplainContext';
 
 const ROW = episodeSummaryFixture();
 // Stable identities, as a page's useApi data: a fresh literal each render would republish forever.
@@ -141,5 +142,71 @@ describe('the explain panel shell (spec 7a §9.1)', () => {
     expect(within(panel()).getByText(/^as selected: Bitcoin price on September 26\?/)).toBeInTheDocument();
     fireEvent.click(within(panel()).getByRole('button', { name: 'back to the page' }));
     expect(within(panel()).queryByText(/as selected/)).toBeNull();
+  });
+
+  it('Esc that closes a (?) popover leaves the open panel alone (fix round 1)', () => {
+    mockApi({ '/api/paper/ladder': ladderFixture() });
+    mount(
+      <>
+        <RadarLike />
+        <Help id="open" />
+      </>,
+    );
+    fireEvent.click(tab()); // the panel's listener is registered first: Help must still win
+    const help = screen.getByRole('button', { name: /^Help:/ });
+    fireEvent.click(help);
+    expect(help).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(help).toHaveAttribute('aria-expanded', 'false');
+    expect(help).toHaveFocus();
+    expect(panel()).toBeInTheDocument();
+    expect(tab()).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.keyDown(document, { key: 'Escape' }); // the next Esc is the panel's
+    expect(screen.queryByRole('complementary', { name: 'explain' })).toBeNull();
+  });
+
+  it('Esc typed in an input outside the panel leaves the panel open and the focus in the input (fix round 1)', () => {
+    mockApi({ '/api/paper/ladder': ladderFixture() });
+    mount(
+      <>
+        <RadarLike />
+        <input aria-label="confirm" />
+      </>,
+    );
+    fireEvent.click(tab());
+    const input = screen.getByRole('textbox', { name: 'confirm' });
+    input.focus();
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(panel()).toBeInTheDocument();
+    expect(input).toHaveFocus();
+  });
+});
+
+describe('useExplainPage', () => {
+  it('publishes when the data object gains a key, without a changing dependency list (fix round 1)', () => {
+    const err = vi.spyOn(console, 'error');
+    function Growing() {
+      const [d, setD] = useState<{ open?: EpisodeSummary[] }>({});
+      useExplainPage('radar', d);
+      return (
+        <button type="button" onClick={() => setD({ open: OPEN })}>
+          grow
+        </button>
+      );
+    }
+    function Reader() {
+      const { page, data } = useExplainCtx();
+      return <p>{`${page ?? 'none'}:${data.radar?.open?.length ?? 'no rows'}`}</p>;
+    }
+    render(
+      <ExplainProvider>
+        <Growing />
+        <Reader />
+      </ExplainProvider>,
+    );
+    expect(screen.getByText('radar:no rows')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('grow'));
+    expect(screen.getByText('radar:1')).toBeInTheDocument();
+    expect(err).not.toHaveBeenCalled();
   });
 });

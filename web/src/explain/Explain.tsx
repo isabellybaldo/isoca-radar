@@ -92,10 +92,12 @@ export function Explain() {
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setOpen(false);
-        tab.current?.focus();
-      }
+      if (e.key !== 'Escape' || e.defaultPrevented) return; // another Esc user (a (?) popover) took it
+      // Esc typed in a field on the page belongs to that field, not to the panel.
+      const t = e.target;
+      if (t instanceof HTMLElement && t.matches('input, textarea, select') && !t.closest('#explain-panel')) return;
+      setOpen(false);
+      tab.current?.focus();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
