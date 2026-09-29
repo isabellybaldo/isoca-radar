@@ -62,27 +62,51 @@ const ledgerColumns: Column<LedgerEntry>[] = [
   { key: 'realized', label: 'REALIZED', render: (l) => <Money value={l.realized_delta} signed tone />, num: true },
 ];
 
-const positionColumns: Column<Position>[] = [
-  { key: 'acct', label: 'ACCT', render: (p) => accountPolicyTag(p.account_id) },
-  {
-    key: 'market',
-    label: 'MARKET',
-    // No outcome name is stored anywhere (legs carry ids only), so the short market id tells rows apart.
-    render: (p) => (
-      <span title={p.market_id}>
-        {p.event_title !== null && (
+/** A returned position locks nothing, so it is not a selection for "Why is money locked?". */
+const selectable = (p: Position) => !p.returned;
+
+/** The MARKET cell is a button for an open position, so the keyboard selects it too (a row click does
+ *  the same for the mouse); a returned one stays plain text. */
+function positionColumns(pick: (p: Position) => void): Column<Position>[] {
+  return [
+    { key: 'acct', label: 'ACCT', render: (p) => accountPolicyTag(p.account_id) },
+    {
+      key: 'market',
+      label: 'MARKET',
+      // No outcome name is stored anywhere (legs carry ids only), so the short market id tells rows apart.
+      render: (p) => {
+        const name = (
           <>
-            <span>{p.event_title}</span>{' '}
+            {p.event_title !== null && (
+              <>
+                <span>{p.event_title}</span>{' '}
+              </>
+            )}
+            <span className="dim">{shortId(p.market_id)}</span>
           </>
-        )}
-        <span className="dim">{shortId(p.market_id)}</span>
-      </span>
-    ),
-  },
-  { key: 'side', label: 'SIDE', render: (p) => `${p.outcome.toUpperCase()}${p.returned ? ' (returned)' : ''}` },
-  { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty), num: true },
-  { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} />, num: true },
-];
+        );
+        return selectable(p) ? (
+          <button
+            type="button"
+            className="linklike"
+            title={p.market_id}
+            onClick={(e) => {
+              e.stopPropagation(); // the row's own click would select it a second time
+              pick(p);
+            }}
+          >
+            {name}
+          </button>
+        ) : (
+          <span title={p.market_id}>{name}</span>
+        );
+      },
+    },
+    { key: 'side', label: 'SIDE', render: (p) => `${p.outcome.toUpperCase()}${p.returned ? ' (returned)' : ''}` },
+    { key: 'qty', label: 'QTY', render: (p) => formatDecimal(p.qty), num: true },
+    { key: 'basis', label: 'BASIS', render: (p) => <Money value={p.basis} />, num: true },
+  ];
+}
 
 const CONTROL = 'P3-naive';
 
@@ -342,6 +366,7 @@ function PaperBody({ accounts, positions, epochs, bump }: {
 }) {
   const [sp, setSp] = useSearchParams();
   const select = useExplainSelect();
+  const pick = (p: Position) => select({ kind: 'position', position: p });
   const scenarios = [...new Set(accounts.map((a) => a.scenario))].sort();
   const wanted = sp.get('scenario');
   const scenario = wanted !== null && scenarios.includes(wanted) ? wanted : scenarios[0];
@@ -397,10 +422,13 @@ function PaperBody({ accounts, positions, epochs, bump }: {
               <EmptyState text={NOTHING_AWAITING} />
             ) : (
               <Table
-                columns={positionColumns}
+                columns={positionColumns(pick)}
                 rows={rows}
                 rowKey={(p) => `${p.account_id}|${p.market_id}|${p.outcome}|${p.returned}`}
-                onRowClick={(p) => select({ kind: 'position', position: p })}
+                rowClass={(p) => (selectable(p) ? undefined : 'nopick')}
+                onRowClick={(p) => {
+                  if (selectable(p)) pick(p);
+                }}
               />
             );
           }}

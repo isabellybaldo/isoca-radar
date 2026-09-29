@@ -343,6 +343,10 @@ ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 
 /* Spec 7a §9.3: rows that set the explain selection. */
 tr.pick { cursor: pointer; }
+tr.pick.nopick { cursor: default; }
+/* A cell that selects its row from the keyboard too (Paper positions): reads as the row's text, not a button. */
+.linklike { font: inherit; color: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; text-decoration: underline dotted var(--dim); text-underline-offset: 3px; }
+.linklike:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Spec 7a §9.2: payoff structure (b) and the episode duration bars. No borders of their own: they sit in the panel's box. */
 .payoff { margin: 0; }

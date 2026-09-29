@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { App } from '../App';
@@ -92,4 +93,24 @@ describe('pages publish, rows select (spec 7a §9.3)', () => {
     fireEvent.click(cell.closest('tr') as HTMLTableRowElement);
     expect(within(panelNow()).getByText(/^as selected: m-untitled/)).toBeInTheDocument();
   });
+  it('a Paper position is selectable from the keyboard: its market is a button (focus + Enter)', async () => {
+    mockApi(appRoutes());
+    renderApp('/paper?scenario=sp-idle');
+    await userEvent.click(await screen.findByText('awaiting resolution'));
+    const btn = screen.getByRole('button', { name: /Fed decision in October\?/ });
+    btn.focus();
+    expect(btn).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    expect(within(openPanel()).getByText(/^as selected: Fed decision in October\?/)).toBeInTheDocument();
+  });
+
+  it('a returned position is not selectable: no button, and a row click selects nothing (M7)', async () => {
+    mockApi(appRoutes({ '/api/paper/positions': { items: [positionFixture({ market_id: 'm3', returned: true, event_title: 'Returned one' })] } }));
+    renderApp('/paper?scenario=sp-idle');
+    const cell = await screen.findByText('Returned one');
+    expect(screen.queryByRole('button', { name: /Returned one/ })).toBeNull();
+    fireEvent.click(cell.closest('tr') as HTMLTableRowElement);
+    expect(within(openPanel()).queryByText(/as selected/)).toBeNull();
+  });
 });
+
