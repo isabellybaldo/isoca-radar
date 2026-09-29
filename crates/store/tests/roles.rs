@@ -393,3 +393,97 @@ async fn scanner_appends_run_premises_but_never_rewrites_them() {
     scanner.close().await;
     db.drop(owner).await;
 }
+
+#[tokio::test]
+async fn migration_0009_grants_epochs_and_reset_requests_to_exactly_four_roles() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    for (role, table, privilege, want) in [
+        ("scanner_rw", "paper_reset_requests", "SELECT", true),
+        ("scanner_rw", "paper_reset_requests", "INSERT", false),
+        ("scanner_rw", "paper_epochs", "SELECT", true),
+        ("scanner_rw", "paper_epochs", "INSERT", true),
+        ("scanner_rw", "paper_epochs", "UPDATE", false),
+        ("scanner_rw", "paper_epochs", "DELETE", false),
+        ("analyze_ro", "paper_reset_requests", "SELECT", true),
+        ("analyze_ro", "paper_epochs", "SELECT", true),
+        ("analyze_ro", "paper_epochs", "INSERT", false),
+        ("analyze_rw", "paper_reset_requests", "SELECT", true),
+        ("analyze_rw", "paper_epochs", "SELECT", true),
+        ("analyze_rw", "paper_epochs", "INSERT", false),
+        ("paper_reset_rw", "paper_reset_requests", "SELECT", true),
+        ("paper_reset_rw", "paper_reset_requests", "INSERT", true),
+        ("paper_reset_rw", "paper_reset_requests", "UPDATE", false),
+        ("paper_reset_rw", "paper_reset_requests", "DELETE", false),
+        ("paper_reset_rw", "paper_epochs", "SELECT", true),
+        ("paper_reset_rw", "paper_epochs", "INSERT", false),
+        ("paper_reset_rw", "episodes", "SELECT", false),
+        ("paper_reset_rw", "paper_ledger", "INSERT", false),
+    ] {
+        assert_eq!(
+            owner
+                .has_table_privilege(role, table, privilege)
+                .await
+                .unwrap(),
+            want,
+            "{role} {privilege} {table}"
+        );
+    }
+    let settings = owner.role_db_settings("paper_reset_rw").await.unwrap();
+    assert!(
+        settings.iter().any(|s| s == "statement_timeout=5s"),
+        "{settings:?}"
+    );
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn the_reset_role_inserts_one_request_per_utc_day_and_nothing_else() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let day = 86_400_000_i64 * 20_720; // a UTC midnight
+    let reset = db.role("paper_reset_rw").await;
+    let insert = |ms: i64| format!("INSERT INTO paper_reset_requests (requested_ms) VALUES ({ms})");
+    reset
+        .raw_exec(&insert(day + 5))
+        .await
+        .expect("the day's first request");
+    let again = reset.raw_exec(&insert(day + 86_399_999)).await.unwrap_err();
+    assert!(again.to_string().contains("duplicate key"), "{again}");
+    reset
+        .raw_exec(&insert(day + 86_400_000))
+        .await
+        .expect("the next UTC day");
+    for sql in [
+        "UPDATE paper_reset_requests SET requested_ms = 1",
+        "DELETE FROM paper_reset_requests",
+        "INSERT INTO paper_epochs (epoch, start_ms, cause, run_id, policies_sha256) VALUES (1, 1, 'reset', 1, 's')",
+        "INSERT INTO runs (service, started_ms, version, config_hash, mode) VALUES ('x', 1, 'v', 'c', 'live')",
+    ] {
+        let e = reset.raw_exec(sql).await.unwrap_err();
+        assert!(is_permission_denied(&e), "{sql}: {e}");
+    }
+    let run = owner
+        .start_run(&NewRun {
+            service: "scanner".into(),
+            started_ms: 1,
+            version: "v".into(),
+            config_hash: "c".into(),
+            mode: "live".into(),
+        })
+        .await
+        .unwrap();
+    for (epoch, cause) in [(0, "reset"), (1, "manual")] {
+        let e = owner
+            .raw_exec(&format!(
+                "INSERT INTO paper_epochs (epoch, start_ms, cause, run_id, policies_sha256) VALUES ({epoch}, 1, '{cause}', {run}, 's')"
+            ))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("check constraint"), "{e}");
+    }
+    reset.close().await;
+    db.drop(owner).await;
+}

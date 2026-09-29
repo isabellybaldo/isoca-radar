@@ -19,6 +19,7 @@ services:
       ANALYZE_DB_PASSWORD: ${ANALYZE_DB_PASSWORD:?set ANALYZE_DB_PASSWORD in .env}
       ANALYZE_RW_DB_PASSWORD: ${ANALYZE_RW_DB_PASSWORD:-}
       COMPACT_RW_DB_PASSWORD: ${COMPACT_RW_DB_PASSWORD:-}
+      RESET_RW_DB_PASSWORD: ${RESET_RW_DB_PASSWORD:-}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro

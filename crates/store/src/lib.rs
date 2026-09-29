@@ -160,4 +160,21 @@ impl Store {
         .fetch_all(self.pool())
         .await?)
     }
+
+    /// Admin/test tooling: `has_table_privilege(role, table, privilege)` in this database.
+    pub async fn has_table_privilege(
+        &self,
+        role: &str,
+        table: &str,
+        privilege: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT has_table_privilege($1::name, $2::text, $3::text)")
+                .bind(role)
+                .bind(table)
+                .bind(privilege)
+                .fetch_one(self.pool())
+                .await?,
+        )
+    }
 }
