@@ -482,3 +482,224 @@ fn the_paper_trader_never_changes_the_scanners_own_outputs() {
         "no paper intent: the trader never saw an open"
     );
 }
+
+/// Every instant a paper row carries (spec 7a §4.2: none may fall before the epoch start).
+fn row_times(s: &SimOut) -> Vec<i64> {
+    match s {
+        SimOut::Intent(i) => std::iter::once(i.decided_ms).chain(i.exec_ms).collect(),
+        SimOut::Exec(x) => vec![x.exec_ms],
+        SimOut::Fill(f) => vec![f.t_ms],
+        SimOut::Ledger(l) => vec![l.t_ms],
+        SimOut::Markout(_) => vec![],
+        SimOut::Account(a) => vec![a.t_ms],
+    }
+}
+
+fn zero_ms_engine() -> Engine {
+    let mut c = sim_cfg(PolicyKind::P0Converter);
+    c.scenarios[0].match_ms = 0;
+    let mut e = engine();
+    e.set_paper(PaperTrader::new(c).unwrap());
+    e
+}
+
+#[test]
+fn a_reset_closes_at_the_paper_clock_then_marks_every_account_at_its_bankroll() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    open_no_basket(&mut e); // execution due at 2 200
+    quiet(&mut e, 2_300); // executed; its conversion is due at 4 200
+    let (start, rows) = e.paper_reset(2_250).unwrap(); // an older t never moves the clock back
+    assert_eq!((start, e.paper_clock()), (2_301, 2_301));
+    let led: Vec<(EntryKind, i64)> = rows
+        .iter()
+        .filter_map(|s| match s {
+            SimOut::Ledger(l) => Some((l.kind, l.t_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        led,
+        vec![
+            (EntryKind::Convert, 2_300),
+            (EntryKind::Mark, 2_300),
+            (EntryKind::Mark, 2_301)
+        ]
+    );
+    let marks: Vec<(i64, Decimal)> = rows
+        .iter()
+        .filter_map(|s| match s {
+            SimOut::Account(a) => Some((a.t_ms, a.equity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks.last(), Some(&(2_301, dec!(1000))));
+    assert!(
+        e.paper_state()
+            .unwrap()
+            .accounts
+            .iter()
+            .all(|a| a.cash == dec!(1000) && a.positions.is_empty())
+    );
+    let mut bare = engine();
+    assert!(bare.paper_reset(1).is_none(), "no trader: nothing to reset");
+}
+
+#[test]
+fn no_new_epoch_row_is_stamped_before_the_epoch_start() {
+    let mut e = zero_ms_engine();
+    books(&mut e, 1_100, 1_000, ["0.30", "0.30", "0.30"]); // ΣNO 2.10: nothing
+    let (start, _) = e.paper_reset(1_500).unwrap();
+    assert_eq!(start, 1_501);
+    // frames received in the reset's own millisecond and before it (review C2): the NO basket
+    // opens and the 0 ms account executes right away
+    let mut after = books(&mut e, 1_500, 1_450, ["0.40", "0.35", "0.30"]);
+    after.extend(quiet(&mut e, 1_500));
+    after.extend(quiet(&mut e, 1_499));
+    let rows = sims(&after);
+    assert!(
+        rows.iter()
+            .any(|s| matches!(s, SimOut::Exec(x) if x.exec_ms == 1_501)),
+        "{rows:?}"
+    );
+    for s in &rows {
+        assert!(row_times(s).iter().all(|&t| t >= start), "{s:?}");
+    }
+}
+
+#[test]
+fn a_rest_snapshot_open_a_resolution_and_a_close_after_a_reset_are_stamped_at_or_after_its_start() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    books(&mut e, 1_100, 1_000, ["0.30", "0.30", "0.30"]); // ΣNO 2.10: nothing
+    let (start, _) = e.paper_reset(1_200).unwrap();
+    assert_eq!(start, 1_201);
+    // a REST snapshot stamped with an older server time lifts leg 0's YES bid: NO asks
+    // 0.50 / 0.70 / 0.70, Σ 1.90 < 2
+    let mut b = Book::default();
+    b.apply_snapshot(&[(p("0.50"), sh("100"))], &[(p("0.55"), sh("100"))], 1_150);
+    let mut outs = e.rest_snapshot("e1-y0", b);
+    outs.extend(quiet(&mut e, 1_400)); // executes at 1 301
+    outs.extend(e.on_resolution(1_000, "e1-m0", dec!(0), dec!(1))); // an older instant
+    outs.extend(e.paper_close(900)); // an older instant too
+    let rows = sims(&outs);
+    assert!(
+        rows.iter().any(
+            |s| matches!(s, SimOut::Intent(i) if i.decided_ms == 1_201 && i.exec_ms == Some(1_301))
+        ),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(
+            |s| matches!(s, SimOut::Ledger(l) if l.kind == EntryKind::Settle && l.t_ms == 1_400)
+        ),
+        "{rows:?}"
+    );
+    for s in &rows {
+        assert!(row_times(s).iter().all(|&t| t >= start), "{s:?}");
+    }
+}
+
+#[test]
+fn a_seeded_paper_clock_stamps_the_first_rows_of_a_start_time_epoch() {
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    e.seed_paper_clock(5_000); // review C3: never the i64::MIN clock
+    assert_eq!(e.paper_clock(), 5_000);
+    books(&mut e, 1_100, 1_000, ["0.30", "0.30", "0.30"]);
+    let mut b = Book::default();
+    b.apply_snapshot(&[(p("0.50"), sh("100"))], &[(p("0.55"), sh("100"))], 1_500);
+    let rows = sims(&e.rest_snapshot("e1-y0", b));
+    assert!(
+        rows.iter().any(
+            |s| matches!(s, SimOut::Intent(i) if i.decided_ms == 5_000 && i.exec_ms == Some(5_100))
+        ),
+        "{rows:?}"
+    );
+    e.seed_paper_clock(10);
+    assert_eq!(e.paper_clock(), 5_000, "seeding never moves the clock back");
+}
+
+/// Every paper row of `outs` as (variant, the instants it carries): what the entry-point clamp
+/// could change.
+fn stamps(outs: &[Out]) -> Vec<(&'static str, Vec<i64>)> {
+    sims(outs)
+        .iter()
+        .map(|s| {
+            let v = match s {
+                SimOut::Intent(_) => "intent",
+                SimOut::Exec(_) => "exec",
+                SimOut::Fill(_) => "fill",
+                SimOut::Ledger(_) => "ledger",
+                SimOut::Markout(_) => "markout",
+                SimOut::Account(_) => "account",
+            };
+            (v, row_times(s))
+        })
+        .collect()
+}
+
+#[test]
+fn the_entry_point_clamp_changes_nothing_without_a_reset() {
+    // D11: with non-decreasing input times (every live and replay input outside a reset,
+    // including ties), max(t, paper clock) == t at every entry point, so the rows are exactly
+    // the ones the unclamped engine produced (pinned below from the pre-clamp code).
+    let mut e = paper_engine(PolicyKind::P0Converter);
+    let mut outs = open_no_basket(&mut e); // opens at 2 100, execution due at 2 200
+    outs.extend(quiet(&mut e, 2_300)); // executes at 2 200; conversion due at 4 200
+    outs.extend(e.on_resolution(2_300, "e1-m1", dec!(0), dec!(1))); // the frame's own ms
+    outs.extend(quiet(&mut e, 5_000)); // the conversion completes at 4 200
+    outs.extend(books(&mut e, 61_000, 60_900, ["0.30", "0.30", "0.30"])); // the minute mark
+    outs.extend(e.paper_close(61_000)); // the frame's own ms again
+    let intent = ("intent", vec![2_100, 2_200]);
+    let buy = [("fill", vec![2_200]), ("ledger", vec![2_200])];
+    let mut want = vec![intent];
+    for _ in 0..3 {
+        want.extend(buy.clone());
+    }
+    want.extend([
+        ("exec", vec![2_200]),
+        ("ledger", vec![2_300]),
+        ("account", vec![2_300]),
+        ("markout", vec![]),
+        ("markout", vec![]),
+        ("markout", vec![]),
+        ("ledger", vec![60_000]),
+        ("account", vec![60_000]),
+        ("ledger", vec![61_000]),
+        ("account", vec![61_000]),
+    ]);
+    assert_eq!(stamps(&outs), want);
+    let rows = sims(&outs);
+    let led: Vec<(EntryKind, i64, Decimal)> = rows
+        .iter()
+        .filter_map(|s| match s {
+            SimOut::Ledger(l) => Some((l.kind, l.t_ms, l.cash_delta)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        led,
+        vec![
+            (EntryKind::Buy, 2_200, dec!(-30.72)),
+            (EntryKind::Buy, 2_200, dec!(-33.28)),
+            (EntryKind::Buy, 2_200, dec!(-35.84)),
+            (EntryKind::Settle, 2_300, dec!(51.2)),
+            (EntryKind::Mark, 60_000, dec!(0)),
+            (EntryKind::Mark, 61_000, dec!(0)),
+        ]
+    );
+    let eq: Vec<(i64, Decimal)> = rows
+        .iter()
+        .filter_map(|s| match s {
+            SimOut::Account(a) => Some((a.t_ms, a.equity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        eq,
+        vec![
+            (2_300, dec!(1012.8)),
+            (60_000, dec!(1012.8)),
+            (61_000, dec!(1012.8))
+        ]
+    );
+    assert_eq!(e.paper_clock(), 61_000);
+}

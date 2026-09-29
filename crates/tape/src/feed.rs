@@ -317,8 +317,11 @@ impl FeedBooks {
             }
         }
         match &line.ctl {
-            // engine `mark_suspect` and `on_resolution` never touch a book
-            None | Some(Ctl::Suspect { .. }) | Some(Ctl::Resolved { .. }) => {}
+            // engine `mark_suspect`, `on_resolution` and `paper_reset` never touch a book
+            None
+            | Some(Ctl::Suspect { .. })
+            | Some(Ctl::Resolved { .. })
+            | Some(Ctl::PaperReset { .. }) => {}
             Some(Ctl::Down) => {
                 // engine `disconnect` (engine.rs 1416-1425): this connection's deferred checks
                 // are dropped unresolved, no check

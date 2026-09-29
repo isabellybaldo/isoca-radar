@@ -40,6 +40,13 @@ pub enum Ctl {
         payout_yes: String,
         payout_no: String,
     },
+    /// A paper reset the live scanner applied (Phase 7a spec §4.2). `t` is the paper clock it
+    /// closed at: replay calls `Engine::paper_reset(t)` with this payload, never the line's own
+    /// receive time. Books are untouched. Pre-7a binaries can't read it (`for_each_line`
+    /// hard-errors on an unknown line), so compact must run the 7a image before the first reset.
+    PaperReset {
+        t: i64,
+    },
     Shutdown,
 }
 
