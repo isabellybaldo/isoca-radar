@@ -5,6 +5,7 @@
 mod batch;
 mod card_io;
 mod compact_io;
+mod epochs;
 pub mod error;
 mod paper;
 mod read;
@@ -24,6 +25,7 @@ pub use compact_io::{
     COMPACT_TABLES, CompactEpisode, CompactHourRow, CompactStatusRow, MAX_COMPACT_EPISODES,
     MAX_COMPACT_HOURS,
 };
+pub use epochs::{EpochStatus, PaperEpoch, RESET_TABLES, ResetInsert, ResetRequest};
 pub use error::StoreError;
 pub use read::{
     DAY_MS, EpisodeFilter, EpisodePage, EpisodeSummary, HealthNow, IntegritySummary, MAX_OPEN,
