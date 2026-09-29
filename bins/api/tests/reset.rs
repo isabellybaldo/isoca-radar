@@ -132,6 +132,59 @@ async fn the_api_refuses_an_over_granted_reset_role() {
 }
 
 #[tokio::test]
+async fn an_unreachable_reset_pool_leaves_the_dashboard_up_and_the_post_a_503() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    // A role that can't log in, a bad password or a restored cluster: the connect fails.
+    let failed = Store::connect_reset(
+        Store::options("postgres://nobody:wrong@127.0.0.1:1/none").unwrap(),
+        5_000,
+        None,
+    )
+    .await
+    .map_err(anyhow::Error::from);
+    assert!(failed.is_err());
+    let reset = api::reset_pool(failed)
+        .await
+        .expect("a connect failure is not fatal");
+    assert!(reset.is_none());
+    let ro = Store::connect_read_only(db.opts.clone(), 4, 5_000, Some("analyze_ro"))
+        .await
+        .unwrap();
+    let app = api::router(api::AppState::new(ro).with_reset(reset));
+    let (status, _) = common::get(&app, "/api/paper/epochs").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, v) = common::post(&app, URI, &[INTENT, SAME], OK_BODY).await;
+    assert_eq!(
+        (status, v["error"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("reset_disabled"))
+    );
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn the_reset_pool_is_kept_as_migrated_and_refused_only_when_over_granted() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let ok = Store::connect_reset(db.opts.clone(), 5_000, Some("paper_reset_rw"))
+        .await
+        .map_err(anyhow::Error::from);
+    let kept = api::reset_pool(ok).await.expect("as migrated");
+    assert!(kept.is_some());
+    let as_owner = Store::connect_reset(db.opts.clone(), 5_000, None)
+        .await
+        .map_err(anyhow::Error::from);
+    let e = api::reset_pool(as_owner).await.unwrap_err();
+    assert!(e.to_string().contains("refusing to start"), "{e}");
+    if let Some(r) = kept {
+        r.close().await;
+    }
+    db.drop(owner).await;
+}
+
+#[tokio::test]
 async fn epochs_list_current_pending_and_next_allowed() {
     let Some((owner, db)) = common::fresh().await else {
         return;

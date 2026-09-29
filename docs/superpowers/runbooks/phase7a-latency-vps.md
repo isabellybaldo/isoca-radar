@@ -3,7 +3,7 @@
 Note: one deploy: migration 0009 (paper_epochs, paper_reset_requests, paper_reset_rw, a paper_ledger index), the scanner with the ladder policies (epoch 1), analyze, compact on the 7a image, the api with its reset pool; the web is unchanged (step B, plan 7a-B).
 Note: never print `.env` or a container's environment; `docker compose config` only as `--env-file .env.example … config -q`; never restart Docker.
 Note: PC steps in Git Bash from the main checkout on the merged commit; VPS steps as root over SSH.
-Note: VPS order is fixed: `.env` key (step 14) → migrate (step 20) → role login (step 22) → compact on 7a (step 27) → api (step 28); `compose.web.yml` refuses to parse without `RESET_RW_DB_PASSWORD`, and an api started while `paper_reset_rw` is NOLOGIN crash-loops (dashboard down).
+Note: VPS order is fixed: `.env` key (step 14) → migrate (step 20) → role login (step 22) → compact on 7a (step 27) → api (step 28); `compose.web.yml` refuses to parse without `RESET_RW_DB_PASSWORD`, and an api started while `paper_reset_rw` is NOLOGIN serves the dashboard but logs `api: reset pool: …` and answers the reset POST 503 `reset_disabled`.
 
 ## On the PC
 
@@ -231,8 +231,8 @@ if not: no `compact-on-7a` = compact still runs the old image: run this step aga
 ```bash
 cd /home/isoca/projects/cute-trading && date +%s%3N > /root/7a_api_ms && docker inspect -f '{{.State.StartedAt}}' cute-trading-scanner-1 | tee /root/7a_scanner_started && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT to_char(to_timestamp(minute_ms/1000) AT TIME ZONE 'UTC','HH24:MI'), shards, reconnects, parked_shards, msgs FROM health ORDER BY minute_ms DESC LIMIT 3" && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api && sleep 10 && docker compose -f compose.yml -f compose.web.yml --profile web logs --since 20s api 2>&1 | grep -E 'api:'
 ```
-→ expected: the scanner's start time, three `HH:MI|<shards>|0|0|<msgs>` rows, then `api: listening on 0.0.0.0:8081 (read-only except paper reset requests, paper only)` and no `refusing` or `RESET_DATABASE_URL is not set` line.
-if not: `refusing to start: the reset role can write …` = over-granted role: stop the api (`docker compose -f compose.yml -f compose.web.yml --profile web stop api`) and report; `database …` or `password authentication failed` errors = stop the api the same way and redo step 22.
+→ expected: the scanner's start time, three `HH:MI|<shards>|0|0|<msgs>` rows, then `api: listening on 0.0.0.0:8081 (read-only except paper reset requests, paper only)` and no `refusing`, `api: reset pool:` or `RESET_DATABASE_URL is not set` line.
+if not: `refusing to start: the reset role can write …` = over-granted role: stop the api (`docker compose -f compose.yml -f compose.web.yml --profile web stop api`) and report; `api: reset pool: …` (e.g. `password authentication failed`, `not permitted to log in`) = the dashboard is up, the reset POST is 503: redo step 22, then run this step again.
 
 29. After the api restart: no websocket disconnect.
 ```bash
@@ -259,7 +259,7 @@ if not: a 500 = `docker compose -f compose.yml -f compose.web.yml --profile web 
 fetch('/api/paper/reset', {method: 'POST', headers: {'X-CT-Intent': 'reset-paper', 'Content-Type': 'application/json'}, body: JSON.stringify({confirm: 'reset'})}).then(async r => console.log(r.status, await r.text()))
 ```
 → expected: `202 {"request_id":1,"requested_ms":…}`; the same call again prints `409 {"error":"reset_pending",…}`.
-if not: `403` = the page wasn't same-origin (use the Radar tab itself); `503` = `RESET_DATABASE_URL` missing (step 18).
+if not: `403` = the page wasn't same-origin (use the Radar tab itself); `503` = `RESET_DATABASE_URL` missing (step 18) or an `api: reset pool:` line (step 28).
 
 33. (Only after step 32) The scanner applied it as epoch 2 within ~30 s.
 ```bash

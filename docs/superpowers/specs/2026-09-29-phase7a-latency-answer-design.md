@@ -184,7 +184,7 @@ CREATE INDEX paper_ledger_account_t ON paper_ledger (account_id, t_ms);
   - 202 `{request_id, requested_ms}`;
   - 409 `reset_pending` when a request is not yet applied (`id > max(paper_epochs.request_id)`);
   - 429 `reset_daily_limit` on the unique `utc_day` violation, with `detail` naming the next UTC midnight;
-  - 503 `reset_disabled` when `RESET_DATABASE_URL` is unset (local dev without the role).
+  - 503 `reset_disabled` when `RESET_DATABASE_URL` is unset (local dev without the role), or when the reset pool can't connect at start (a NOLOGIN role, a bad password): one log line, the read-only dashboard stays up.
   - Error bodies keep the `{error, detail}` shape.
 - **The read-only guard stays.** The main pool stays `analyze_ro` with `default_transaction_read_only=on`. At start, the api also refuses to run if the reset role holds INSERT, UPDATE or DELETE on **any** table in `public` other than `paper_reset_requests`, or UPDATE/DELETE on that one (a loop over `pg_tables`), mirroring `lib.rs:72-78`.
 

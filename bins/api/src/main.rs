@@ -23,14 +23,16 @@ async fn real_main() -> anyhow::Result<()> {
     let reset = match &cfg.reset_database_url {
         Some(url) => {
             // connect_reset's statement_timeout replaces the role's 5 s default: never above it.
-            let r = store::Store::connect_reset(
-                store::Store::options(url)?,
-                cfg.statement_timeout_ms.min(5_000),
-                None,
-            )
-            .await?;
-            api::ensure_reset_role(&r).await?;
-            Some(r)
+            // A failed connect degrades to None; only an over-granted role stops the api.
+            let connected = async {
+                let opts = store::Store::options(url)?;
+                Ok(
+                    store::Store::connect_reset(opts, cfg.statement_timeout_ms.min(5_000), None)
+                        .await?,
+                )
+            }
+            .await;
+            api::reset_pool(connected).await?
         }
         None => {
             eprintln!(

@@ -112,6 +112,36 @@ pub async fn ensure_reset_role(reset: &Store) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Spec 7a §5.1: the reset pool from its connect attempt. A pool that can't connect (a NOLOGIN
+/// role, a bad password, a restored cluster) or can't read its grants must not take the
+/// read-only dashboard down: one log line and None (the POST answers 503 reset_disabled). Only an
+/// over-granted role refuses to start.
+pub async fn reset_pool(connected: anyhow::Result<Store>) -> anyhow::Result<Option<Store>> {
+    const DISABLED: &str = "POST /api/paper/reset answers 503 reset_disabled";
+    let reset = match connected {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("api: reset pool: {e:#}; {DISABLED}");
+            return Ok(None);
+        }
+    };
+    match reset.role_writes_outside_reset().await {
+        Ok(extra) if extra.is_empty() => Ok(Some(reset)),
+        Ok(extra) => {
+            reset.close().await;
+            anyhow::bail!(
+                "refusing to start: the reset role can write {}; connect as paper_reset_rw",
+                extra.join(", ")
+            )
+        }
+        Err(e) => {
+            eprintln!("api: reset pool: read its grants: {e}; {DISABLED}");
+            reset.close().await;
+            Ok(None)
+        }
+    }
+}
+
 /// A panicking handler must not drop the connection: turn it into the same JSON 500 every other
 /// internal error produces, with no panic payload leaked to the client.
 fn handle_panic(_err: Box<dyn Any + Send + 'static>) -> Response {
