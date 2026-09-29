@@ -229,3 +229,40 @@ pub fn health(run_id: i64, minute_ms: i64, drops: i32) -> HealthRow {
         rest_rtt_p99_ms: None,
     }
 }
+
+/// The api with its reset pool as deployed (paper_reset_rw, one connection).
+pub async fn app_with_reset(db: &TestDb) -> (Router, AppState) {
+    let ro = Store::connect_read_only(db.opts.clone(), 4, 5_000, Some("analyze_ro"))
+        .await
+        .expect("read-only pool");
+    let reset = Store::connect_reset(db.opts.clone(), 5_000, Some("paper_reset_rw"))
+        .await
+        .expect("reset pool");
+    let st = AppState::new(ro).with_reset(Some(reset));
+    (api::router(st.clone()), st)
+}
+
+pub async fn post(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::post(uri).header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}

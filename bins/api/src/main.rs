@@ -19,8 +19,28 @@ async fn real_main() -> anyhow::Result<()> {
         store::Store::connect_read_only(opts, cfg.max_conns, cfg.statement_timeout_ms, None)
             .await?;
     api::ensure_read_only(&store).await?;
+    // Phase 7a §5.1: the second pool, the api's one write. Unset: POST /api/paper/reset is a 503.
+    let reset = match &cfg.reset_database_url {
+        Some(url) => {
+            // connect_reset's statement_timeout replaces the role's 5 s default: never above it.
+            let r = store::Store::connect_reset(
+                store::Store::options(url)?,
+                cfg.statement_timeout_ms.min(5_000),
+                None,
+            )
+            .await?;
+            api::ensure_reset_role(&r).await?;
+            Some(r)
+        }
+        None => {
+            eprintln!(
+                "api: RESET_DATABASE_URL is not set: POST /api/paper/reset answers 503 reset_disabled"
+            );
+            None
+        }
+    };
     api::run(
-        store,
+        api::AppState::new(store).with_reset(reset),
         &cfg.bind,
         std::time::Duration::from_secs(15),
         shutdown(),
