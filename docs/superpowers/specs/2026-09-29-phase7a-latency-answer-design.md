@@ -32,7 +32,7 @@ So a single P&L number per latency is not enough. The answer must say **why** at
 
 **Exit:**
 - On the VPS, all 19 paper accounts trade in epoch ≥ 1.
-- The reset button starts a new epoch within one `paper_state` save interval, at most once per UTC day.
+- The reset button starts a new epoch within ~30 s (the request poll), at most once per UTC day.
 - The hero shows a break-even figure, or an honest "none" or "too few trades yet", on every dashboard page.
 - `/sweet` shows the grid.
 - Edge capture shows no jump at an epoch start.
@@ -57,7 +57,7 @@ So a single P&L number per latency is not enough. The answer must say **why** at
 | 100 | new `rung-100` | a bot in the exchange's cloud region |
 | 200 | new `rung-200` | us on a good day |
 | 300 | `sp-idle` (existing) | us with the spec's 150 ms matching prior |
-| ~450 | `sp-burst` (existing) | us in a burst (the multiplier applies only above the burst threshold, so really 300–1,650 ms) |
+| ~450 | `sp-burst` (existing) | us in a burst (the multiplier applies only above the burst threshold, so 450 ms idle, 1,050 ms at ×3, 3,150 ms at ×10) |
 
 **The ladder is an explicit list**, not "every P0 fee-0 account": `rung-0`, `rung-25`, `colo-idle`, `rung-100`, `rung-200`, `sp-idle`. It lives as one constant, `LADDER`, next to `HEADLINE` in `crates/cards`. `sp-burst` (variable latency) and `sp-idle-nodelay` (300 ms with `secondsDelay` ignored, a sensitivity check) are **extras**. They are drawn as annotated markers beside the ladder and are never part of the break-even interpolation.
 
@@ -135,23 +135,38 @@ CREATE INDEX paper_ledger_account_t ON paper_ledger (account_id, t_ms);
   1. Take `t` = the engine's paper clock (`last_recv_ms`).
   2. Call `paper_close(t)`: conversions complete, pending intents release their reservations, unwinds and markouts are dropped, every account is marked at `t`.
   3. **Reset in place:** a new `PaperTrader::reset(&mut self)` (sim).
-     - Every account goes back to bankroll: cash, realized, fees, positions, returned, drawdown.
+     - Every account goes back to bankroll: cash, `reserved`, realized, fees, positions, returned, `peak_equity` (`account.rs:85`; drawdown is computed from it), drawdown.
+     - `rate` (FrameRate, a market measure), `cfg` and `scenario_ix` are kept.
      - Consumed liquidity, the due queue and `next_mark_ms` are cleared.
-     - **Each account's ledger `seq` and the trader's `next_seq` carry on.** A fresh `Account::new` restarts `seq` at 0, and `paper_ledger`'s `(run_id, account_id, seq)` key plus `ON CONFLICT DO NOTHING` would then silently drop the new epoch's ledger (review C1).
-  4. Set `last_recv_ms = t + 1`. From then on the engine drives the trader with `recv.max(last_recv_ms)`, so **no row of the new epoch carries a time below `start_ms = t + 1`**, even for frames in the same millisecond or the 0 ms rung (review C2).
+     - **Each account's ledger `seq` carries on.** A fresh `Account::new` restarts `seq` at 0, and `paper_ledger`'s `(run_id, account_id, seq)` key plus `ON CONFLICT DO NOTHING` would then silently drop the new epoch's ledger (review C1). `next_seq` only orders the now-empty due queue, so it carries on too; that's harmless.
+     - **Two consequences:**
+       - clearing consumed liquidity lets the new epoch retake depth the old epoch just used, as after a restart;
+       - episodes already open stay open and are never offered to the new epoch, because `on_open` runs only at open (`engine.rs:1242`).
+  4. Set `last_recv_ms = t + 1`. From then on **every trader entry point** is driven with its time clamped to `last_recv_ms`:
+     - `on_frame`;
+     - `on_resolution` and `paper_close`, which today pass a raw `t_ms` (`engine.rs:1640-1647, 1686-1697`);
+     - opens, which already clamp in `open_ctx` (`engine.rs:1196`).
+     
+     So **no row of the new epoch carries a time below `start_ms = t + 1`**, even for frames in the same millisecond, the 0 ms rung, a REST-snapshot open stamped with an older server time, or the resolver's immediate poll at start (review C2). The clamp changes nothing outside a reset: everything due at or before `last_recv_ms` was already drained at the frame that set it.
   5. Mark every account at `t + 1` through a new `PaperTrader::mark_now(t + 1)`, so the dashboard shows $1,000 at once.
   6. Log one line: `paper: reset → epoch N (request R)`.
-- **One batch, one transaction.** The close rows, the `paper_epochs` row, the `mark_now` rows and a `paper_state` save go to the writer as **one** `WriterMsg::Paper`, in one `Batch`, written in one transaction (`writer.rs:81`, `batch.rs:350`). `paper_epochs` becomes a `Batch` field:
-  - written in `write_paper` after the marks;
-  - carried by `extend_paper`, `restore` and `into_singles`/quarantine (`writer.rs:101-208`);
-  - exempt from cap eviction.
-  
+- **One message, one transaction, never split.** The close rows, the `paper_epochs` row, the `mark_now` rows and a `paper_state` save go to the writer as **one new `WriterMsg::PaperReset(Batch)`**. `paper_epochs` becomes a `Batch` field, written in `write_paper` after the marks.
+  - The writer first flushes its pending batch, then writes the reset batch **alone** in one transaction, never merged with unrelated rows.
+  - Transient errors retry it like any flush.
+  - A data error (SQLSTATE 22/23) does **not** go through `quarantine`/`into_singles`, which would commit the epoch row and `paper_state` separately (`writer.rs:187-229`, `rows.rs:387-411`). The whole group is dropped and logged at error level. The next save tick then writes `paper_state` again, and the missing epoch is visible as `current` not advancing.
+  - The cap never evicts paper rows (`writer.rs:95`); `paper_epochs` is treated the same.
+  - The reset's `paper_state` rows are stamped `updated_ms = now_ms()` (wall clock, as the save tick does), never the paper clock `t`. The upsert guard `WHERE paper_state.updated_ms <= EXCLUDED.updated_ms` (`crates/store/src/paper.rs:190-192`) would otherwise reject it behind a later wall-clock save.
+
   A crash can then never leave an epoch row next to pre-reset `paper_state`.
-- **A request pending at start.** If a request is pending when the scanner starts, it builds `PaperTrader::new` instead of `restore_trader` (review C3). There are no close rows, because the previous run's shutdown already closed. The epoch starts at `start_ms = now_ms()`, and `last_recv_ms` is seeded with it, so it never touches the `i64::MIN` clock. The epoch row and the first `paper_state` save go in one batch.
+- **A request pending at start.** If a request is pending when the scanner starts, it builds `PaperTrader::new` instead of `restore_trader` (review C3). There are no close rows, because the previous run's shutdown already closed. The epoch starts at `start_ms = now_ms()`, and `last_recv_ms` is seeded with it, so it never touches the `i64::MIN` clock. The epoch row and the first `paper_state` save go as one `WriterMsg::PaperReset`.
 - **A policies epoch at start.** The trigger is: `paper_state` has **no rows** (a fresh DB), or a **sha mismatch** (ruling 26).
-  - It writes `paper_epochs(cause = 'policies', request_id = NULL, start_ms = now_ms())` together with an immediate `paper_state` save, in one batch. A crash loop therefore can't write a second policies epoch: the next start sees the new sha.
+  - It writes `paper_epochs(cause = 'policies', request_id = NULL, start_ms = now_ms())` together with an immediate `paper_state` save, as one `WriterMsg::PaperReset`. `last_recv_ms` is seeded with `start_ms`, as in the request case. A crash loop therefore can't write a second policies epoch: the next start sees the new sha.
   - If a reset request is also pending, one epoch is written, with cause `reset` and that request id.
-- **Replay reproduces resets.** At `t`, the live scanner writes a `Ctl::PaperReset { t }` capture line through `io.ctl`, like `Resolved` and `Shutdown` (`run.rs:989, 1049`). Replay applies `Engine::paper_reset(t)` at that line and writes no epoch row, so the live and replay ledgers still agree (runbook `s3-paper.md`). A start-time epoch needs no line, because replay always starts fresh.
+- **Replay reproduces resets.** At `t`, the live scanner writes a `Ctl::PaperReset { t }` capture line through `io.ctl`, like `Resolved` and `Shutdown` (`run.rs:989, 1049`).
+  - **Replay** applies `Engine::paper_reset(t)` using the **payload `t`**, not the line's timestamp. It writes no epoch row, so the live and replay ledgers still agree (runbook `s3-paper.md`). A start-time epoch needs no line, because replay always starts fresh.
+  - **Other readers of the line:** the variant goes into `tape::line::Ctl` (`crates/tape/src/line.rs:18-44`). It's a **no-op** in `tape::feed` (`feed.rs:320-355`, it touches no book) and so in compact's reducer; `replay.rs:83-131` gets its arm.
+  - **Old binaries can't read it.** `for_each_line` hard-errors on an unknown line (`crates/tape/src/files.rs:135-136`). So **compact must run the new image before the first reset** (§11), and after any reset, pre-7a images can neither replay nor compact that hour.
+  - **Capture is best-effort** (`run.rs:397`). A dropped `PaperReset` line voids live-vs-replay across it, as a dropped `Resolved` already does. The s3-paper runbook notes it.
 - **Open positions** are dropped by the reset. Their YES holdings awaiting resolution are no longer settled for the old epoch. This is accepted: the epoch's final equity counts them at their last mark, and the ledger keeps them.
 - **Stale `paper_state` rows** of removed accounts (no DELETE grant) are unaffected. `paper_positions` gains a filter to current account ids (§6).
 
@@ -184,7 +199,7 @@ It returns `{epochs: [{epoch, start_ms, cause}], current, pending_request: {id, 
   - the current epoch and its start;
   - a text input that must read `reset`, then a button;
   - no browser dialogs.
-- **States:** idle; sending; "queued: the scanner applies it within a minute" (while `pending_request` is set, polled every 10 s); "next reset allowed after ⟨UTC time⟩".
+- **States:** idle; sending; "queued: the scanner applies it within ~30 s" (while `pending_request` is set, polled every 10 s); "next reset allowed after ⟨UTC time⟩".
 - **Copy** follows the honesty rule (§9.4): *"Starts every paper account again at its bankroll. Earlier epochs stay in the history."*
 
 ## 6. Epoch-aware readers
@@ -220,12 +235,13 @@ It is read-only (analyze_ro). For the current epoch, for the `LADDER` accounts (
             net }],       // latest mark equity − bankroll = gains + leg_risk + settle + unrealized
   markets: SweetRow[],     // NO-side SWEET rows (30d) for the LADDER scenarios, dimensions all + category
   measured: { latency_ms, host } | null,   // median over 24 h of lag_p50 + rest_rtt_p50/2
-  break_even: { kind: 'at' | 'none' | 'all' | 'thin', latency_ms?, not_monotone? } }
+  markets_status: 'live' | 'warming' | 'under_review' | 'missing',
+  break_even: { kind: 'at' | 'none' | 'all' | 'thin', latency_ms?, direction?: 'loses_beyond' | 'pays_beyond', not_monotone? } }
 ```
 
 - **Money** is decimal strings, as elsewhere.
 - **Reconciliation.** Buys carry `realized_delta` 0 with fees in the basis, and marks carry 0 (`account.rs:176-192`). So within an epoch, equity − bankroll = Σ realized_delta + unrealized, **provided every sum stops at `as_of_ms`**, the latest mark. Rows are summed from `start_ms` to `as_of_ms`, **live runs only** (`runs.mode = 'live'`, as every paper reader already filters). The api test asserts the identity exactly.
-- **`markets`** is read from `card_results` (SWEET, 30d) and carried in the same response, so the panel still makes one fetch (§9.3).
+- **`markets`** is read from `card_results` (SWEET, 30d) and carried in the same response, so the panel still makes one fetch (§9.3). It picks the premise key with `cards::list`'s current-premise logic. Right after deploy A, SWEET catches up under the new key, so `markets` is empty and `markets_status` is `under_review`. The fold then says *"recomputing after the ladder"*.
 - **`latency_ms`** comes from the policies file the api is given (`POLICIES_PATH`, default `/etc/cute-trading/policies.toml`, the copy baked into the shared image as analyze uses), parsed with `scenarios::parse` moved to a shared crate. If the file is missing, the rung's latency is null and the drawing lists it without a position.
 - **`measured`** reuses `Store::health_latency` and the same nearest-rank median as Edge capture (one shared function; the plan moves it out of `analyze`).
 - **`break_even`**, computed in `arb-core` or `cards` (pure, unit-tested), not in the web:
@@ -276,7 +292,7 @@ The `IntervalChart` + scenario chips at the top of `SweetBody` are replaced by a
 
 - **Axes:**
   - Rows are the chosen dimension's buckets (chips: all · category · days · S · hour; `all` first).
-  - Columns are the side's `LADDER` scenarios sorted by `latency_ms` and headed with ms: 6 on the NO side, fewer on YES, where only P1's three scenarios trade.
+  - Columns are the side's `LADDER` scenarios sorted by `latency_ms` and headed with ms: 6 on the NO side and 2 on YES (colo-idle and sp-idle, the `LADDER` ∩ P1 scenarios). P1's sp-burst YES rows are in the fold only.
   - The extras (`sp-burst`, `sp-idle-nodelay`) and the fee variants (`sp-idle@10`, `@50`) stay out of the grid and remain in the `all numbers` fold.
   - The side chip (NO/YES) stays.
   - It reuses `grid()` from `web/src/lib/sweet.ts:99`, which already builds buckets × scenarios sorted by latency, filtered to `LADDER`.
@@ -332,15 +348,18 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
 - `sim`:
   - `PaperTrader::reset` keeps each account's `seq` and `next_seq`: after close → reset → a trade, ledger seqs strictly increase per account within the run (review C1);
   - `PaperTrader::mark_now`;
-  - a reset sequence test: close → new → mark_now gives the close rows before `start_ms` and every account at bankroll at `start_ms`;
+  - a reset sequence test: close → `reset` → `mark_now` gives the close rows before `start_ms`, every account at bankroll with `peak_equity` reset at `start_ms`, and `rate` kept;
   - the 0 ms scenario is accepted (or the 1 ms fallback, §3).
 - `scanner`:
   - a pending request is applied once, and a second tick with no new request does nothing; `last_applied` stays in memory even while the writer is backlogged;
   - frames in the reset's millisecond, and a 0 ms rung trade right after it, produce no new-epoch row with a time below `start_ms` (review C2);
   - a request pending at start builds a fresh trader with `start_ms = now_ms()`, with no close rows and no `i64::MIN` times (review C3);
-  - the close rows, epoch row, marks and `paper_state` go in one `Batch`; `extend_paper`, `restore` and quarantine keep `paper_epochs`;
+  - the close rows, epoch row, marks and `paper_state` go as one `WriterMsg::PaperReset`; `extend_paper` and `restore` keep `paper_epochs`;
   - an empty `paper_state` at start writes a `policies` epoch; a crash before the first save doesn't write a second one;
-  - `Ctl::PaperReset` is captured, and replay of it gives the same ledger as live;
+  - `Ctl::PaperReset` is captured, and replay of it (using the payload `t`) gives the same ledger as live; `tape::feed` and compact ignore it;
+  - writer: a reset message with a poison episode row pending is still written whole (the pending batch is flushed first), and a data error in the reset group drops it whole, never split;
+  - the reset's `paper_state` is stamped with the wall clock and isn't rejected by the upsert guard;
+  - a REST-snapshot open and a resolution right after a reset, and at start for the policies epoch, are stamped ≥ `start_ms`;
   - two pending requests collapse to one epoch with the highest id;
   - a policies-sha fresh start writes a `policies` epoch;
   - both at once write one `reset` epoch;
@@ -383,7 +402,7 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
   - it renders with `measured = null`.
 - The Sweet grid:
   - the glyph per label and sign;
-  - fee variants are excluded;
+  - fee variants and extras are excluded; the YES side has 2 columns;
   - columns are sorted by latency;
   - the detail line on focus;
   - a 360 px structure check (the `theme.test.ts` rules).
@@ -407,6 +426,7 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
    - the scanner image with the ladder `policies.toml` (this starts epoch 1);
    - analyze;
    - the api with `RESET_DATABASE_URL` and `POLICIES_PATH`.
+   - **compact recreated on the new image**, before any reset can happen. The first reset is gated in the runbook until compact runs the 7a image.
    - Gates, in order: the §3 cost gate on the PC, then the migration grants check, then "19 accounts at $1,000 in epoch 1" (`paper_marks` and `paper_epochs` queries).
 2. **Web (step B):** the panel, the hero, the grid and the reset fold. `web` is recreated at a quiet hour (the 2026-09-28 websocket-drop lesson), and the Chrome check follows.
 
@@ -417,7 +437,7 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
 
 **Live-vs-replay across a reset** is kept by `Ctl::PaperReset` (§4.2). The s3-paper runbook notes it.
 
-**Rollback:** the previous images, plus the old `policies.toml`. Restoring the old file starts yet another epoch (cause `policies`); that's recorded, not hidden. Migration 0009 is additive and stays.
+**Rollback:** the previous images, plus the old `policies.toml`. Pre-7a images never write `paper_epochs`. So a rollback's own epoch is recorded only at the next 7a start, through the sha mismatch. **After any reset, a pre-7a image can't replay or compact that hour** (§4.2). Migration 0009 is additive and stays.
 
 ## 12. Risks and notes
 
@@ -437,7 +457,7 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
 4. **Latency is exchange-relative;** rungs below our feed lag are valid hypotheticals. 0 ms is the baseline, 52 ms is co-located, and "us" is measured + matching.
 5. **Crypto stays in the main drawing;** the split is in a fold.
 6. **The Sweet spots grid** replaces the per-scenario chart.
-7. **The reset button** sits in a Paper page fold, typed confirmation, 1 per day. The scanner picks it up at its save tick.
+7. **The reset button** sits in a Paper page fold, typed confirmation, 1 per day. The scanner's request poll (~30 s) picks it up.
 8. **Phase 7 split:** 7a (this spec), then 7b (`/math`, unchanged).
 9. **Review:** an independent subagent, not the owner.
 
@@ -445,7 +465,7 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
 
 **Plan 7a-A (backend):**
 
-1. `sim`: `mark_now`, and the 0 ms validation check. Then the ladder `policies.toml` and the §3 cost gate on a replay.
+1. `sim`: `PaperTrader::reset`, `mark_now`, the entry-point clamp, and the 0 ms validation check; the `tape` `Ctl::PaperReset` variant (a no-op in `feed`). Then the ladder `policies.toml` and the §3 cost gate on a replay.
 2. Migration 0009 and its grants tests; `store` epoch reads and filters.
 3. The scanner's request apply (§4.2) and policies-epoch.
 4. `break_even` (pure) and the shared `scenarios::parse` and median; analyze's epoch-aware deltas.
@@ -476,3 +496,11 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
 - **Api:** a second pool as `Option<Store>`; the reset-role refusal covers every table; CSRF and race reasoning are written down; `POLICIES_PATH` defaults to the baked `/etc/cute-trading/policies.toml`.
 - **Honesty scan** is scoped to the panel's rendered text, including imported `help.ts` sentences.
 - **Scope:** two plans, 7a-A and 7a-B.
+
+## 16. Changes after the second review pass (2026-09-29)
+
+- **The reset is a writer message of its own** (`WriterMsg::PaperReset`): flushed alone, never quarantined row by row, and its `paper_state` is stamped with the wall clock.
+- **`Ctl::PaperReset`:** a no-op in tape/compact. Compact moves to the 7a image before the first reset. Replay uses the payload `t`. Rollback limits are stated.
+- **Both start cases** seed `last_recv_ms = start_ms`, and every trader entry point is clamped.
+- **`reset` contents:** `reserved`, `peak_equity`; `rate` is kept. Its consequences are stated.
+- **Leftovers:** poll timing wording; sp-burst's real latencies; `direction` and `markets_status` in the schema; 2 YES columns; test and order-of-work leftovers; rollback epoch wording.
