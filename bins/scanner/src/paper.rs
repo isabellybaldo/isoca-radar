@@ -217,7 +217,17 @@ pub fn state_batch(
     })
 }
 
-/// Rebuild the live trader from `paper_state`. Ruling 26: the policies sha gates the whole
+/// The saved rows of accounts the current policies still configure. A removed account's row
+/// stays in `paper_state` forever (the scanner has no DELETE grant) with the sha it was last
+/// saved under: counting it would make every restart after that edit a policies change.
+fn current_rows<'a>(p: &Policies, rows: &'a [PaperStateRow]) -> Vec<&'a PaperStateRow> {
+    rows.iter()
+        .filter(|r| p.sim.accounts.iter().any(|s| s.id() == r.account_id))
+        .collect()
+}
+
+/// Rebuild the live trader from `paper_state`. Only rows of accounts still in the policies count
+/// (`current_rows`). Ruling 26: the policies sha gates the whole
 /// restore, not just each account's spec. Any change anywhere in policies.toml (a scenario's
 /// net_ms/match_ms/burst, `[p1]` thresholds, min_order_shares, settle_delay_ms, markout offsets,
 /// ...) changes the sha over the per-account AccountSpec check alone would miss, so a NULL or
@@ -228,6 +238,7 @@ pub fn state_batch(
 /// does that; filtering here only adds the log line. A row that isn't a saved account is an
 /// error, never a silent reset.
 pub fn restore_trader(p: &Policies, rows: &[PaperStateRow]) -> anyhow::Result<PaperTrader> {
+    let rows = current_rows(p, rows);
     if let Some(old) = rows
         .iter()
         .find(|r| r.policies_sha256.as_deref() != Some(p.sha256.as_str()))
@@ -340,11 +351,13 @@ pub enum StartEpoch {
 }
 
 /// A pending request wins (one epoch, cause `reset`, even when the policies changed too); then an
-/// empty `paper_state` or any row whose sha isn't the current one is a policies epoch.
+/// empty `paper_state` or any row whose sha isn't the current one is a policies epoch. Rows of
+/// accounts no longer in the policies are ignored (`current_rows`).
 pub fn start_epoch(p: &Policies, saved: &[PaperStateRow], pending: &[i64]) -> StartEpoch {
     if let Some(&request_id) = pending.iter().max() {
         return StartEpoch::Reset { request_id };
     }
+    let saved = current_rows(p, saved);
     if saved.is_empty()
         || saved
             .iter()
@@ -739,7 +752,7 @@ mod tests {
     fn a_corrupt_save_is_loud_never_a_silent_reset() {
         let p = parse_policies(POLICIES).unwrap();
         let bad = vec![store::PaperStateRow {
-            account_id: "x".into(),
+            account_id: p.sim.accounts[0].id().to_string(),
             state: "{not json".into(),
             updated_ms: 1,
             policies_sha256: Some(p.sha256.clone()),
@@ -748,6 +761,40 @@ mod tests {
             restore_trader(&p, &bad).is_err(),
             "a corrupt save is loud, never a silent reset"
         );
+    }
+
+    /// A removed account's row (no DELETE grant: it stays forever) with the sha of the policies it
+    /// was last saved under, next to every current account saved under the current sha.
+    fn with_a_removed_accounts_stale_row(p: &Policies) -> Vec<store::PaperStateRow> {
+        let mut rows = saved_rows(p);
+        rows.push(store::PaperStateRow {
+            account_id: "removed_account".into(),
+            state: "{\"a removed account\": \"never parsed\"}".into(),
+            updated_ms: 1,
+            policies_sha256: Some("an-old-sha".into()),
+        });
+        rows
+    }
+
+    #[test]
+    fn a_removed_accounts_stale_row_neither_resets_nor_starts_an_epoch() {
+        let p = parse_policies(POLICIES).unwrap();
+        let rows = with_a_removed_accounts_stale_row(&p);
+        assert_eq!(start_epoch(&p, &rows, &[]), StartEpoch::Continue);
+        let t = restore_trader(&p, &rows).unwrap();
+        assert_eq!(
+            (t.accounts()[0].cash, t.accounts()[1].cash),
+            (d("900"), d("800")),
+            "the current accounts restore; the removed account's row is ignored"
+        );
+    }
+
+    #[test]
+    fn only_a_removed_accounts_row_left_is_a_policies_epoch() {
+        let p = parse_policies(POLICIES).unwrap();
+        let mut rows = with_a_removed_accounts_stale_row(&p);
+        let stale = rows.split_off(rows.len() - 1);
+        assert_eq!(start_epoch(&p, &stale, &[]), StartEpoch::Policies);
     }
 
     fn resolved(id: &str) -> Resolution {
