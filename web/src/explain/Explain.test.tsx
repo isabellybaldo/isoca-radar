@@ -209,4 +209,45 @@ describe('useExplainPage', () => {
     expect(screen.getByText('radar:1')).toBeInTheDocument();
     expect(err).not.toHaveBeenCalled();
   });
+  it('points aria-controls at the panel only while the panel exists (M11)', () => {
+    mockApi({ '/api/paper/ladder': ladderFixture() });
+    mount();
+    expect(tab()).not.toHaveAttribute('aria-controls');
+    fireEvent.click(tab());
+    expect(tab()).toHaveAttribute('aria-controls', 'explain-panel');
+    expect(document.getElementById('explain-panel')).toBe(panel());
+    fireEvent.click(tab());
+    expect(tab()).not.toHaveAttribute('aria-controls');
+  });
+
+  it('a page that only publishes and selects does not re-render when the selection or the panel changes (M3)', () => {
+    mockApi({ '/api/paper/ladder': ladderFixture() });
+    let renders = 0;
+    function Publisher() {
+      renders++;
+      useExplainPage('radar', { open: OPEN });
+      useExplainSelect();
+      return null;
+    }
+    function Picker() {
+      const { select, selection } = useExplainCtx();
+      return (
+        <button type="button" onClick={() => select(selection ? null : { kind: 'episode', episode: ROW })}>
+          toggle
+        </button>
+      );
+    }
+    mount(
+      <>
+        <Publisher />
+        <Picker />
+      </>,
+    );
+    const before = renders;
+    fireEvent.click(screen.getByText('toggle'));
+    fireEvent.click(screen.getByText('toggle'));
+    fireEvent.click(tab());
+    expect(renders).toBe(before);
+  });
 });
+

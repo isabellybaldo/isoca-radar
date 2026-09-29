@@ -17,16 +17,23 @@ export interface ExplainState {
   selection: Selection;
 }
 
-interface Ctx extends ExplainState {
-  isOpen: boolean;
+/** Stable for the provider's life: pages that only publish and select read this context alone, so a
+ *  change of the panel's state (page, data, selection, open) never re-renders them. */
+interface Actions {
   setOpen: (v: boolean) => void;
   select: (s: Selection) => void;
   publish: <P extends ExplainPage>(page: P, d: PageData[P] | null) => void;
 }
 
+interface State extends ExplainState {
+  isOpen: boolean;
+}
+
+type Ctx = State & Actions;
+
 // Outside a provider (page tests render pages alone) everything is a no-op.
-const NOOP: Ctx = { page: null, data: {}, selection: null, isOpen: false, setOpen: () => {}, select: () => {}, publish: () => {} };
-const C = createContext<Ctx>(NOOP);
+const A = createContext<Actions>({ setOpen: () => {}, select: () => {}, publish: () => {} });
+const S = createContext<State>({ page: null, data: {}, selection: null, isOpen: false });
 
 export function ExplainProvider({ children }: { children: ReactNode }) {
   const [page, setPage] = useState<ExplainPage | null>(null);
@@ -47,19 +54,22 @@ export function ExplainProvider({ children }: { children: ReactNode }) {
     setPage(p);
     setData((cur) => ({ ...cur, [p]: d }) as PageData);
   }, []);
-  const value = useMemo<Ctx>(
-    () => ({ page, data, selection, isOpen, setOpen, select: setSelection, publish }),
-    [page, data, selection, isOpen, setOpen, publish],
+  const actions = useMemo<Actions>(() => ({ setOpen, select: setSelection, publish }), [setOpen, publish]);
+  const state = useMemo<State>(() => ({ page, data, selection, isOpen }), [page, data, selection, isOpen]);
+  return (
+    <A.Provider value={actions}>
+      <S.Provider value={state}>{children}</S.Provider>
+    </A.Provider>
   );
-  return <C.Provider value={value}>{children}</C.Provider>;
 }
 
+/** State and actions together, for the panel and its tab; pages use useExplainSelect / useExplainPage. */
 export function useExplainCtx(): Ctx {
-  return useContext(C);
+  return { ...useContext(S), ...useContext(A) };
 }
 
 export function useExplainSelect(): (s: Selection) => void {
-  return useContext(C).select;
+  return useContext(A).select;
 }
 
 /** Same keys, each value the same identity: a fresh wrapper around the same api data is no change. */
@@ -75,7 +85,7 @@ function shallowEqual(a: object, b: object): boolean {
  * the page) clears the page and the selection.
  */
 export function useExplainPage<P extends ExplainPage>(page: P, d: NonNullable<PageData[P]>): void {
-  const { publish } = useContext(C);
+  const { publish } = useContext(A);
   const last = useRef<object | null>(null);
   // No dependency list (its size must never change, and `d` may gain or lose keys): the shallow compare
   // against the last published object decides, so a fresh wrapper with the same values is not a publish.

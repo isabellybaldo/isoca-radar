@@ -109,7 +109,8 @@ export function Explain() {
         type="button"
         className="explain-tab"
         aria-expanded={isOpen}
-        aria-controls="explain-panel"
+        // Only while the panel exists: it is unmounted when closed, and aria-controls must name a live element.
+        aria-controls={isOpen ? 'explain-panel' : undefined}
         // D-06: docked and open, the tab joins the flex row on the panel's left edge instead of floating over it.
         data-dock={docked && isOpen ? '' : undefined}
         onClick={() => {
