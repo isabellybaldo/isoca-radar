@@ -2,7 +2,8 @@
 //! - the frozen policies file and its hash (spec §11 pre-registration);
 //! - `SimOut` → `store` rows (one mapping for live and replay);
 //! - the live `paper_state` rows (restore at start);
-//! - the live resolver loop.
+//! - the live resolver loop;
+//! - Phase 7a paper epochs: the start-time epoch, the reset-request poller and the epoch batch.
 //!
 //! PAPER ONLY: nothing here can place an order. `sim` produces ledger rows and nothing else.
 use crate::config::PaperCfg;
@@ -18,8 +19,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use store::{
-    Batch, PaperAccountRow, PaperExecRow, PaperFillRow, PaperIntentRow, PaperLedgerRow,
-    PaperMarkRow, PaperMarkoutRow, PaperStateRow,
+    Batch, PaperAccountRow, PaperEpochRow, PaperExecRow, PaperFillRow, PaperIntentRow,
+    PaperLedgerRow, PaperMarkRow, PaperMarkoutRow, PaperStateRow,
 };
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -320,6 +321,187 @@ pub async fn run_resolver<F, Fut>(
         }
         if !poll_once(&mut fetch, &held, &out).await {
             return;
+        }
+    }
+}
+
+/// Spec 7a §4.2: how often the poller asks for new reset requests (~30 s to apply one).
+pub const RESET_POLL_EVERY: Duration = Duration::from_secs(30);
+
+/// What the scanner does to the paper accounts at start (spec 7a §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartEpoch {
+    /// A restart under the same policies: restore the saved accounts, no epoch row.
+    Continue,
+    /// An empty paper_state (a fresh database) or a policies sha mismatch (ruling 26).
+    Policies,
+    /// A reset request pending at start (the highest one): a fresh trader (review C3).
+    Reset { request_id: i64 },
+}
+
+/// A pending request wins (one epoch, cause `reset`, even when the policies changed too); then an
+/// empty `paper_state` or any row whose sha isn't the current one is a policies epoch.
+pub fn start_epoch(p: &Policies, saved: &[PaperStateRow], pending: &[i64]) -> StartEpoch {
+    if let Some(&request_id) = pending.iter().max() {
+        return StartEpoch::Reset { request_id };
+    }
+    if saved.is_empty()
+        || saved
+            .iter()
+            .any(|r| r.policies_sha256.as_deref() != Some(p.sha256.as_str()))
+    {
+        return StartEpoch::Policies;
+    }
+    StartEpoch::Continue
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    Policies,
+    Reset,
+}
+
+impl Cause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cause::Policies => "policies",
+            Cause::Reset => "reset",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochStart {
+    pub epoch: i32,
+    pub start_ms: i64,
+    pub cause: Cause,
+    pub request_id: Option<i64>,
+}
+
+/// One `WriterMsg::PaperReset` (spec 7a §4.2): the rows the epoch closes and opens with, its
+/// `paper_epochs` row and a `paper_state` save stamped `updated_ms` — the WALL clock (the upsert
+/// guard `paper_state.updated_ms <= EXCLUDED.updated_ms` would reject a paper-clock stamp behind
+/// a later save tick). Never split: a crash can't leave an epoch row next to pre-reset state.
+pub fn epoch_batch(
+    run_id: i64,
+    p: &Policies,
+    e: &EpochStart,
+    rows: Vec<SimOut>,
+    st: &TraderState,
+    updated_ms: i64,
+) -> anyhow::Result<Batch> {
+    let mut b = state_batch(st, updated_ms, &p.sha256)?;
+    for o in rows {
+        push_sim(run_id, o, &mut b);
+    }
+    b.paper_epochs.push(PaperEpochRow {
+        epoch: e.epoch,
+        start_ms: e.start_ms,
+        cause: e.cause.as_str().to_string(),
+        request_id: e.request_id,
+        run_id,
+        policies_sha256: p.sha256.clone(),
+    });
+    Ok(b)
+}
+
+/// The engine loop's epoch state, read ONCE at start and then kept in memory: re-reading
+/// `paper_epochs` while the writer is backlogged would re-apply a request (spec 7a §4.2). Epoch
+/// numbers only ever come from `next_epoch`, one past the last, so this process never builds two
+/// different rows with the same epoch (paper_epochs inserts are ON CONFLICT DO NOTHING).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetTracker {
+    current: i32,
+    last_applied: Option<i64>,
+}
+
+impl ResetTracker {
+    pub fn new(current: i32, last_applied: Option<i64>) -> Self {
+        Self {
+            current,
+            last_applied,
+        }
+    }
+
+    /// The request to apply now: the highest id above `last_applied` (several collapse into
+    /// one epoch), which becomes `last_applied`. None: nothing new.
+    pub fn accept(&mut self, ids: &[i64]) -> Option<i64> {
+        let max = ids
+            .iter()
+            .copied()
+            .filter(|&i| self.last_applied.is_none_or(|l| i > l))
+            .max()?;
+        self.last_applied = Some(max);
+        Some(max)
+    }
+
+    /// The number of the epoch about to start.
+    pub fn next_epoch(&mut self) -> i32 {
+        self.current += 1;
+        self.current
+    }
+
+    /// The one place an epoch is opened, at start or live: numbers it and logs its one line.
+    /// `at_start` only changes the log line.
+    pub fn open(
+        &mut self,
+        start_ms: i64,
+        cause: Cause,
+        request_id: Option<i64>,
+        at_start: bool,
+    ) -> EpochStart {
+        let epoch = self.next_epoch();
+        match (request_id, at_start) {
+            (Some(r), false) => eprintln!("paper: reset → epoch {epoch} (request {r})"),
+            (Some(r), true) => {
+                eprintln!("paper: reset → epoch {epoch} (request {r}, pending at start)")
+            }
+            (None, _) => eprintln!("paper: {} → epoch {epoch}", cause.as_str()),
+        }
+        EpochStart {
+            epoch,
+            start_ms,
+            cause,
+            request_id,
+        }
+    }
+
+    pub fn last_applied(&self) -> Option<i64> {
+        self.last_applied
+    }
+
+    pub fn current(&self) -> i32 {
+        self.current
+    }
+}
+
+/// Spec 7a §4.2: every `every`, ask `fetch` for reset request ids above the last one seen and
+/// forward them (one message per poll that found any). A spawned task, like the resolver: the
+/// engine loop has no database awaits. A failed poll logs one line and waits for the next.
+/// `last_seen` is seeded with the start's `last_applied` (a start-time epoch included), so a
+/// request applied at start is never forwarded again. Ends when `out` is gone.
+pub async fn run_reset_poller<F, Fut, E>(
+    mut fetch: F,
+    mut last_seen: i64,
+    every: Duration,
+    out: mpsc::Sender<Vec<i64>>,
+) where
+    F: FnMut(i64) -> Fut,
+    Fut: Future<Output = Result<Vec<i64>, E>>,
+    E: std::fmt::Display,
+{
+    loop {
+        tokio::time::sleep(every).await;
+        match fetch(last_seen).await {
+            Ok(ids) => {
+                if let Some(&max) = ids.iter().max() {
+                    last_seen = last_seen.max(max);
+                    if out.send(ids).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => eprintln!("paper: reset poll failed: {e}"),
         }
     }
 }
@@ -646,6 +828,161 @@ mod tests {
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+        task.abort();
+    }
+
+    #[test]
+    fn start_epoch_names_a_policies_epoch_a_pending_request_or_nothing() {
+        let p = parse_policies(POLICIES).unwrap();
+        let rows = saved_rows(&p);
+        assert_eq!(
+            start_epoch(&p, &[], &[]),
+            StartEpoch::Policies,
+            "a fresh database"
+        );
+        assert_eq!(
+            start_epoch(&p, &rows, &[]),
+            StartEpoch::Continue,
+            "a restart; also the start after a policies epoch's first save committed, so a crash \
+             loop never writes a second one"
+        );
+        let changed = parse_policies(&POLICIES.replacen(
+            "min_annualized = \"0.10\"",
+            "min_annualized = \"0.20\"",
+            1,
+        ))
+        .unwrap();
+        assert_eq!(start_epoch(&changed, &rows, &[]), StartEpoch::Policies);
+        assert_eq!(
+            start_epoch(&changed, &rows, &[3, 5]),
+            StartEpoch::Reset { request_id: 5 },
+            "new policies and a pending request at once: one reset epoch"
+        );
+        assert_eq!(
+            start_epoch(&p, &rows, &[2]),
+            StartEpoch::Reset { request_id: 2 }
+        );
+    }
+
+    #[test]
+    fn the_tracker_applies_each_request_once_and_collapses_a_backlog() {
+        let mut r = ResetTracker::new(1, Some(4));
+        assert_eq!(r.accept(&[5]), Some(5));
+        assert_eq!(r.accept(&[5]), None, "never twice, even if sent again");
+        assert_eq!(
+            r.accept(&[]),
+            None,
+            "a tick with no new request does nothing"
+        );
+        assert_eq!(r.accept(&[3, 4]), None, "older than last_applied");
+        assert_eq!(
+            r.accept(&[6, 8, 7]),
+            Some(8),
+            "several collapse into one epoch naming the highest"
+        );
+        assert_eq!(r.last_applied(), Some(8));
+        assert_eq!((r.next_epoch(), r.next_epoch(), r.current()), (2, 3, 3));
+        let mut fresh = ResetTracker::new(0, None);
+        assert_eq!(fresh.accept(&[1]), Some(1));
+    }
+
+    #[test]
+    fn an_epoch_batch_carries_the_rows_the_epoch_row_and_the_wall_clock_save() {
+        let p = parse_policies(POLICIES).unwrap();
+        let st = PaperTrader::new(p.sim.clone()).unwrap().state();
+        let mark = SimOut::Account(AccountRow {
+            account: "P0-converter/rung-0".into(),
+            t_ms: 11,
+            cash: d("1000"),
+            equity: d("1000"),
+            realized: d("0"),
+            unrealized: d("0"),
+            fees_paid: d("0"),
+            locked: d("0"),
+            max_drawdown: d("0"),
+            n_positions: 0,
+        });
+        let e = EpochStart {
+            epoch: 2,
+            start_ms: 11,
+            cause: Cause::Reset,
+            request_id: Some(9),
+        };
+        let b = epoch_batch(3, &p, &e, vec![mark], &st, 77).unwrap();
+        assert_eq!(
+            b.paper_epochs,
+            vec![store::PaperEpochRow {
+                epoch: 2,
+                start_ms: 11,
+                cause: "reset".into(),
+                request_id: Some(9),
+                run_id: 3,
+                policies_sha256: p.sha256.clone(),
+            }]
+        );
+        assert_eq!((b.paper_marks.len(), b.paper_marks[0].run_id), (1, 3));
+        assert!(
+            b.paper_state.len() == st.accounts.len()
+                && b.paper_state.iter().all(|s| s.updated_ms == 77)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_poller_forwards_new_ids_and_asks_after_the_last_seen() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+        let seen = asked.clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_reset_poller(
+            move |after: i64| {
+                seen.lock().unwrap().push(after);
+                let found = if after < 6 { vec![5, 6] } else { Vec::new() };
+                async move { Ok::<_, String>(found) }
+            },
+            4, // seeded with the request a start-time epoch already applied
+            Duration::from_millis(10),
+            tx,
+        ));
+        let ids = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids, vec![5, 6]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(
+            asked[0], 4,
+            "the seed: a request applied at start is never asked for again"
+        );
+        assert!(asked[1..].iter().all(|&a| a == 6), "{asked:?}");
+        assert!(rx.try_recv().is_err(), "nothing new: nothing sent");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failed_poll_logs_and_the_next_one_still_runs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_reset_poller(
+            move |_after: i64| {
+                let n = c.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if n == 0 {
+                        Err("database unreachable".to_string())
+                    } else {
+                        Ok(vec![3])
+                    }
+                }
+            },
+            0,
+            Duration::from_millis(10),
+            tx,
+        ));
+        let ids = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids, vec![3]);
         task.abort();
     }
 }
