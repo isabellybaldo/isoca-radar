@@ -1,5 +1,6 @@
 import type { SweetLabel, SweetRow, SweetSeries } from '../api/types';
-import { compareDecimal, formatMoney } from './money';
+import { LADDER, LADDER_YES } from './ladder';
+import { compareDecimal, formatMoney, signOf } from './money';
 import { fmtUtcHm } from './time';
 
 /** Spec 5d §7.6, verbatim. */
@@ -96,7 +97,7 @@ export interface Grid {
 
 /** Rows = buckets (sorted canonically per dimension), columns = scenarios by latency; fee rows are
  *  left out. */
-export function grid(s: SweetSeries, side: SweetSide, dim: SweetDim): Grid {
+export function grid(s: Pick<SweetSeries, 'rows'>, side: SweetSide, dim: SweetDim): Grid {
   const rows = s.rows.filter((r) => r.side === side && r.dimension === dim && r.fee_bips === 0);
   const buckets: string[] = [];
   const scen = new Map<string, number | null>();
@@ -152,4 +153,63 @@ export function rowName(r: SweetRow): string {
 
 export function recomputingText(computedMs: number): string {
   return `Recomputing after a premise change. The last result was ${fmtUtcHm(computedMs)} UTC; new numbers appear when it finishes.`;
+}
+
+/** Spec 7a §8: one glyph per cell. ● and ○ are the only cells whose interval clears zero (from above,
+ *  from below); ◐ and ◑ are thin, and nothing is concluded from them. */
+export type GlyphKey = 'candidate' | 'negative' | 'inconclusive' | 'thinUp' | 'thinDown' | 'dead_on_paper' | 'not_tested' | 'none';
+export const GLYPHS: Record<GlyphKey, string> = {
+  candidate: '●', negative: '○', inconclusive: '◌', thinUp: '◐', thinDown: '◑', dead_on_paper: '✗', not_tested: '–', none: '·',
+};
+export const GLYPH_NAME: Record<GlyphKey, string> = {
+  candidate: 'candidate', negative: 'negative', inconclusive: 'inconclusive', thinUp: 'thin, mean > 0', thinDown: 'thin, mean ≤ 0',
+  dead_on_paper: 'dead on paper', not_tested: 'not tested', none: 'no attempts',
+};
+export const GLYPH_ORDER: GlyphKey[] = ['candidate', 'negative', 'inconclusive', 'thinUp', 'thinDown', 'none', 'dead_on_paper', 'not_tested'];
+export const GRID_HINT = 'Tap a cell for its numbers.';
+
+export function glyphKey(r: SweetRow | undefined): GlyphKey {
+  if (!r) return 'none';
+  if (r.label === 'thin') return signOf(r.mean) > 0 ? 'thinUp' : 'thinDown';
+  return r.label;
+}
+
+export interface LadderGridRow {
+  dim: SweetDim;
+  bucket: string;
+}
+
+export interface LadderGrid {
+  columns: { scenario: string; latency_ms: number }[];
+  rows: LadderGridRow[];
+  cell: (row: LadderGridRow, scenario: string) => SweetRow | undefined;
+}
+
+/** Spec 7a §8: rows = the `all` row first, then the chosen dimension's buckets in canonical order (only
+ *  the `only` ones when given); columns = the side's LADDER scenarios by latency (6 NO, 2 YES). Fee
+ *  variants and the extras never get a column; they stay in the "all numbers" fold. */
+export function ladderGrid(rows: SweetRow[], side: SweetSide, dim: SweetDim, only?: string[]): LadderGrid {
+  const names = side === 'no' ? LADDER.map((l) => l.scenario) : LADDER_YES;
+  const columns = LADDER.filter((l) => names.includes(l.scenario)).map((l) => ({ scenario: l.scenario, latency_ms: l.latency_ms }));
+  const all = grid({ rows }, side, 'all');
+  const sub = dim === 'all' ? null : grid({ rows }, side, dim);
+  const buckets = (sub?.buckets ?? []).filter((b) => only === undefined || only.includes(b));
+  return {
+    columns,
+    rows: [{ dim: 'all', bucket: 'all' }, ...buckets.map((bucket) => ({ dim, bucket }))],
+    cell: (row, scenario) => (row.dim === 'all' ? all.cell('all', scenario) : sub?.cell(row.bucket, scenario)),
+  };
+}
+
+/** The line under the grid for one cell (spec §8): bucket, scenario, n, clusters, captured at that
+ *  latency per $100 with its interval, and the label sentence. */
+export function cellDetail(row: LadderGridRow, col: { scenario: string; latency_ms: number }, r: SweetRow | undefined): string {
+  const head = `${bucketText(row.dim, row.bucket)} · ${col.scenario}`;
+  if (!r) return `${head} · no attempts in this slice`;
+  return `${head} · n ${r.n_exec} · C ${r.clusters} · captured at ${col.latency_ms} ms, per $100: ${interval(r)} · ${LABEL_TEXT[r.label]}`;
+}
+
+/** Spec 7a §3: the ladder grows m, so z is stricter; the grid's footnote says so. */
+export function gridNote(s: Pick<SweetSeries, 'm' | 'z'>): string {
+  return `z = ${s.z} across ${s.m} rows tested: the more rows, the wider each interval.`;
 }

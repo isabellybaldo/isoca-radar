@@ -42,4 +42,13 @@ describe('theme', () => {
     expect(rule('body')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/);
   });
+  it('fits the Sweet spots grid in 360 px: an 88 px label column and six 36 px cells, no cell padding (spec 7a §8)', () => {
+    const px = (sel: string) => Number(/(?<![-\w])width:\s*(\d+)px/.exec(rule(sel))?.[1]);
+    expect(px('.lgrid .lg-row')).toBe(88);
+    expect(px('.lgrid .lg-cell')).toBe(36);
+    expect(px('.lgrid .lg-row') + 6 * px('.lgrid .lg-cell')).toBeLessThanOrEqual(328);
+    expect(rule('.lgrid th, .lgrid td')).toMatch(/padding:\s*0/);
+    expect(rule('.lgrid')).toMatch(/width:\s*auto/);
+    expect(rule('ul.plain.lg-legend')).toMatch(/gap:\s*2px/); // out-specifies ul.plain { gap: 6px } (D-05)
+  });
 });
