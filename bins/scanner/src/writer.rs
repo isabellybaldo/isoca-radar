@@ -286,12 +286,30 @@ async fn quarantine(store: &Store, b: Batch) -> u64 {
     dropped
 }
 
+/// A reset group's epoch and request for its error line, from its `paper_epochs` row: the
+/// operator then knows which request a restart re-applies (it stays pending: its id is above
+/// every committed `paper_epochs.request_id`).
+fn reset_label(b: &Batch) -> String {
+    if b.paper_epochs.is_empty() {
+        return "no epoch row".to_string();
+    }
+    b.paper_epochs
+        .iter()
+        .map(|e| match e.request_id {
+            Some(r) => format!("epoch {} (request {r})", e.epoch),
+            None => format!("epoch {} ({})", e.epoch, e.cause),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Write every waiting group, each in its own transaction, in order. Transient failure → the
 /// group goes back for a retry (returns false); data error → quarantine row by row, except a
 /// reset, which is dropped whole and logged at error level. Returns true when nothing is left.
 async fn flush(store: &Store, pending: &mut Pending, fails: &mut u32) -> bool {
     while let Some(g) = pending.next_group() {
         let rows = g.batch.rows();
+        let label = (g.kind == GroupKind::Reset).then(|| reset_label(&g.batch));
         match tokio::time::timeout(Duration::from_secs(10), store.write_batch(&g.batch)).await {
             Ok(Ok(())) => *fails = 0,
             Ok(Err(e)) if e.is_data_error() => {
@@ -306,7 +324,10 @@ async fn flush(store: &Store, pending: &mut Pending, fails: &mut u32) -> bool {
                         );
                     }
                     None => eprintln!(
-                        "writer: ERROR: paper reset rejected ({e}); dropped whole ({rows} rows), never split"
+                        "writer: ERROR: paper reset {} rejected ({e}); dropped whole ({rows} rows), \
+                         never split; its request stays pending and the next scanner restart \
+                         re-applies it",
+                        label.as_deref().unwrap_or("?")
                     ),
                 }
             }
@@ -564,6 +585,17 @@ mod tests {
         let third = p.next_group().unwrap();
         assert_eq!((third.kind, seqs(&third.batch)), (GroupKind::Open, vec![3]));
         assert!(p.next_group().is_none());
+    }
+
+    #[test]
+    fn a_dropped_reset_names_its_epoch_and_request() {
+        let (_, reset) = reset_msg(2);
+        assert_eq!(reset_label(&reset), "epoch 2 (request 7)");
+        let mut policies = reset.clone();
+        policies.paper_epochs[0].request_id = None;
+        policies.paper_epochs[0].cause = "policies".into();
+        assert_eq!(reset_label(&policies), "epoch 2 (policies)");
+        assert_eq!(reset_label(&Batch::default()), "no epoch row");
     }
 
     #[test]
