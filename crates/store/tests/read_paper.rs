@@ -1,23 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
+use common::{ro, run};
 use rust_decimal_macros::dec;
 use sim::account::{Account, Position};
 use sim::config::{AccountSpec, PolicyKind};
 use sim::types::{LegKey, Outcome};
 use store::*;
-
-async fn run(store: &Store, mode: &str) -> i64 {
-    store
-        .start_run(&NewRun {
-            service: "scanner".into(),
-            started_ms: 1,
-            version: "t".into(),
-            config_hash: "c".into(),
-            mode: mode.into(),
-        })
-        .await
-        .unwrap()
-}
 
 async fn account(owner: &Store, run_id: i64, id: &str, policy: &str, scenario: &str) {
     owner
@@ -54,12 +42,6 @@ async fn ledger_kind(owner: &Store, run_id: i64, id: &str, seq: i64, kind: &str)
         .unwrap();
 }
 
-async fn ro(db: &common::TestDb) -> Store {
-    Store::connect_read_only(db.opts.clone(), 2, 5_000, Some("analyze_ro"))
-        .await
-        .unwrap()
-}
-
 #[tokio::test]
 async fn paper_reads_are_empty_when_the_tables_are_missing() {
     let Some((owner, db)) = common::fresh().await else {
@@ -81,14 +63,14 @@ async fn paper_reads_are_empty_when_the_tables_are_missing() {
     assert!(analyze.paper_accounts_now().await.unwrap().is_empty());
     assert!(
         analyze
-            .paper_equity("P0-converter/sp-idle", 0, 10)
+            .paper_equity("P0-converter/sp-idle", 0, 10, None)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(analyze.paper_positions().await.unwrap().is_empty());
     let page = analyze
-        .paper_ledger_page("P0-converter/sp-idle", None, 50, false)
+        .paper_ledger_page("P0-converter/sp-idle", None, 50, false, None)
         .await
         .unwrap();
     assert!(page.rows.is_empty() && page.next.is_none());
@@ -168,7 +150,7 @@ async fn equity_spans_live_runs_in_the_window_and_skips_replays() {
     mark(&owner, replay, "P0-converter/sp-idle", 3_000, "7").await;
     let analyze = ro(&db).await;
     let pts = analyze
-        .paper_equity("P0-converter/sp-idle", 0, 5_000)
+        .paper_equity("P0-converter/sp-idle", 0, 5_000, None)
         .await
         .unwrap();
     assert_eq!(
@@ -202,6 +184,15 @@ async fn positions_parse_a_real_sim_account_and_ignore_odd_states() {
         )
         .await
         .unwrap();
+    let live = run(&owner, "live").await;
+    account(
+        &owner,
+        live,
+        "P1-settlement/sp-idle",
+        "P1-settlement",
+        "sp-idle",
+    )
+    .await;
     let mut acct = Account::new(AccountSpec {
         policy: PolicyKind::P1Settlement,
         scenario: "sp-idle".into(),
@@ -253,6 +244,7 @@ async fn positions_parse_a_real_sim_account_and_ignore_odd_states() {
                 basis: dec!(18.00),
                 returned: false,
                 event_title: Some("Fed decision in October?".into()),
+                end_date: None,
             },
             PaperPosition {
                 account_id: "P1-settlement/sp-idle".into(),
@@ -262,6 +254,7 @@ async fn positions_parse_a_real_sim_account_and_ignore_odd_states() {
                 basis: dec!(0),
                 returned: true,
                 event_title: None,
+                end_date: None,
             },
         ]
     );
@@ -276,6 +269,8 @@ async fn positions_skip_a_row_with_non_numeric_qty_or_basis() {
     let Some((owner, db)) = common::fresh().await else {
         return;
     };
+    let live = run(&owner, "live").await;
+    account(&owner, live, "good", "P0-converter", "x").await;
     owner
         .raw_exec(
             "INSERT INTO paper_state (account_id, state, updated_ms) VALUES \
@@ -298,6 +293,7 @@ async fn positions_skip_a_row_with_non_numeric_qty_or_basis() {
             basis: dec!(18),
             returned: false,
             event_title: None,
+            end_date: None,
         }]
     );
     analyze.close().await;
@@ -321,7 +317,7 @@ async fn ledger_pages_newest_first_by_run_then_seq() {
     ledger(&owner, replay, "P0-converter/sp-idle", 9).await;
     let analyze = ro(&db).await;
     let p1 = analyze
-        .paper_ledger_page("P0-converter/sp-idle", None, 2, false)
+        .paper_ledger_page("P0-converter/sp-idle", None, 2, false, None)
         .await
         .unwrap();
     assert_eq!(
@@ -335,7 +331,7 @@ async fn ledger_pages_newest_first_by_run_then_seq() {
     assert_eq!(p1.rows[0].equity, None);
     assert_eq!(p1.next, Some((old, 2)));
     let p2 = analyze
-        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2, false)
+        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2, false, None)
         .await
         .unwrap();
     assert_eq!(
@@ -377,22 +373,167 @@ async fn ledger_can_skip_minute_marks_and_still_page() {
     let analyze = ro(&db).await;
     let seqs = |p: &LedgerPage| p.rows.iter().map(|r| r.seq).collect::<Vec<_>>();
     let p1 = analyze
-        .paper_ledger_page("P0-converter/sp-idle", None, 2, true)
+        .paper_ledger_page("P0-converter/sp-idle", None, 2, true, None)
         .await
         .unwrap();
     assert_eq!(seqs(&p1), vec![6, 3]);
     assert_eq!(p1.next, Some((live, 3)));
     let p2 = analyze
-        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2, true)
+        .paper_ledger_page("P0-converter/sp-idle", p1.next, 2, true, None)
         .await
         .unwrap();
     assert_eq!(seqs(&p2), vec![1]);
     assert_eq!(p2.next, None);
     let all = analyze
-        .paper_ledger_page("P0-converter/sp-idle", None, 50, false)
+        .paper_ledger_page("P0-converter/sp-idle", None, 50, false, None)
         .await
         .unwrap();
     assert_eq!(all.rows.len(), 6);
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
+async fn epochs(owner: &Store, run_id: i64, starts: &[(i32, i64)]) {
+    for (e, s) in starts {
+        owner
+            .raw_exec(&format!(
+                "INSERT INTO paper_epochs (epoch, start_ms, cause, request_id, run_id, policies_sha256) \
+                 VALUES ({e}, {s}, 'policies', NULL, {run_id}, 'sha')"
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn equity_and_ledger_follow_epoch_bounds_to_the_millisecond() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = run(&owner, "live").await;
+    let id = "P0-converter/sp-idle";
+    account(&owner, live, id, "P0-converter", "sp-idle").await;
+    for (t, eq) in [
+        (1_000, "999"),
+        (2_000, "1000"),
+        (2_999, "1001"),
+        (3_000, "1000"),
+        (4_000, "1002"),
+    ] {
+        mark(&owner, live, id, t, eq).await;
+    }
+    for seq in 1..=4 {
+        ledger(&owner, live, id, seq).await; // t = seq × 1 000
+    }
+    let analyze = ro(&db).await;
+    let pts = |v: Vec<EquityPoint>| v.into_iter().map(|p| p.t_ms).collect::<Vec<_>>();
+    assert_eq!(
+        pts(analyze.paper_equity(id, 0, 10_000, None).await.unwrap()),
+        vec![1_000, 2_000, 2_999, 3_000, 4_000],
+        "no epoch row yet: everything is epoch 0, the current one"
+    );
+    epochs(&owner, live, &[(1, 2_000), (2, 3_000)]).await;
+    assert_eq!(
+        pts(analyze.paper_equity(id, 0, 10_000, None).await.unwrap()),
+        vec![3_000, 4_000],
+        "the current epoch starts AT its start_ms"
+    );
+    assert_eq!(
+        pts(analyze.paper_equity(id, 0, 10_000, Some(1)).await.unwrap()),
+        vec![2_000, 2_999]
+    );
+    assert_eq!(
+        pts(analyze.paper_equity(id, 0, 10_000, Some(0)).await.unwrap()),
+        vec![1_000]
+    );
+    assert!(
+        analyze
+            .paper_equity(id, 0, 10_000, Some(7))
+            .await
+            .unwrap()
+            .is_empty(),
+        "an unknown epoch is empty, not an error"
+    );
+    let seqs = |p: LedgerPage| p.rows.into_iter().map(|r| r.seq).collect::<Vec<_>>();
+    assert_eq!(
+        seqs(
+            analyze
+                .paper_ledger_page(id, None, 50, false, None)
+                .await
+                .unwrap()
+        ),
+        vec![4, 3]
+    );
+    assert_eq!(
+        seqs(
+            analyze
+                .paper_ledger_page(id, None, 50, false, Some(1))
+                .await
+                .unwrap()
+        ),
+        vec![2]
+    );
+    assert_eq!(
+        seqs(
+            analyze
+                .paper_ledger_page(id, None, 50, false, Some(0))
+                .await
+                .unwrap()
+        ),
+        vec![1]
+    );
+    analyze.close().await;
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn positions_are_the_newest_live_runs_accounts_with_their_markets_end_date() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    owner
+        .raw_exec(
+            "INSERT INTO events (event_id, slug, title, neg_risk_market_id, augmented, n_legs, first_seen_ms, last_seen_ms) \
+             VALUES ('ev1', 's', 'BTC above 100k on October 3?', NULL, false, 2, 1, 1); \
+             INSERT INTO legs (market_id, event_id, yes_token, no_token, status, fee_rate, fee_exponent, end_date, first_seen_ms, last_seen_ms) \
+             VALUES ('m1', 'ev1', 'y1', 'n1', 'live', 0.07, 1, '2026-10-03T12:00:00Z', 1, 1)",
+        )
+        .await
+        .unwrap();
+    let old = run(&owner, "live").await;
+    let live = run(&owner, "live").await;
+    account(&owner, old, "P0-converter/gone", "P0-converter", "gone").await;
+    account(
+        &owner,
+        live,
+        "P0-converter/rung-0",
+        "P0-converter",
+        "rung-0",
+    )
+    .await;
+    let state = r#"{"positions":[[{"market_id":"m1","yes_token":"y1","outcome":"no"},{"qty":"10","basis":"6"}]],"returned":[]}"#;
+    owner
+        .raw_exec(&format!(
+            "INSERT INTO paper_state (account_id, state, updated_ms) VALUES \
+             ('P0-converter/rung-0', '{state}', 1), ('P0-converter/gone', '{state}', 1)"
+        ))
+        .await
+        .unwrap();
+    let analyze = ro(&db).await;
+    assert_eq!(
+        analyze.paper_positions().await.unwrap(),
+        vec![PaperPosition {
+            account_id: "P0-converter/rung-0".into(),
+            market_id: "m1".into(),
+            outcome: "no".into(),
+            qty: dec!(10),
+            basis: dec!(6),
+            returned: false,
+            event_title: Some("BTC above 100k on October 3?".into()),
+            end_date: Some("2026-10-03T12:00:00Z".into()),
+        }],
+        "a removed account's stale paper_state row never shows"
+    );
     analyze.close().await;
     db.drop(owner).await;
 }

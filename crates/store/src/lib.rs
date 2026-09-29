@@ -7,6 +7,7 @@ mod card_io;
 mod compact_io;
 mod epochs;
 pub mod error;
+mod ladder;
 mod paper;
 mod read;
 mod read_paper;
@@ -27,6 +28,7 @@ pub use compact_io::{
 };
 pub use epochs::{EpochStatus, PaperEpoch, RESET_TABLES, ResetInsert, ResetRequest};
 pub use error::StoreError;
+pub use ladder::LadderSums;
 pub use read::{
     DAY_MS, EpisodeFilter, EpisodePage, EpisodeSummary, HealthNow, IntegritySummary, MAX_OPEN,
     MAX_PAGE, MAX_SERIES_ROWS, Today,

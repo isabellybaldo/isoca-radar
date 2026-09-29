@@ -168,7 +168,7 @@ pub async fn equity(
     let from_ms = to_ms - hours * 3_600_000;
     let points = st
         .store
-        .paper_equity(&account_id, from_ms, to_ms)
+        .paper_equity(&account_id, from_ms, to_ms, None)
         .await?
         .into_iter()
         .map(|p| EquityPointDto {
@@ -213,7 +213,7 @@ pub async fn ledger(
     let hide_marks = params::flag(&q, "hide_marks")?;
     let page = st
         .store
-        .paper_ledger_page(&account_id, before, limit, hide_marks)
+        .paper_ledger_page(&account_id, before, limit, hide_marks, None)
         .await?;
     Ok(Json(Page {
         items: page.rows.into_iter().map(Into::into).collect(),

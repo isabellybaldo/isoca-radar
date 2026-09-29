@@ -131,6 +131,15 @@ async fn positions_come_from_the_live_paper_state() {
     let Some((owner, db)) = common::fresh().await else {
         return;
     };
+    let live = common::run(&owner, "live").await;
+    account(
+        &owner,
+        live,
+        "P1-settlement/sp-idle",
+        "P1-settlement",
+        "sp-idle",
+    )
+    .await;
     owner
         .raw_exec(
             r#"INSERT INTO paper_state (account_id, state, updated_ms) VALUES ('P1-settlement/sp-idle', '{"positions":[[{"market_id":"m1","yes_token":"y1","outcome":"no"},{"qty":"51.2","basis":"31.74"}]],"returned":[]}', 1)"#,
