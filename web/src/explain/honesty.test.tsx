@@ -35,6 +35,7 @@ describe('checkHonesty and unlabelledMoney', () => {
     expect(checkHonesty('this latency is profitable')).toEqual(['profitable']);
     expect(checkHonesty('PROFIT @ $100, net profit at the peak, profit after taker fees, profit before taker fees')).toEqual([]);
     expect(checkHonesty('a nice profit')).toEqual(['profit']);
+    expect(checkHonesty('learn the homemade way')).toEqual([]);
     expect(checkHonesty('basket gains, leg-risk cost, pays on paper, loses on paper')).toEqual([]);
   });
 
@@ -45,6 +46,13 @@ describe('checkHonesty and unlabelledMoney', () => {
     const bad = document.createElement('div');
     bad.innerHTML = '<p>You have <b>$5.00</b></p>';
     expect(unlabelledMoney(bad)).toEqual(['You have $5.00']);
+    // a label elsewhere in the panel does not cover a bare figure
+    const panel = document.createElement('div');
+    panel.innerHTML = '<p>paper money</p><div>$5.00</div><section>$6.00 <span>$7.00</span></section><table><tbody><tr><td>$8.00</td></tr></tbody></table>';
+    expect(unlabelledMoney(panel)).toEqual(['$5.00', '$6.00 $7.00', '$8.00']);
+    const bare = document.createElement('div');
+    bare.innerHTML = 'paper $9.00';
+    expect(unlabelledMoney(bare)).toEqual(['paper $9.00']);
   });
 });
 

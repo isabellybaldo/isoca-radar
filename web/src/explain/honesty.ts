@@ -19,9 +19,12 @@ export function unlabelledMoney(root: HTMLElement): string[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let n = walker.nextNode(); n !== null; n = walker.nextNode()) {
     if (!MONEY.test(n.textContent ?? '')) continue;
-    const block = n.parentElement?.closest('li, p, table, figure, dd') ?? root;
-    const text = (block.textContent ?? '').replace(/\s+/g, ' ').trim();
-    if (!LABEL.test(text) && !out.includes(text)) out.push(text);
+    const el = n.parentElement;
+    const found = el?.closest('li, p, table, figure, dd') ?? el?.closest('div, section, td, th') ?? null;
+    // Never the whole root: a figure outside every block would borrow a label from anywhere in the panel.
+    const block = found !== null && found !== root && root.contains(found) ? found : null;
+    const text = (block ?? el ?? root).textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    if ((block === null || !LABEL.test(text)) && !out.includes(text)) out.push(text);
   }
   return out;
 }
