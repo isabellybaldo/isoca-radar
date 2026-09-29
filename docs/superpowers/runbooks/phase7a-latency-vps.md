@@ -206,9 +206,9 @@ if not: **STOP**; scanner logs (`docker compose --profile core logs --tail 50 sc
 
 25. Gate: the first minute mark of epoch 1 has 19 accounts at $1,000 (wait for the first minute boundary).
 ```bash
-cd /home/isoca/projects/cute-trading && sleep 90 && Q="(SELECT max(run_id) FROM runs WHERE service = 'scanner' AND mode = 'live')" && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*), min(equity), max(equity) FROM paper_marks WHERE run_id = $Q AND t_ms = (SELECT min(t_ms) FROM paper_marks WHERE run_id = $Q AND t_ms >= (SELECT start_ms FROM paper_epochs WHERE epoch = 1))"
+cd /home/isoca/projects/cute-trading && sleep 90 && Q="(SELECT max(run_id) FROM runs WHERE service = 'scanner' AND mode = 'live')" && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*), bool_and(equity = 1000) FROM paper_marks WHERE run_id = $Q AND t_ms = (SELECT min(t_ms) FROM paper_marks WHERE run_id = $Q AND t_ms >= (SELECT start_ms FROM paper_epochs WHERE epoch = 1))"
 ```
-→ expected: `19|1000|1000` (a few cents off on one or two accounts only if a trade executed in the first minute).
+→ expected: `19|t` (`19|f` only if a trade executed in the first minute: a few cents off on one or two accounts).
 if not: fewer than 19 = accounts missing: **STOP** and report.
 **STOP**
 
@@ -263,9 +263,9 @@ if not: `403` = the page wasn't same-origin (use the Radar tab itself); `503` = 
 
 33. (Only after step 32) The scanner applied it as epoch 2 within ~30 s.
 ```bash
-cd /home/isoca/projects/cute-trading && sleep 45 && docker compose --profile core logs --since 60s scanner 2>&1 | grep 'paper: reset' ; docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT epoch, cause, request_id FROM paper_epochs ORDER BY epoch" && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*), min(equity), max(equity) FROM paper_marks WHERE t_ms = (SELECT start_ms FROM paper_epochs WHERE epoch = 2)"
+cd /home/isoca/projects/cute-trading && sleep 45 && docker compose --profile core logs --since 60s scanner 2>&1 | grep 'paper: reset' ; docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT epoch, cause, request_id FROM paper_epochs ORDER BY epoch" && docker compose exec -T postgres psql -U ct_owner -d cute_trading -tAc "SELECT count(*), bool_and(equity = 1000) FROM paper_marks WHERE t_ms = (SELECT start_ms FROM paper_epochs WHERE epoch = 2)"
 ```
-→ expected: `paper: reset → epoch 2 (request 1)`, then `1|policies|` and `2|reset|1`, then `19|1000|1000`; a third console call now prints `429 {"error":"reset_daily_limit",…}`.
+→ expected: `paper: reset → epoch 2 (request 1)`, then `1|policies|` and `2|reset|1`, then `19|t`; a third console call now prints `429 {"error":"reset_daily_limit",…}`.
 if not: no `paper: reset` line after 60 s = the poller isn't running: scanner logs to the owner.
 
 34. No hour lost and compact healthy (run 3 h after step 27).
