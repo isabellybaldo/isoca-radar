@@ -185,6 +185,35 @@ async fn the_reset_pool_is_kept_as_migrated_and_refused_only_when_over_granted()
 }
 
 #[tokio::test]
+async fn before_migration_0009_the_epochs_are_empty_not_a_500() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    owner
+        .raw_exec("DROP TABLE paper_epochs, paper_reset_requests CASCADE")
+        .await
+        .unwrap();
+    let (app, _st) = common::app(&db).await;
+    let before = common::now();
+    let (status, v) = common::get(&app, "/api/paper/epochs").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        (
+            v["epochs"].clone(),
+            v["current"].clone(),
+            v["pending_request"].clone()
+        ),
+        (
+            serde_json::json!([]),
+            serde_json::json!(0),
+            serde_json::Value::Null
+        )
+    );
+    assert!(v["next_allowed_ms"].as_i64().unwrap() >= before, "{v}");
+    db.drop(owner).await;
+}
+
+#[tokio::test]
 async fn epochs_list_current_pending_and_next_allowed() {
     let Some((owner, db)) = common::fresh().await else {
         return;

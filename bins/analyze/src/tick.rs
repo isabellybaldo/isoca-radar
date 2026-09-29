@@ -588,7 +588,12 @@ async fn edge_inputs<C: CellData>(
         .collect();
     let ids: Vec<String> = env.accounts.iter().map(|(a, _)| a.clone()).collect();
     let marks = env.store.marks_with_prev(&ids, from, to).await?;
-    let epoch_starts = env.store.paper_epoch_starts().await?;
+    // Before migration 0009 there is no paper_epochs table: no epoch starts, one epoch.
+    let epoch_starts = if env.store.paper_ready().await? {
+        env.store.paper_epoch_starts().await?
+    } else {
+        Vec::new()
+    };
     // each run's policies, as the config part of its `sim` premise version (see `policies_of`)
     let sim: BTreeMap<i64, &str> = env
         .runs

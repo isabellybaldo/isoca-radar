@@ -147,9 +147,16 @@ pub async fn reset(
 }
 
 pub async fn epochs(State(st): State<AppState>) -> Result<Json<EpochsDto>, ApiError> {
-    let list = st.store.paper_epochs().await?;
-    let pending = st.store.pending_reset_request().await?;
-    let latest = st.store.latest_reset_request().await?;
+    // Before migration 0009 (no paper_epochs, no paper_reset_requests): epoch 0, nothing pending.
+    let (list, pending, latest) = if st.store.paper_ready().await? {
+        (
+            st.store.paper_epochs().await?,
+            st.store.pending_reset_request().await?,
+            st.store.latest_reset_request().await?,
+        )
+    } else {
+        (Vec::new(), None, None)
+    };
     Ok(Json(EpochsDto {
         current: list.last().map_or(0, |e| e.epoch),
         epochs: list

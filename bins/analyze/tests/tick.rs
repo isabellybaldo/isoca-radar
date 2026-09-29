@@ -1635,3 +1635,54 @@ async fn the_first_mark_of_a_new_epoch_counts_from_the_bankroll() {
         db.drop(owner).await;
     }
 }
+
+#[tokio::test]
+async fn before_migration_0009_edge_capture_has_no_epoch_starts_not_a_failed_tick() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    owner
+        .raw_exec("DROP TABLE paper_epochs, paper_reset_requests CASCADE")
+        .await
+        .unwrap();
+    let r = run(&owner, T0 - 3 * H).await;
+    owner
+        .insert_run_premises(&premises(r, "1+aa"))
+        .await
+        .unwrap();
+    write(
+        &owner,
+        vec![ep(
+            "a",
+            r,
+            "no_basket",
+            T0 - 2 * H,
+            Some(T0 - 2 * H + 1_000),
+        )],
+    )
+    .await;
+    paper(
+        &owner,
+        vec![p0(r, dec!(1000))],
+        vec![
+            mark(r, T0 - H + 10 * M, dec!(1010)),
+            mark(r, T0 - H + 20 * M, dec!(1003)),
+        ],
+    )
+    .await;
+    let rw = rw(&db).await;
+    Analyzer::new(rw.clone(), Duration::ZERO, "test", scenarios())
+        .await
+        .unwrap()
+        .tick(T0 + 30 * M)
+        .await
+        .unwrap();
+    assert_eq!(
+        cell(&body(&rw, "24h", "EDGE").await, CAPTURED, "ours"),
+        "-7",
+        "one epoch: 1010 → 1003. The first mark is skipped, never guessed: before 0009 \
+         paper_ready is false, so paper_accounts_now (the bankrolls) is empty too"
+    );
+    rw.close().await;
+    db.drop(owner).await;
+}
