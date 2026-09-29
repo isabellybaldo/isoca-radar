@@ -78,6 +78,7 @@ pub struct PositionDto {
     pub basis: Dec,
     pub returned: bool,
     pub event_title: Option<String>,
+    pub end_date: Option<String>,
 }
 
 impl From<PaperPosition> for PositionDto {
@@ -90,6 +91,7 @@ impl From<PaperPosition> for PositionDto {
             basis: Dec(p.basis),
             returned: p.returned,
             event_title: p.event_title,
+            end_date: p.end_date,
         }
     }
 }
@@ -146,6 +148,20 @@ fn decode_ledger_cursor(s: &str) -> Option<(i64, i64)> {
     Some((run.parse().ok()?, seq.parse().ok()?))
 }
 
+/// `?epoch=N` (Phase 7a §6): 0 or more; absent = the current epoch.
+fn epoch(q: &Params) -> Result<Option<i32>, ApiError> {
+    match params::opt_i64(q, "epoch", "bad_epoch")? {
+        None => Ok(None),
+        Some(n) => i32::try_from(n)
+            .ok()
+            .filter(|n| *n >= 0)
+            .map(Some)
+            .ok_or_else(|| {
+                ApiError::BadRequest("bad_epoch", "epoch must be 0 or more.".to_string())
+            }),
+    }
+}
+
 pub async fn accounts(State(st): State<AppState>) -> Result<Json<ItemsDto<AccountDto>>, ApiError> {
     let items = st
         .store
@@ -164,11 +180,23 @@ pub async fn equity(
     let q = params::query(q)?;
     let account_id = account(&q)?;
     let hours = params::hours(&q, 24)?;
-    let to_ms = now_ms();
+    let epoch = epoch(&q)?;
+    // an earlier epoch's window ends where the next one starts (its last point is its final
+    // equity); before migration 0009 there is no epoch table to read (paper_equity is empty then)
+    let to_ms = match epoch {
+        Some(n) if st.store.paper_ready().await? => st
+            .store
+            .paper_epochs()
+            .await?
+            .iter()
+            .find(|e| e.epoch > n)
+            .map_or_else(now_ms, |e| e.start_ms),
+        _ => now_ms(),
+    };
     let from_ms = to_ms - hours * 3_600_000;
     let points = st
         .store
-        .paper_equity(&account_id, from_ms, to_ms, None)
+        .paper_equity(&account_id, from_ms, to_ms, epoch)
         .await?
         .into_iter()
         .map(|p| EquityPointDto {
@@ -211,9 +239,10 @@ pub async fn ledger(
     };
     let limit = params::limit(&q)?;
     let hide_marks = params::flag(&q, "hide_marks")?;
+    let epoch = epoch(&q)?;
     let page = st
         .store
-        .paper_ledger_page(&account_id, before, limit, hide_marks, None)
+        .paper_ledger_page(&account_id, before, limit, hide_marks, epoch)
         .await?;
     Ok(Json(Page {
         items: page.rows.into_iter().map(Into::into).collect(),

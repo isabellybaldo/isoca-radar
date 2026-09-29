@@ -12,6 +12,7 @@ pub mod error;
 pub mod guard;
 pub mod health;
 pub mod integrity;
+pub mod ladder;
 pub mod paper;
 pub mod params;
 pub mod reset;
@@ -47,6 +48,9 @@ pub struct AppState {
     /// Phase 7a: the reset pool (paper_reset_rw, INSERT on paper_reset_requests only). None:
     /// POST /api/paper/reset answers 503 reset_disabled.
     pub reset: Option<Store>,
+    /// Phase 7a: the policies file's scenario latencies (POLICIES_PATH). None: unknown (every
+    /// rung's latency_ms is null).
+    pub scenarios: Option<Arc<Vec<::cards::body::ScenarioLat>>>,
     pub events: broadcast::Sender<StreamEvent>,
     pub stream_slots: Arc<Semaphore>,
     /// Flips to `true` on graceful shutdown; every open SSE stream watches this and ends itself
@@ -61,6 +65,7 @@ impl AppState {
         Self {
             store,
             reset: None,
+            scenarios: None,
             events,
             stream_slots: Arc::new(Semaphore::new(MAX_STREAMS)),
             shutdown_tx,
@@ -69,6 +74,11 @@ impl AppState {
 
     pub fn with_reset(mut self, reset: Option<Store>) -> Self {
         self.reset = reset;
+        self
+    }
+
+    pub fn with_scenarios(mut self, s: Option<Vec<::cards::body::ScenarioLat>>) -> Self {
+        self.scenarios = s.map(Arc::new);
         self
     }
 }
@@ -123,6 +133,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/paper/ledger", get(paper::ledger))
         .route("/api/paper/reset", post(reset::reset))
         .route("/api/paper/epochs", get(reset::epochs))
+        .route("/api/paper/ladder", get(ladder::ladder))
         .route("/api/cards", get(cards::list))
         .route("/api/cards/meta", get(cards::meta))
         .route("/api/stream", get(stream::sse))

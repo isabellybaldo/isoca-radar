@@ -23,6 +23,7 @@ services:
       API_BIND: 0.0.0.0:8081
       # Phase 7a §5.1: the reset pool (paper_reset_rw: INSERT on paper_reset_requests only)
       RESET_DATABASE_URL: postgres://paper_reset_rw:${RESET_RW_DB_PASSWORD:?set RESET_RW_DB_PASSWORD in .env}@postgres:5432/cute_trading
+      POLICIES_PATH: /etc/cute-trading/policies.toml
     depends_on:
       postgres:
         condition: service_healthy

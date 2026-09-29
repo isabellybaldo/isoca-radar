@@ -39,8 +39,27 @@ async fn real_main() -> anyhow::Result<()> {
             None
         }
     };
+    // Phase 7a §7.1: the ladder's latencies. Missing or unreadable: every rung's latency is null.
+    let scenarios = match std::fs::read_to_string(&cfg.policies_path) {
+        Ok(text) => match cards::scenarios::parse(&text) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("api: {}: {e}; ladder latencies are null", cfg.policies_path);
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "api: read {}: {e}; ladder latencies are null",
+                cfg.policies_path
+            );
+            None
+        }
+    };
     api::run(
-        api::AppState::new(store).with_reset(reset),
+        api::AppState::new(store)
+            .with_reset(reset)
+            .with_scenarios(scenarios),
         &cfg.bind,
         std::time::Duration::from_secs(15),
         shutdown(),

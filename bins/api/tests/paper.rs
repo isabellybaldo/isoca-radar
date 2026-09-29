@@ -62,11 +62,14 @@ async fn paper_endpoints_are_empty_lists_when_the_tables_are_missing() {
         assert_eq!(status, StatusCode::OK, "{uri}: {v}");
         assert_eq!(v["items"], serde_json::json!([]));
     }
-    let (status, v) = common::get(&app, &format!("/api/paper/equity?account={P0Q}")).await;
-    assert_eq!(
-        (status, v["points"].clone()),
-        (StatusCode::OK, serde_json::json!([]))
-    );
+    for q in ["", "&epoch=1"] {
+        let (status, v) = common::get(&app, &format!("/api/paper/equity?account={P0Q}{q}")).await;
+        assert_eq!(
+            (status, v["points"].clone()),
+            (StatusCode::OK, serde_json::json!([])),
+            "{q}"
+        );
+    }
     let (status, v) = common::get(&app, &format!("/api/paper/ledger?account={P0Q}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["items"], serde_json::json!([]));
@@ -222,5 +225,101 @@ async fn ledger_hides_minute_marks_on_request() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    db.drop(owner).await;
+}
+async fn epochs(owner: &Store, run_id: i64, starts: &[(i32, i64)]) {
+    for (e, s) in starts {
+        owner
+            .raw_exec(&format!(
+                "INSERT INTO paper_epochs (epoch, start_ms, cause, request_id, run_id, policies_sha256) \
+                 VALUES ({e}, {s}, 'policies', NULL, {run_id}, 'sha')"
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn equity_and_ledger_default_to_the_current_epoch_and_take_an_epoch() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    let live = common::run(&owner, "live").await;
+    let n = common::now();
+    account(&owner, live, P0, "P0-converter", "sp-idle").await;
+    mark(&owner, live, P0, n - 3 * 3_600_000, "1001").await;
+    mark(&owner, live, P0, n - 2 * 3_600_000, "1000").await;
+    mark(&owner, live, P0, n - 3_600_000, "1005").await;
+    for seq in 1..=3 {
+        ledger(&owner, live, P0, seq).await; // t = seq × 1 000
+    }
+    epochs(&owner, live, &[(1, 2_000), (2, n - 2 * 3_600_000)]).await;
+    let (app, _st) = common::app(&db).await;
+    let (_, eq) = common::get(&app, &format!("/api/paper/equity?account={P0Q}")).await;
+    assert_eq!(eq["points"].as_array().unwrap().len(), 2, "{eq}");
+    let (_, eq) = common::get(&app, &format!("/api/paper/equity?account={P0Q}&epoch=1")).await;
+    assert_eq!(
+        eq["to_ms"],
+        n - 2 * 3_600_000,
+        "an earlier epoch's window ends where the next begins"
+    );
+    assert_eq!(eq["points"][0]["equity"], "1001");
+    assert_eq!(eq["points"].as_array().unwrap().len(), 1);
+    let (_, l) = common::get(&app, &format!("/api/paper/ledger?account={P0Q}")).await;
+    assert_eq!(
+        l["items"],
+        serde_json::json!([]),
+        "no ledger row in epoch 2"
+    );
+    let (_, l) = common::get(&app, &format!("/api/paper/ledger?account={P0Q}&epoch=1")).await;
+    assert_eq!(l["items"].as_array().unwrap().len(), 2);
+    let (_, l) = common::get(&app, &format!("/api/paper/ledger?account={P0Q}&epoch=99")).await;
+    assert_eq!(l["items"], serde_json::json!([]));
+    for bad in ["-1", "x", "99999999999"] {
+        let (status, v) = common::get(
+            &app,
+            &format!("/api/paper/ledger?account={P0Q}&epoch={bad}"),
+        )
+        .await;
+        assert_eq!(
+            (status, v["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("bad_epoch")),
+            "{bad}"
+        );
+    }
+    db.drop(owner).await;
+}
+
+#[tokio::test]
+async fn positions_carry_the_markets_end_date() {
+    let Some((owner, db)) = common::fresh().await else {
+        return;
+    };
+    owner
+        .raw_exec(
+            "INSERT INTO events (event_id, slug, title, neg_risk_market_id, augmented, n_legs, first_seen_ms, last_seen_ms) \
+             VALUES ('ev1', 's', 'BTC above 100k on October 3?', NULL, false, 2, 1, 1); \
+             INSERT INTO legs (market_id, event_id, yes_token, no_token, status, fee_rate, fee_exponent, end_date, first_seen_ms, last_seen_ms) \
+             VALUES ('m1', 'ev1', 'y1', 'n1', 'live', 0.07, 1, '2026-10-03T12:00:00Z', 1, 1)",
+        )
+        .await
+        .unwrap();
+    let live = common::run(&owner, "live").await;
+    account(
+        &owner,
+        live,
+        "P0-converter/rung-0",
+        "P0-converter",
+        "rung-0",
+    )
+    .await;
+    owner
+        .raw_exec(r#"INSERT INTO paper_state (account_id, state, updated_ms) VALUES ('P0-converter/rung-0', '{"positions":[[{"market_id":"m1","yes_token":"y1","outcome":"no"},{"qty":"10","basis":"6"}]],"returned":[]}', 1)"#)
+        .await
+        .unwrap();
+    let (app, _st) = common::app(&db).await;
+    let (status, v) = common::get(&app, "/api/paper/positions").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["end_date"], "2026-10-03T12:00:00Z");
     db.drop(owner).await;
 }

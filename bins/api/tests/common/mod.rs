@@ -266,3 +266,14 @@ pub async fn post(
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
     )
 }
+
+/// The api with the repo's policies file (POLICIES_PATH in production).
+pub async fn app_with_policies(db: &TestDb) -> (Router, AppState) {
+    let ro = Store::connect_read_only(db.opts.clone(), 4, 5_000, Some("analyze_ro"))
+        .await
+        .expect("read-only pool");
+    let scenarios = cards::scenarios::parse(include_str!("../../../../config/policies.toml"))
+        .expect("repo policies");
+    let st = AppState::new(ro).with_scenarios(Some(scenarios));
+    (api::router(st.clone()), st)
+}

@@ -13,6 +13,9 @@ pub struct Config {
     /// Phase 7a §5.1: the reset pool's URL (paper_reset_rw); None when unset or empty (POST
     /// /api/paper/reset then answers 503).
     pub reset_database_url: Option<String>,
+    /// Phase 7a §7.1: the policies file the ladder reads its latencies from (the copy baked into
+    /// the shared image, as analyze uses).
+    pub policies_path: String,
 }
 
 impl fmt::Debug for Config {
@@ -26,6 +29,7 @@ impl fmt::Debug for Config {
                 "reset_database_url",
                 &self.reset_database_url.as_ref().map(|_| "<redacted>"),
             )
+            .field("policies_path", &self.policies_path)
             .finish()
     }
 }
@@ -64,12 +68,16 @@ impl Config {
             "API_STATEMENT_TIMEOUT_MS must be 100..=60000"
         );
         let reset_database_url = get("RESET_DATABASE_URL").filter(|s| !s.is_empty());
+        let policies_path = get("POLICIES_PATH")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/etc/cute-trading/policies.toml".to_string());
         Ok(Self {
             database_url,
             bind,
             max_conns,
             statement_timeout_ms,
             reset_database_url,
+            policies_path,
         })
     }
 }
@@ -139,5 +147,23 @@ mod tests {
         .unwrap();
         assert!(c.reset_database_url.is_some());
         assert!(!format!("{c:?}").contains("hunter3"));
+    }
+
+    #[test]
+    fn the_policies_path_defaults_to_the_baked_copy() {
+        let url = (
+            "DATABASE_URL",
+            "postgres://analyze_ro:pw@postgres/cute_trading",
+        );
+        assert_eq!(
+            cfg(&[url]).unwrap().policies_path,
+            "/etc/cute-trading/policies.toml"
+        );
+        assert_eq!(
+            cfg(&[url, ("POLICIES_PATH", "/tmp/p.toml")])
+                .unwrap()
+                .policies_path,
+            "/tmp/p.toml"
+        );
     }
 }
