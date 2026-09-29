@@ -59,3 +59,8 @@ export function fmtUtcDayMonth(ms: number): string {
   const d = new Date(ms);
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
 }
+
+/** "2026-09-29 19:58 UTC": an epoch start, a next-allowed time. */
+export function fmtUtcDayHm(ms: number): string {
+  return `${isoDay(ms)} ${fmtUtcHm(ms)} UTC`;
+}
