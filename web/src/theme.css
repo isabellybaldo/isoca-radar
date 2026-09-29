@@ -309,3 +309,34 @@ ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 .resetform input { font: inherit; background: var(--chip); color: var(--fg); border: 2px solid var(--line); padding: 0 4px; width: 9ch; }
 .resetform button { font-family: var(--px); font-size: 7px; padding: 5px 8px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; }
 .resetform button:disabled { opacity: 0.4; cursor: default; }
+/* Spec 7a §9.1: the explain panel. Docked at ≥ 1,500 px (app + 360 px panel centred as a pair); below,
+   a drawer that stops 28 px short of the right edge so the tab stays visible. */
+.shell { display: flex; justify-content: center; align-items: flex-start; gap: 16px; }
+.shell > .app { flex: 0 1 1440px; min-width: 0; margin: 0; }
+.explain-tab { position: fixed; right: 0; top: 50%; transform: translateY(-50%); writing-mode: vertical-rl; font-family: var(--px); font-size: 8px; letter-spacing: 1px; padding: 10px 5px; border: 2px solid var(--line); border-right: 0; background: var(--chip); color: var(--fg); z-index: 11; cursor: pointer; }
+.explain-tab[aria-expanded='true'] { background: var(--accent); color: var(--accentfg); }
+.explain-tab:focus-visible, .explain-q:focus-visible, .explain-close:focus-visible, .explain-sel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* D-06: docked and open, the tab leaves the fixed right edge and joins the row, flush with the panel's
+   left border (margin-right cancels the .shell gap) like a folder tab: it never sits over the panel. */
+.explain-tab[data-dock] { position: sticky; top: 40px; transform: none; margin-top: 24px; margin-right: -16px; border-width: 3px 0 3px 3px; z-index: auto; }
+.explain { background: var(--card); border: 3px solid var(--line); padding: 0 12px 12px; display: grid; gap: 8px; align-content: start; overflow-y: auto; }
+.explain:focus { outline: none; }
+.explain[data-mode='dock'] { flex: 0 0 360px; position: sticky; top: 16px; max-height: calc(100vh - 32px); box-shadow: 6px 6px 0 var(--line); }
+.explain[data-mode='drawer'] { position: fixed; top: 0; right: 28px; bottom: 0; width: min(360px, calc(100vw - 28px)); z-index: 10; box-shadow: -6px 0 0 var(--line); }
+/* The head mirrors the app's top bar: a band across the panel, not a box inside it (D-15). */
+.explain-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 -12px; padding: 10px 12px; background: var(--bar); border-bottom: 3px solid var(--line); }
+.explain-head h2 { font-family: var(--px); font-size: 9px; }
+.explain-close, .explain-sel button { font: inherit; background: none; border: 0; color: var(--dim); text-decoration: underline; cursor: pointer; padding: 0; }
+.explain-sel { color: var(--dim); }
+/* D-15: questions are folds separated by dashed rules, never framed boxes. */
+.explain-qs { list-style: none; display: grid; }
+.explain-qs > li + li { border-top: 1px dashed var(--line2); }
+.explain-q { width: 100%; text-align: left; font-family: var(--body); font-weight: 600; font-size: 15px; color: var(--fg); border: 0; background: none; padding: 8px 0; cursor: pointer; }
+.explain-q::before { content: '▸ '; color: var(--accent); }
+.explain-q[aria-expanded='true']::before { content: '▾ '; }
+.explain-a { padding: 0 0 10px; display: grid; gap: 6px; min-width: 0; }
+/* D-15: the hero keeps its drawing and folds but drops their frames inside the panel's box. */
+.explain .ll-svg { border: 0; }
+.explain .fold { border: 0; border-top: 1px dashed var(--line2); }
+.explain .fold > summary { padding: 4px 0; }
+.explain .fold-body { padding: 4px 0 8px; }

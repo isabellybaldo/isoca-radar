@@ -24,6 +24,7 @@ describe('App shell', () => {
     }
     expect(screen.getByText('RECONNECTING')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Toggle theme' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /EXPLAIN/ })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('This page does not exist. Neither does free money.')).toBeInTheDocument();
   });
 
