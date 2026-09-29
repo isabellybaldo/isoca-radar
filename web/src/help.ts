@@ -1,5 +1,9 @@
 import { FLAG_WORDS } from './lib/flags';
 
+/** What an episode is, in one sentence: the Radar (?) and the explain panel say it the same way. */
+export const EPISODE_DEF =
+  'One stretch of time in which buying a full basket of one event (every YES, or every NO) cost less than it pays out, after taker fees.';
+
 /** (?) copy for every section of every page (spec §8.3): short, plain, deadpan but clear. */
 export interface HelpText {
   title: string;
@@ -13,7 +17,7 @@ export const HELP = {
   },
   open: {
     title: 'What is an episode?',
-    text: 'One stretch of time in which buying a full basket of one event (every YES, or every NO) cost less than it pays out, after taker fees. It opens on the first order-book update where that is true and closes on the first where it is not. Open ones sit here while they last, which is usually not long.',
+    text: `${EPISODE_DEF} It opens on the first order-book update where that is true and closes on the first where it is not. Open ones sit here while they last, which is usually not long.`,
   },
   today: {
     title: 'What does today count?',

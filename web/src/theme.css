@@ -343,3 +343,19 @@ ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 
 /* Spec 7a §9.3: rows that set the explain selection. */
 tr.pick { cursor: pointer; }
+
+/* Spec 7a §9.2: payoff structure (b) and the episode duration bars. No borders of their own: they sit in the panel's box. */
+.payoff { margin: 0; }
+.payoff table { width: auto; }
+.payoff td { text-align: center; min-width: 2ch; font-family: var(--big); font-size: 20px; }
+.payoff td.nopay { color: var(--dim); }
+.payoff .broken { color: var(--salmon); }
+.payoff tr.basket th, .payoff tr.basket td { border-top: 2px solid var(--line2); }
+.explain .fig { font-family: var(--big); font-size: 20px; }
+.dbars { display: grid; gap: 6px; margin: 0; }
+.dbars .db-svg { display: block; width: 100%; height: 14px; background: var(--bg); }
+.dbars .db-bar { fill: var(--teal); }
+.dbars .db-bar.example { fill: var(--line2); }
+.dbars .db-bar.open { fill: var(--rose); }
+.dbars .db-tick { fill: var(--fg); }
+.db-label { margin: 2px 0 0; font-size: 13px; color: var(--dim); }
