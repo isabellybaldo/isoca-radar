@@ -13,6 +13,12 @@ pub const BUSY_DETAIL: &str = "The database is thinking. Try again in a moment."
 pub enum ApiError {
     /// 400: (code, detail)
     BadRequest(&'static str, String),
+    /// 403: (code, detail)
+    Forbidden(&'static str, String),
+    /// 409: (code, detail)
+    Conflict(&'static str, String),
+    /// 429: (code, detail)
+    TooMany(&'static str, String),
     /// 404
     NotFound,
     /// 503: (code, detail)
@@ -37,6 +43,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, detail) = match self {
             ApiError::BadRequest(code, detail) => (StatusCode::BAD_REQUEST, code, detail),
+            ApiError::Forbidden(code, detail) => (StatusCode::FORBIDDEN, code, detail),
+            ApiError::Conflict(code, detail) => (StatusCode::CONFLICT, code, detail),
+            ApiError::TooMany(code, detail) => (StatusCode::TOO_MANY_REQUESTS, code, detail),
             ApiError::NotFound => (
                 StatusCode::NOT_FOUND,
                 "not_found",

@@ -567,3 +567,29 @@ async fn health_rtt_columns_round_trip_and_upsert() {
     ro.close().await;
     db.drop(store).await;
 }
+
+#[test]
+fn paper_epochs_travel_with_the_paper_rows() {
+    let row = PaperEpochRow {
+        epoch: 1,
+        start_ms: 5,
+        cause: "reset".into(),
+        request_id: Some(3),
+        run_id: 1,
+        policies_sha256: "s".into(),
+    };
+    let mut a = Batch {
+        paper_epochs: vec![row.clone()],
+        ..Batch::default()
+    };
+    assert_eq!((a.paper_rows(), a.rows()), (1, 1));
+    let taken = a.take_paper();
+    assert_eq!(taken.paper_epochs, vec![row.clone()]);
+    assert!(a.is_empty());
+    let mut b = Batch::default();
+    b.extend_paper(taken);
+    assert_eq!(b.paper_epochs, vec![row.clone()]);
+    let singles = b.into_singles();
+    assert_eq!(singles.len(), 1);
+    assert_eq!(singles[0].paper_epochs, vec![row]);
+}

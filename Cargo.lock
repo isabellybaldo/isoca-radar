@@ -117,6 +117,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "cards",
  "futures-util",
  "rust_decimal",
  "rust_decimal_macros",
@@ -515,6 +516,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "toml",
 ]
 
 [[package]]

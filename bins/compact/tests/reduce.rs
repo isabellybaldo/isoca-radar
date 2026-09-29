@@ -3,6 +3,7 @@ mod fixture;
 use compact::reduce::Reducer;
 use compact::rows::*;
 use fixture::*;
+use tape::line::{Ctl, Line};
 
 fn tob(
     ts: i64,
@@ -1588,4 +1589,33 @@ fn a_checkpoint_after_the_hour_end_carries_the_next_boundary() {
     let json = serde_json::to_string(&st).unwrap();
     let back = Reducer::from_state(rcfg(), serde_json::from_str(&json).unwrap()).unwrap();
     assert_eq!(back.state(), st);
+}
+
+#[test]
+fn a_paper_reset_line_changes_no_row() {
+    let r = rec("u1", T0, &[("e1", &["y1", "y2"])], &[("e1", 0)]);
+    let base = vec![
+        uni(T0 + 1_000, &r),
+        frame(
+            T0 + 2_000,
+            0,
+            book("y1", T0 + 1_990, &[("0.40", "10")], &[("0.45", "5")]),
+        ),
+    ];
+    let mut with = base.clone();
+    with.push(Line {
+        recv_ts_us: (T0 + 3_000) * 1000,
+        shard: 0,
+        raw: None,
+        ctl: Some(Ctl::PaperReset { t: T0 + 2_999 }),
+    });
+    let reduce = |lines: &[Line]| {
+        let mut red = Reducer::new(rcfg());
+        let mut s = VecSink::default();
+        red.begin_hour(T0, vec![]);
+        run(&mut red, lines, std::slice::from_ref(&r), &mut s);
+        red.end_hour(&mut s).unwrap();
+        s
+    };
+    assert_eq!(reduce(&base), reduce(&with));
 }

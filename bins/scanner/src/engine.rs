@@ -196,9 +196,11 @@ pub struct Engine {
     issue_throttle: HashMap<&'static str, HashMap<String, IssueThrottle>>,
     /// The paper trader (S3c), fed by the S3b call contract. None = scanner only.
     paper: Option<PaperTrader>,
-    /// The latest input instant the trader has been driven to: frame receive times, and the
-    /// instants of `on_resolution` and `paper_close` (all inputs, so replay sees the same). The
-    /// paper trader's open clock never runs behind it (see `open_ctx`).
+    /// The paper clock: the latest input instant the trader has been driven to (frame receive
+    /// times, `on_resolution`, `paper_close`, a reset's start). Spec 7a §4.2: EVERY trader entry
+    /// point is driven at max(its own time, this), so no row of a new epoch is ever stamped
+    /// before its start; outside a reset this changes nothing, because everything due at or
+    /// before this clock already ran at the frame that set it.
     last_recv_ms: i64,
     /// Spec §5.4/§8.2: skip a detector's depth walk when its top-of-book gate is false and no
     /// episode is open for its key (S3a-2). Always on in live and replay. Tests and the bench turn
@@ -736,14 +738,15 @@ impl Engine {
         // never existed (live smoke 2026-09-25). See `resolve_pending`.
         let mut frame_tokens: Vec<String> = Vec::new();
         self.last_recv_ms = self.last_recv_ms.max(recv_ms);
+        let clock = self.last_recv_ms;
         // S3b call contract: work due at or before this frame runs on the books as they were
-        // just BEFORE it (the state at its due time).
+        // just BEFORE it (the state at its due time). Spec 7a §4.2: at the paper clock.
         if let Some(t) = self.paper.as_mut() {
             let books = EngineBooks {
                 token_ix: &self.token_ix,
                 groups: &self.groups,
             };
-            paper_outs(t.on_frame(recv_ms, &books), &mut out);
+            paper_outs(t.on_frame(clock, &books), &mut out);
         }
         for ev in events {
             match ev {
@@ -1631,13 +1634,54 @@ impl Engine {
         self.paper.as_ref().map(PaperTrader::state)
     }
 
+    /// The paper clock (spec 7a §4.2): the instant a live reset closes at.
+    pub fn paper_clock(&self) -> i64 {
+        self.last_recv_ms
+    }
+
+    /// Spec 7a §4.2: a start-time epoch starts the paper clock at `start_ms` (never i64::MIN,
+    /// review C3). Never moves the clock back.
+    pub fn seed_paper_clock(&mut self, start_ms: i64) {
+        self.last_recv_ms = self.last_recv_ms.max(start_ms);
+    }
+
+    /// Spec 7a §4.2: a paper reset at `t_ms` (live: the paper clock, captured as
+    /// `Ctl::PaperReset { t }`; replay: that payload). Closes the trader at t = max(t_ms, paper
+    /// clock) through `paper_close` (conversions complete, pending intents release, unwinds and
+    /// markouts drop, every account marks), resets every account in place, then marks every
+    /// account at `t + 1`, the epoch's start, which becomes the paper clock. Returns
+    /// (start_ms, every row) for ONE `WriterMsg::PaperReset`; None without a trader.
+    pub fn paper_reset(&mut self, t_ms: i64) -> Option<(i64, Vec<SimOut>)> {
+        self.paper.as_ref()?;
+        let mut rows: Vec<SimOut> = self
+            .paper_close(t_ms)
+            .into_iter()
+            .filter_map(|o| match o {
+                Out::Paper(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        let start_ms = self.last_recv_ms + 1;
+        let tr = self.paper.as_mut()?;
+        let books = EngineBooks {
+            token_ix: &self.token_ix,
+            groups: &self.groups,
+        };
+        tr.reset();
+        rows.extend(tr.mark_now(start_ms, &books));
+        self.last_recv_ms = start_ms;
+        Some((start_ms, rows))
+    }
+
     /// Shutdown at `t_ms` (live: the Ctl::Shutdown instant; replay: the same line, or the last
     /// input). S3b contract: `close` must follow `on_frame(t_ms)`, so work due at or before the
     /// close instant first runs at its own due time; then pending conversions complete at
     /// `t_ms`, other pending work is dropped, and every account marks.
     pub fn paper_close(&mut self, t_ms: i64) -> Vec<Out> {
         let mut out = Vec::new();
+        // spec 7a §4.2: at the paper clock, never before it
         self.last_recv_ms = self.last_recv_ms.max(t_ms);
+        let t_ms = self.last_recv_ms;
         if let Some(t) = self.paper.as_mut() {
             let books = EngineBooks {
                 token_ix: &self.token_ix,
@@ -1684,14 +1728,15 @@ impl Engine {
             ));
         }
         self.last_recv_ms = self.last_recv_ms.max(t_ms);
+        let clock = self.last_recv_ms; // spec 7a §4.2: at the paper clock, never before it
         if let Some(t) = self.paper.as_mut() {
             let books = EngineBooks {
                 token_ix: &self.token_ix,
                 groups: &self.groups,
             };
-            paper_outs(t.on_frame(t_ms, &books), &mut out);
+            paper_outs(t.on_frame(clock, &books), &mut out);
             paper_outs(
-                t.on_resolution(t_ms, market_id, payout_yes, payout_no, &books),
+                t.on_resolution(clock, market_id, payout_yes, payout_no, &books),
                 &mut out,
             );
         }

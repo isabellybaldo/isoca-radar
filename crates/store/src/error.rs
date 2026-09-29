@@ -22,6 +22,15 @@ impl StoreError {
         }
     }
 
+    /// True for a unique-constraint violation (SQLSTATE 23505): e.g. a second reset request on
+    /// the same UTC day (spec 7a §4.1).
+    pub fn is_unique_violation(&self) -> bool {
+        match self {
+            StoreError::Db(sqlx::Error::Database(e)) => e.code().is_some_and(|c| c == "23505"),
+            _ => false,
+        }
+    }
+
     /// True when the database is busy or unreachable, so the api answers 503 ("try again"):
     /// a statement timeout (57014), an admin shutdown/crash (57P*), a connection failure (08*),
     /// too many connections (53300), pool exhaustion, or a broken socket.

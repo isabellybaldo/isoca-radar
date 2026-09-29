@@ -10,6 +10,19 @@ use std::collections::BTreeMap;
 
 pub const CAP_USD: i64 = 100;
 pub const HEADLINE: &str = "sp-idle";
+/// Phase 7a (spec 2026-09-29 §2): the latency ladder, fastest first; each is a P0-converter
+/// account at fee 0. `ladder::break_even` interpolates between these only.
+pub const LADDER: [&str; 6] = [
+    "rung-0",
+    "rung-25",
+    "colo-idle",
+    "rung-100",
+    "rung-200",
+    "sp-idle",
+];
+/// Drawn beside the ladder, never interpolated: variable latency (sp-burst) and a sensitivity
+/// check that ignores secondsDelay (sp-idle-nodelay).
+pub const EXTRAS: [&str; 2] = ["sp-burst", "sp-idle-nodelay"];
 pub const THIN_EDGE_N: i64 = 10;
 pub const ON_TABLE: &str = "edge on the table";
 pub const UPPER_BOUND: &str = "upper bound: assumes first-in-line execution; CLOB queue ignored";

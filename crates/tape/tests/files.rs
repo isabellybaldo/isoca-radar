@@ -105,3 +105,19 @@ fn a_bad_capture_line_is_an_error_naming_the_file() {
     assert!(format!("{e:#}").contains("bad capture line in"), "{e:#}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_paper_reset_line_round_trips_with_its_payload() {
+    let l = Line {
+        recv_ts_us: 7_000,
+        shard: 0,
+        raw: None,
+        ctl: Some(Ctl::PaperReset { t: 6 }),
+    };
+    let json = serde_json::to_string(&l).unwrap();
+    assert_eq!(
+        json,
+        r#"{"recv_ts_us":7000,"shard":0,"ctl":{"kind":"paper_reset","t":6}}"#
+    );
+    assert_eq!(serde_json::from_str::<Line>(&json).unwrap(), l);
+}

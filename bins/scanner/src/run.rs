@@ -71,6 +71,24 @@ pub fn secs_to_ms_saturating(secs: u64) -> i64 {
     i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000)
 }
 
+/// `VmHWM` (peak resident set) in kB from a `/proc/<pid>/status` text; None when absent.
+pub fn vm_hwm_kb(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+}
+
+/// This process's peak RSS (Linux only; None elsewhere, e.g. the Windows PC). Spec 7a §3's cost
+/// gate reads it from `scanner replay --dry-run`, the compact bench pattern.
+pub fn peak_rss_kb() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .as_deref()
+        .and_then(vm_hwm_kb)
+}
+
 /// Graceful-stop budget for `run_live` from the shutdown signal (S3a). With END_RUN_TIMEOUT for
 /// the `runs` exit row, the whole stop fits compose's 30 s stop_grace_period.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
@@ -137,6 +155,76 @@ pub fn oversize_row(run_id: i64, ts_ms: i64, key: &str, tokens: usize) -> Integr
             shards::MAX_UNIT_TOKENS
         )),
     }
+}
+
+/// Spec 7a §4.2 (review C3): a request pending at start builds a fresh trader, never the saved
+/// accounts; otherwise `restore_trader` (a policies epoch is fresh through it, with its log line).
+fn start_trader(
+    p: &Policies,
+    saved: &[store::PaperStateRow],
+    start: paper::StartEpoch,
+) -> anyhow::Result<PaperTrader> {
+    match start {
+        paper::StartEpoch::Reset { .. } => PaperTrader::new(p.sim.clone()).context("paper trader"),
+        paper::StartEpoch::Policies | paper::StartEpoch::Continue => {
+            paper::restore_trader(p, saved)
+        }
+    }
+}
+
+/// Spec 7a §4.2: a start-time epoch (a request pending at start, new policies, or an empty
+/// paper_state). The trader is already fresh; the paper clock starts at `start_ms` (never
+/// i64::MIN, review C3) and the epoch row goes with an immediate `paper_state` save as one batch.
+/// No close rows: the previous run's shutdown closed. None for a plain restart.
+fn start_batch(
+    engine: &mut Engine,
+    p: &Policies,
+    run_id: i64,
+    resets: &mut paper::ResetTracker,
+    start: paper::StartEpoch,
+    start_ms: i64,
+) -> anyhow::Result<Option<Batch>> {
+    let (cause, request_id) = match start {
+        paper::StartEpoch::Continue => return Ok(None),
+        paper::StartEpoch::Policies => (paper::Cause::Policies, None),
+        paper::StartEpoch::Reset { request_id } => {
+            resets.accept(&[request_id]);
+            (paper::Cause::Reset, Some(request_id))
+        }
+    };
+    let Some(st) = engine.paper_state() else {
+        return Ok(None);
+    };
+    engine.seed_paper_clock(start_ms);
+    let e = resets.open(start_ms, cause, request_id, true);
+    paper::epoch_batch(run_id, p, &e, Vec::new(), &st, start_ms).map(Some)
+}
+
+/// Spec 7a §4.2: apply reset request `request_id` now. `t` = the paper clock (never behind the
+/// wall clock, so never i64::MIN) is captured first as `Ctl::PaperReset { t }`, so replay resets
+/// at the same instant; the close rows, the epoch row, the `mark_now` rows and a `paper_state`
+/// save stamped `wall_ms` come back as ONE batch for `WriterMsg::PaperReset`.
+fn reset_batch(
+    engine: &mut Engine,
+    io: &Io,
+    p: &Policies,
+    resets: &mut paper::ResetTracker,
+    request_id: i64,
+    wall_ms: i64,
+) -> anyhow::Result<Option<Batch>> {
+    if engine.paper().is_none() {
+        return Ok(None);
+    }
+    let t = engine.paper_clock().max(wall_ms);
+    io.ctl(0, Ctl::PaperReset { t }, t);
+    let Some((start_ms, rows)) = engine.paper_reset(t) else {
+        return Ok(None);
+    };
+    let Some(st) = engine.paper_state() else {
+        return Ok(None);
+    };
+    let e = resets.open(start_ms, paper::Cause::Reset, Some(request_id), false);
+    paper::epoch_batch(io.run_id, p, &e, rows, &st, wall_ms).map(Some)
 }
 
 fn new_run(cfg_hash: &str, mode: &str) -> NewRun {
@@ -625,11 +713,20 @@ async fn run_live(
     );
     // Paper trader (S3c): restore the live accounts from paper_state, register this run's
     // accounts (pre-registration, spec §11) before any other paper row, start the resolver.
-    // Replay never touches paper_state.
-    let trader = match policies {
+    // Replay never touches paper_state. Phase 7a §4.2: the epoch status is read ONCE here; the
+    // loop then keeps it in memory.
+    let (trader, start, status) = match policies {
         Some(p) => {
             let saved = store.load_paper_state().await?;
-            let t = paper::restore_trader(p, &saved)?;
+            let status = store.epoch_status().await?;
+            let pending: Vec<i64> = store
+                .reset_requests_after(status.last_applied.unwrap_or(0))
+                .await?
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            let start = paper::start_epoch(p, &saved, &pending);
+            let t = start_trader(p, &saved, start)?;
             let accounts = Batch {
                 paper_accounts: paper::account_rows(run_id, p),
                 ..Batch::default()
@@ -638,9 +735,16 @@ async fn run_live(
                 .send(WriterMsg::Paper(Box::new(accounts)))
                 .await
                 .context("writer gone")?;
-            Some(t)
+            (Some(t), start, status)
         }
-        None => None,
+        None => (
+            None,
+            paper::StartEpoch::Continue,
+            store::EpochStatus {
+                current: 0,
+                last_applied: None,
+            },
+        ),
     };
     let (held_tx, held_rx) = watch::channel(Vec::<String>::new());
     let (resolved_tx, mut resolved_rx) = mpsc::channel::<Resolution>(1024);
@@ -856,6 +960,37 @@ async fn run_live(
     if let Some(t) = trader {
         engine.set_paper(t);
     }
+    let mut resets = paper::ResetTracker::new(status.current, status.last_applied);
+    if let Some(p) = policies
+        && let Some(b) = start_batch(&mut engine, p, run_id, &mut resets, start, now_ms())?
+    {
+        writer_tx
+            .send(WriterMsg::PaperReset(Box::new(b)))
+            .await
+            .context("writer gone")?;
+    }
+    // Phase 7a §4.2: reset requests, polled off the engine loop, seeded with the request a
+    // start-time epoch just applied (review focus 4) so it is never forwarded again.
+    let (reset_tx, mut reset_rx) = mpsc::channel::<Vec<i64>>(16);
+    let reset_task = if engine.paper().is_some() {
+        let s = store.clone();
+        Some(tokio::spawn(paper::run_reset_poller(
+            move |after: i64| {
+                let s = s.clone();
+                async move {
+                    s.reset_requests_after(after)
+                        .await
+                        .map(|v| v.into_iter().map(|r| r.id).collect::<Vec<i64>>())
+                }
+            },
+            resets.last_applied().unwrap_or(0),
+            paper::RESET_POLL_EVERY,
+            reset_tx,
+        )))
+    } else {
+        drop(reset_tx); // reset_rx then yields None, which disables its select arm
+        None
+    };
     // Unique across runs AND within a run (F3): run ids are unique, so a warm start that reuses
     // an earlier `taken_ms` in a new process can never overwrite a previous run's record.
     let mut universe_seq: u64 = u64::try_from(run_id).unwrap_or(0).saturating_mul(1_000_000);
@@ -1002,6 +1137,20 @@ async fn run_live(
                 let outs = engine.on_resolution(t, &r.market_id, r.payout_yes, r.payout_no);
                 if let Err(e) = io.route(&mut engine, outs).await { break Err(e) }
             }
+            Some(ids) = reset_rx.recv() => {
+                // Phase 7a §4.2: new requests; several collapse into one epoch (the highest id)
+                if let (Some(p), Some(request_id)) = (policies, resets.accept(&ids)) {
+                    match reset_batch(&mut engine, &io, p, &mut resets, request_id, now_ms()) {
+                        Ok(Some(b)) => {
+                            if writer_tx.send(WriterMsg::PaperReset(Box::new(b))).await.is_err() {
+                                break Err(anyhow::anyhow!("writer gone"));
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => eprintln!("paper: reset not written: {e:#}"),
+                    }
+                }
+            }
             _ = save_tick.tick() => {
                 // Queued behind every row already routed, so it lands in the same or a later batch.
                 if let (Some(st), Some(p)) = (engine.paper_state(), policies) {
@@ -1043,6 +1192,10 @@ async fn run_live(
     refresher_task.abort();
     // No resolution may arrive after the Shutdown line below (replay must see what live saw).
     if let Some(r) = &resolver_task {
+        r.abort();
+    }
+    // …and no reset either
+    if let Some(r) = &reset_task {
         r.abort();
     }
     let t = now_ms();
@@ -1183,6 +1336,7 @@ pub async fn replay_cmd(
             .context("paper trader")
     };
     if dry_run {
+        let started = Instant::now();
         let mut eps: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut paper_rows = 0_u64;
         let stats = replay_dir_paper_with(
@@ -1198,10 +1352,12 @@ pub async fn replay_cmd(
             },
         )?;
         println!(
-            "frames {} parse_errors {} episodes {} paper_rows {paper_rows}",
+            "frames {} parse_errors {} episodes {} paper_rows {paper_rows} wall_ms {} peak_rss_kb {}",
             stats.frames,
             stats.parse_errors,
-            eps.len()
+            eps.len(),
+            started.elapsed().as_millis(),
+            peak_rss_kb().map_or_else(|| "n/a".to_string(), |k| k.to_string())
         );
         return Ok(());
     }
@@ -1273,6 +1429,23 @@ pub async fn replay_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_hwm_is_read_from_a_proc_status_text() {
+        let status = "Name:	scanner
+VmPeak:	  900 kB
+VmHWM:	  123456 kB
+VmRSS:	 100 kB
+";
+        assert_eq!(vm_hwm_kb(status), Some(123_456));
+        assert_eq!(
+            vm_hwm_kb(
+                "Name:	x
+"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn percentiles_us_sorts_then_indexes_with_integer_math() {
@@ -1494,5 +1667,204 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), io.resolve_hint.notified())
             .await
             .expect("the hint is stored as a permit for the resolver");
+    }
+
+    fn test_ctx() -> EngineCtx {
+        EngineCtx {
+            run_id: 9,
+            source: "live".into(),
+            scanner_version: "t".into(),
+            config_hash: "c".into(),
+            gap_ms: 30_000,
+            stale_lag_ms: 500,
+            suspect_window_ms: 60_000,
+            l1_suspect_window_ms: 3_600_000,
+            drift_settle_ms: 2_000,
+            issue_throttle_ms: 5_000,
+        }
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn repo_paper_engine() -> (Policies, Engine) {
+        let p = paper::parse_policies(include_str!("../../../config/policies.toml")).unwrap();
+        let mut e = Engine::new(test_ctx());
+        e.set_paper(PaperTrader::new(p.sim.clone()).unwrap());
+        (p, e)
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_start_time_epoch_seeds_the_clock_and_writes_its_row_with_the_first_save() {
+        let (p, mut e) = repo_paper_engine();
+        let n = p.sim.accounts.len();
+        let mut resets = paper::ResetTracker::new(0, None);
+        let b = start_batch(
+            &mut e,
+            &p,
+            9,
+            &mut resets,
+            paper::StartEpoch::Policies,
+            50_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            b.paper_epochs,
+            vec![store::PaperEpochRow {
+                epoch: 1,
+                start_ms: 50_000,
+                cause: "policies".into(),
+                request_id: None,
+                run_id: 9,
+                policies_sha256: p.sha256.clone(),
+            }]
+        );
+        assert!(b.paper_state.len() == n && b.paper_state.iter().all(|s| s.updated_ms == 50_000));
+        assert!(
+            b.paper_ledger.is_empty() && b.paper_marks.is_empty(),
+            "the previous run's shutdown already closed: no close rows"
+        );
+        assert_eq!(
+            e.paper_clock(),
+            50_000,
+            "never the i64::MIN clock (review C3)"
+        );
+
+        let (p, mut e) = repo_paper_engine();
+        let mut resets = paper::ResetTracker::new(3, Some(4));
+        let b = start_batch(
+            &mut e,
+            &p,
+            9,
+            &mut resets,
+            paper::StartEpoch::Reset { request_id: 7 },
+            60_000,
+        )
+        .unwrap()
+        .unwrap();
+        let row = &b.paper_epochs[0];
+        assert_eq!(
+            (row.epoch, row.cause.as_str(), row.request_id),
+            (4, "reset", Some(7))
+        );
+        assert_eq!(resets.last_applied(), Some(7));
+
+        let (p, mut e) = repo_paper_engine();
+        assert!(
+            start_batch(
+                &mut e,
+                &p,
+                9,
+                &mut resets,
+                paper::StartEpoch::Continue,
+                70_000
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(e.paper_clock(), i64::MIN, "a plain restart seeds nothing");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_request_pending_at_start_builds_a_fresh_trader_never_the_saved_accounts() {
+        let p = paper::parse_policies(include_str!("../../../config/policies.toml")).unwrap();
+        let fresh = PaperTrader::new(p.sim.clone()).unwrap().state();
+        let mut st = fresh.clone();
+        st.accounts[0].cash = rust_decimal::Decimal::from(900);
+        // saved under the CURRENT sha: without the request this is a plain restart
+        let saved = paper::state_batch(&st, 5, &p.sha256).unwrap().paper_state;
+        assert_eq!(
+            start_trader(&p, &saved, paper::StartEpoch::Continue)
+                .unwrap()
+                .state(),
+            st,
+            "the contrast: a plain restart restores"
+        );
+        let start = paper::start_epoch(&p, &saved, &[6, 7]);
+        assert_eq!(start, paper::StartEpoch::Reset { request_id: 7 });
+        let t = start_trader(&p, &saved, start).unwrap();
+        assert_eq!(t.state(), fresh, "PaperTrader::new, never restore");
+
+        let mut e = Engine::new(test_ctx());
+        e.set_paper(t);
+        let now = 123_456; // the injected now_ms()
+        let mut resets = paper::ResetTracker::new(2, Some(5));
+        let b = start_batch(&mut e, &p, 9, &mut resets, start, now)
+            .unwrap()
+            .unwrap();
+        assert!(
+            b.paper_ledger.is_empty() && b.paper_marks.is_empty() && b.paper_fills.is_empty(),
+            "no close rows at start"
+        );
+        let row = &b.paper_epochs[0];
+        assert_eq!((row.epoch, row.start_ms, row.request_id), (3, now, Some(7)));
+        assert_eq!(
+            e.paper_clock(),
+            now,
+            "the paper clock is seeded with start_ms"
+        );
+        assert_eq!(
+            resets.last_applied(),
+            Some(7),
+            "the poller is seeded with it"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn a_reset_is_one_batch_captured_at_the_paper_clock_and_saved_at_the_wall_clock() {
+        let (writer, _wrx) = mpsc::channel(16);
+        let (capture, mut crx) = mpsc::channel(16);
+        let (recheck, _rrx) = mpsc::channel(16);
+        let (resnap, _srx) = mpsc::channel(16);
+        let io = Io {
+            writer,
+            capture,
+            recheck,
+            resnap,
+            refresh: Arc::new(tokio::sync::Notify::new()),
+            metrics: Arc::new(Metrics::default()),
+            run_id: 9,
+            l1_window_ms: 1,
+            suspect_window_ms: 1,
+            resolve_hint: Arc::new(tokio::sync::Notify::new()),
+        };
+        let (p, mut e) = repo_paper_engine();
+        let n = p.sim.accounts.len();
+        e.seed_paper_clock(30_000); // the paper clock runs ahead of the wall clock here
+        let mut resets = paper::ResetTracker::new(1, Some(4));
+        let b = reset_batch(&mut e, &io, &p, &mut resets, 5, 20_000)
+            .unwrap()
+            .unwrap();
+        let Some(CaptureMsg::Line(l)) = crx.recv().await else {
+            panic!("expected the reset line first");
+        };
+        assert_eq!(
+            (l.recv_ts_us, l.ctl),
+            (30_000_000, Some(Ctl::PaperReset { t: 30_000 }))
+        );
+        assert_eq!(
+            b.paper_epochs,
+            vec![store::PaperEpochRow {
+                epoch: 2,
+                start_ms: 30_001,
+                cause: "reset".into(),
+                request_id: Some(5),
+                run_id: 9,
+                policies_sha256: p.sha256.clone(),
+            }]
+        );
+        let at = |t: i64| b.paper_marks.iter().filter(|m| m.t_ms == t).count();
+        assert_eq!(
+            (at(30_000), at(30_001)),
+            (n, n),
+            "close marks at t, mark_now at t + 1"
+        );
+        assert!(
+            b.paper_state.len() == n && b.paper_state.iter().all(|s| s.updated_ms == 20_000),
+            "stamped with the wall clock, never the paper clock (the paper_state upsert guard)"
+        );
+        assert_eq!(e.paper_clock(), 30_001);
     }
 }

@@ -195,18 +195,98 @@ fn formatting_helpers_are_exact() {
     assert_eq!(cards::hour_of(-1), -3_600_000);
 }
 
+/// The first time where our KM and arb-core's differ by more than one unit of the 12th place.
+/// A tolerance, not `round_dp(12)` on both sides: rounding flips on a value that sits on a
+/// rounding boundary (see `km_on_a_rounding_boundary_still_agrees`).
+fn km_mismatch(obs: &[(i64, bool)]) -> Option<(i64, Decimal, Decimal)> {
+    let m = durmap(obs);
+    let times: Vec<i64> = m.keys().copied().collect();
+    let ours = km(m.iter().map(|(t, v)| (*t, *v)), &times);
+    let theirs: BTreeMap<i64, Decimal> = arb_core::stats::kaplan_meier(obs).into_iter().collect();
+    let mut s_prev = Decimal::ONE;
+    for (i, t) in times.iter().enumerate() {
+        let expect = theirs.get(t).copied().unwrap_or(s_prev);
+        let got = fp_to_dec(ours.at[i]);
+        if (got - expect).abs() > Decimal::new(1, 12) {
+            return Some((*t, got, expect));
+        }
+        s_prev = expect;
+    }
+    None
+}
+
+#[test]
+fn km_on_a_rounding_boundary_still_agrees() {
+    // CI 2026-09-29 (proptest seed eb40a6be…): at t = 219 the two agree to 1e-12 but rounded to
+    // 12 dp as 0.575387657812 vs 0.575387657813.
+    let obs = [
+        (118, true),
+        (139, false),
+        (246, false),
+        (140, true),
+        (175, true),
+        (219, true),
+        (219, true),
+        (219, true),
+        (52, true),
+        (220, false),
+        (52, true),
+        (194, true),
+        (219, false),
+        (52, true),
+        (219, false),
+        (220, false),
+        (220, false),
+        (0, true),
+        (194, false),
+        (32, false),
+        (118, true),
+        (32, false),
+        (219, false),
+        (140, false),
+        (219, false),
+        (220, false),
+        (219, false),
+        (219, false),
+        (33, true),
+        (220, false),
+        (219, false),
+        (175, true),
+        (220, false),
+        (186, false),
+        (220, false),
+        (220, false),
+        (220, false),
+        (219, false),
+        (33, true),
+        (33, true),
+        (33, true),
+        (219, false),
+        (219, false),
+        (219, false),
+        (220, false),
+        (33, false),
+        (219, false),
+        (66, false),
+        (175, true),
+        (140, false),
+        (34, true),
+        (140, false),
+        (67, true),
+        (0, true),
+        (287, true),
+        (288, true),
+        (219, false),
+        (247, true),
+        (67, true),
+        (0, true),
+    ];
+    assert_eq!(km_mismatch(&obs), None);
+}
+
 proptest! {
     #[test]
     fn km_agrees_with_arb_core_to_12_places(obs in proptest::collection::vec((0i64..500, any::<bool>()), 0..300)) {
-        let m = durmap(&obs);
-        let times: Vec<i64> = m.keys().copied().collect();
-        let ours = km(m.iter().map(|(t, v)| (*t, *v)), &times);
-        let theirs: BTreeMap<i64, Decimal> = arb_core::stats::kaplan_meier(&obs).into_iter().collect();
-        let mut s_prev = Decimal::ONE;
-        for (i, t) in times.iter().enumerate() {
-            let expect = theirs.get(t).copied().unwrap_or(s_prev);
-            prop_assert_eq!(fp_to_dec(ours.at[i]).round_dp(12), expect.round_dp(12), "t = {}", t);
-            s_prev = expect;
-        }
+        prop_assert_eq!(km_mismatch(&obs), None);
     }
 }

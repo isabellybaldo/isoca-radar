@@ -14,7 +14,7 @@ fn default_file_parses_validates_and_is_exact() {
     c.validate().unwrap();
     assert_eq!(c.min_order_shares, dec!(5));
     assert_eq!(c.p1.min_annualized, dec!(0.10));
-    assert_eq!(c.accounts.len(), 15);
+    assert_eq!(c.accounts.len(), 19);
     let ids: Vec<String> = c.accounts.iter().map(|a| a.id()).collect();
     assert!(ids.contains(&"P0-converter/sp-idle".to_string()));
     assert!(ids.contains(&"P0-converter/sp-idle/fee10".to_string()));
@@ -26,6 +26,25 @@ fn default_file_parses_validates_and_is_exact() {
     );
     assert_eq!(c.scenario("sp-burst").unwrap().burst.len(), 2);
     assert_eq!(PolicyKind::P2Combo.as_str(), "P2-combo");
+    // spec 7a §3: the latency ladder, exact latencies (no burst steps), secondsDelay honored
+    for (name, total) in [
+        ("rung-0", 0),
+        ("rung-25", 25),
+        ("rung-100", 100),
+        ("rung-200", 200),
+    ] {
+        let s = c.scenario(name).unwrap();
+        assert_eq!(
+            (
+                s.proc_ms + s.net_ms + s.match_ms,
+                s.burst.len(),
+                s.honor_seconds_delay
+            ),
+            (total, 0, true),
+            "{name}"
+        );
+        assert!(ids.contains(&format!("P0-converter/{name}")), "{name}");
+    }
 }
 
 #[test]

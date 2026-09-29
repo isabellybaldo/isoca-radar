@@ -1,4 +1,4 @@
-//! Paper-trading rows (S3c, migration 0004). Every table but `paper_state` is append-only and
+//! Paper-trading rows (S3c, migration 0004; epochs 0009). Every table but `paper_state` is append-only and
 //! idempotent (`ON CONFLICT DO NOTHING` on its natural key), so a batch the writer re-sends after
 //! a commit whose ack was lost changes nothing. `paper_state` keeps the newest save per account.
 use crate::text::{clean, clean_opt};
@@ -172,6 +172,22 @@ pub(crate) async fn write_paper(conn: &mut PgConnection, b: &Batch) -> Result<()
                 .push_bind(r.max_drawdown)
                 .push_bind(r.n_positions);
         });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *conn).await?;
+    }
+    for chunk in b.paper_epochs.chunks(CHUNK) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO paper_epochs (epoch, start_ms, cause, request_id, run_id, policies_sha256) ",
+        );
+        qb.push_values(chunk, |mut s, r| {
+            s.push_bind(r.epoch)
+                .push_bind(r.start_ms)
+                .push_bind(clean(&r.cause))
+                .push_bind(r.request_id)
+                .push_bind(r.run_id)
+                .push_bind(clean(&r.policies_sha256));
+        });
+        // a resend after a lost ack changes nothing, as for every other paper table
         qb.push(" ON CONFLICT DO NOTHING");
         qb.build().execute(&mut *conn).await?;
     }

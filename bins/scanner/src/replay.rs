@@ -123,6 +123,15 @@ pub fn apply_line(
                 sink(o);
             }
         }
+        Some(Ctl::PaperReset { t }) => {
+            // spec 7a §4.2: the payload `t` (the live paper clock), not this line's receive time.
+            // No epoch row: only the live scanner writes paper_epochs.
+            if let Some((_, rows)) = engine.paper_reset(*t) {
+                for r in rows {
+                    sink(Out::Paper(Box::new(r)));
+                }
+            }
+        }
         Some(Ctl::Shutdown) => {
             for o in engine.close_all(ms) {
                 sink(o);

@@ -497,3 +497,74 @@ fn a_resolved_line_round_trips_through_the_capture_format() {
     assert!(json.contains(r#""kind":"resolved""#), "{json}");
     assert_eq!(serde_json::from_str::<Line>(&json).unwrap(), l);
 }
+
+/// `write_paper_capture`'s NO basket (frames to T0 + 4 000), then a paper reset whose payload
+/// `t` (T0 + 4 500) is 100 ms before its own line, then a clean stop at T0 + 6 000.
+fn write_reset_capture(dir: &Path) {
+    let u = universe();
+    let conn_of: ConnMap = [("e1".to_string(), 0)].into_iter().collect();
+    let ufile = universe_file_name(u.taken_ms, 1);
+    let asks = ["0.45", "0.40", "0.35"];
+    let open = ["0.40", "0.35", "0.30"];
+    let msgs = vec![
+        CaptureMsg::Universe(Box::new(UniverseRecord {
+            universe: u.clone(),
+            conn_of,
+            file: ufile.clone(),
+        })),
+        line(
+            T0,
+            None,
+            Some(Ctl::Universe {
+                taken_ms: u.taken_ms,
+                file: ufile,
+            }),
+        ),
+        line(
+            T0 + 100,
+            Some(paper_frame(T0, ["0.30", "0.30", "0.30"], asks)),
+            None,
+        ),
+        line(T0 + 1_100, Some(paper_frame(T0 + 1_000, open, asks)), None),
+        line(T0 + 2_000, Some(paper_frame(T0 + 1_900, open, asks)), None),
+        line(T0 + 4_000, Some(paper_frame(T0 + 3_900, open, asks)), None),
+        line(T0 + 4_600, None, Some(Ctl::PaperReset { t: T0 + 4_500 })),
+        line(T0 + 6_000, None, Some(Ctl::Shutdown)),
+    ];
+    let mut w = Writer::new(dir.to_path_buf());
+    for m in &msgs {
+        w.write(m).unwrap();
+    }
+    w.finish();
+}
+
+#[test]
+fn replay_resets_at_the_payload_instant_and_keeps_every_seq_rising() {
+    let dir = tmp("paper-reset");
+    write_reset_capture(&dir);
+    let policies: SimConfig = toml::from_str(POLICIES).unwrap();
+    let (a, b) = (replay_paper(&dir, &policies), replay_paper(&dir, &policies));
+    assert_eq!(a, b, "deterministic across the reset");
+    let rows = paper_rows(&a);
+    let n = policies.accounts.len();
+    let at = |t: i64| rows.paper_marks.iter().filter(|m| m.t_ms == t).count();
+    assert_eq!(
+        (at(T0 + 4_500), at(T0 + 4_501), at(T0 + 4_600)),
+        (n, n, 0),
+        "the close at the payload t, the new epoch at t + 1, nothing at the line's own time"
+    );
+    assert!(
+        rows.paper_marks
+            .iter()
+            .filter(|m| m.t_ms == T0 + 4_501)
+            .all(|m| m.equity == dec!(1000))
+    );
+    let mut by: std::collections::BTreeMap<&str, Vec<i64>> = Default::default();
+    for l in &rows.paper_ledger {
+        by.entry(l.account_id.as_str()).or_default().push(l.seq);
+    }
+    for (acct, seqs) in by {
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{acct}: {seqs:?}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

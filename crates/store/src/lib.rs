@@ -5,7 +5,9 @@
 mod batch;
 mod card_io;
 mod compact_io;
+mod epochs;
 pub mod error;
+mod ladder;
 mod paper;
 mod read;
 mod read_paper;
@@ -24,7 +26,9 @@ pub use compact_io::{
     COMPACT_TABLES, CompactEpisode, CompactHourRow, CompactStatusRow, MAX_COMPACT_EPISODES,
     MAX_COMPACT_HOURS,
 };
+pub use epochs::{EpochStatus, PaperEpoch, RESET_TABLES, ResetInsert, ResetRequest};
 pub use error::StoreError;
+pub use ladder::LadderSums;
 pub use read::{
     DAY_MS, EpisodeFilter, EpisodePage, EpisodeSummary, HealthNow, IntegritySummary, MAX_OPEN,
     MAX_PAGE, MAX_SERIES_ROWS, Today,
@@ -159,5 +163,22 @@ impl Store {
         .bind(role)
         .fetch_all(self.pool())
         .await?)
+    }
+
+    /// Admin/test tooling: `has_table_privilege(role, table, privilege)` in this database.
+    pub async fn has_table_privilege(
+        &self,
+        role: &str,
+        table: &str,
+        privilege: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT has_table_privilege($1::name, $2::text, $3::text)")
+                .bind(role)
+                .bind(table)
+                .bind(privilege)
+                .fetch_one(self.pool())
+                .await?,
+        )
     }
 }

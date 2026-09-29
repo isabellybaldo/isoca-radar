@@ -111,3 +111,24 @@ impl TestDb {
         .await;
     }
 }
+
+/// A scanner run in `mode` ('live' or 'replay'), started at 1 ms.
+pub async fn run(store: &Store, mode: &str) -> i64 {
+    store
+        .start_run(&store::NewRun {
+            service: "scanner".into(),
+            started_ms: 1,
+            version: "t".into(),
+            config_hash: "c".into(),
+            mode: mode.into(),
+        })
+        .await
+        .unwrap()
+}
+
+/// The dashboard's read-only pool (analyze_ro, read-only transactions).
+pub async fn ro(db: &TestDb) -> Store {
+    Store::connect_read_only(db.opts.clone(), 2, 5_000, Some("analyze_ro"))
+        .await
+        .unwrap()
+}

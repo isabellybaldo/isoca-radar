@@ -313,6 +313,19 @@ pub struct PaperStateRow {
     pub policies_sha256: Option<String>,
 }
 
+/// Phase 7a (migration 0009): an epoch the live scanner started. Written only by the scanner,
+/// inside a `WriterMsg::PaperReset` batch with the rows it closes and the state it saves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaperEpochRow {
+    pub epoch: i32,
+    pub start_ms: i64,
+    /// 'policies' or 'reset'.
+    pub cause: String,
+    pub request_id: Option<i64>,
+    pub run_id: i64,
+    pub policies_sha256: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Batch {
     pub episodes: Vec<EpisodeWrite>,
@@ -327,6 +340,8 @@ pub struct Batch {
     pub paper_ledger: Vec<PaperLedgerRow>,
     pub paper_markouts: Vec<PaperMarkoutRow>,
     pub paper_marks: Vec<PaperMarkRow>,
+    /// Phase 7a: written after the marks, before `paper_state` (spec 7a §4.2).
+    pub paper_epochs: Vec<PaperEpochRow>,
     /// Live only: upserted by account id (the newest `updated_ms` wins).
     pub paper_state: Vec<PaperStateRow>,
 }
@@ -344,6 +359,7 @@ impl Batch {
             + self.paper_ledger.len()
             + self.paper_markouts.len()
             + self.paper_marks.len()
+            + self.paper_epochs.len()
             + self.paper_state.len()
     }
 
@@ -365,6 +381,7 @@ impl Batch {
             paper_ledger: std::mem::take(&mut self.paper_ledger),
             paper_markouts: std::mem::take(&mut self.paper_markouts),
             paper_marks: std::mem::take(&mut self.paper_marks),
+            paper_epochs: std::mem::take(&mut self.paper_epochs),
             paper_state: std::mem::take(&mut self.paper_state),
             ..Batch::default()
         }
@@ -379,6 +396,7 @@ impl Batch {
         self.paper_ledger.extend(other.paper_ledger);
         self.paper_markouts.extend(other.paper_markouts);
         self.paper_marks.extend(other.paper_marks);
+        self.paper_epochs.extend(other.paper_epochs);
         self.paper_state.extend(other.paper_state);
     }
 
@@ -405,6 +423,7 @@ impl Batch {
             paper_ledger,
             paper_markouts,
             paper_marks,
+            paper_epochs,
             paper_state
         );
         out

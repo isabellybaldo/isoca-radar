@@ -377,3 +377,21 @@ fn a_token_listed_twice_follows_the_engines_leg_slots() {
     assert_eq!(g.to_state(), f.to_state());
     assert_eq!(g.conn("a1"), Some(0));
 }
+
+#[test]
+fn a_paper_reset_line_touches_no_book() {
+    let r = rec(&[("e1", 0)]);
+    let mut f = FeedBooks::new();
+    let ap = run(
+        &mut f,
+        &r,
+        &[
+            uni(T),
+            frame(T + 10, 0, book("a1", T + 5, &[], &[("0.45", "10")])),
+            ctl(T + 20, 0, Ctl::PaperReset { t: T + 15 }),
+        ],
+    );
+    assert_eq!(ap[2].event, LineEvent::None);
+    assert!(ap[2].touched.is_empty() && ap[2].snapshotted.is_empty());
+    assert_eq!(asks(&f, "a1"), vec!["0.45x10".to_string()]);
+}

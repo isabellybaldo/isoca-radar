@@ -1,5 +1,7 @@
-//! api: the dashboard's read-only JSON + SSE server (Phase 4 spec §4). Reads Postgres only through
-//! `store`, as analyze_ro, on read-only sessions; exposes no write endpoint; paper only (spec §16).
+//! api: the dashboard's JSON + SSE server (Phase 4 spec §4). Reads Postgres only through `store`,
+//! as analyze_ro, on read-only sessions. Its one write (Phase 7a §5) is a row in
+//! paper_reset_requests, through a second one-connection pool as paper_reset_rw; paper only
+//! (spec §16).
 #![forbid(unsafe_code)]
 
 pub mod cards;
@@ -10,13 +12,15 @@ pub mod error;
 pub mod guard;
 pub mod health;
 pub mod integrity;
+pub mod ladder;
 pub mod paper;
 pub mod params;
+pub mod reset;
 pub mod stream;
 
 use axum::Router;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
@@ -41,6 +45,12 @@ pub enum StreamEvent {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
+    /// Phase 7a: the reset pool (paper_reset_rw, INSERT on paper_reset_requests only). None:
+    /// POST /api/paper/reset answers 503 reset_disabled.
+    pub reset: Option<Store>,
+    /// Phase 7a: the policies file's scenario latencies (POLICIES_PATH). None: unknown (every
+    /// rung's latency_ms is null).
+    pub scenarios: Option<Arc<Vec<::cards::body::ScenarioLat>>>,
     pub events: broadcast::Sender<StreamEvent>,
     pub stream_slots: Arc<Semaphore>,
     /// Flips to `true` on graceful shutdown; every open SSE stream watches this and ends itself
@@ -54,10 +64,22 @@ impl AppState {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             store,
+            reset: None,
+            scenarios: None,
             events,
             stream_slots: Arc::new(Semaphore::new(MAX_STREAMS)),
             shutdown_tx,
         }
+    }
+
+    pub fn with_reset(mut self, reset: Option<Store>) -> Self {
+        self.reset = reset;
+        self
+    }
+
+    pub fn with_scenarios(mut self, s: Option<Vec<::cards::body::ScenarioLat>>) -> Self {
+        self.scenarios = s.map(Arc::new);
+        self
     }
 }
 
@@ -76,6 +98,48 @@ pub async fn ensure_read_only(store: &Store) -> anyhow::Result<()> {
         "refusing to start: the database role can write; connect as analyze_ro"
     );
     Ok(())
+}
+
+/// Spec 7a §5.1: the reset pool's role may INSERT into paper_reset_requests and nothing else
+/// (mirrors `ensure_read_only`).
+pub async fn ensure_reset_role(reset: &Store) -> anyhow::Result<()> {
+    let extra = reset.role_writes_outside_reset().await?;
+    anyhow::ensure!(
+        extra.is_empty(),
+        "refusing to start: the reset role can write {}; connect as paper_reset_rw",
+        extra.join(", ")
+    );
+    Ok(())
+}
+
+/// Spec 7a §5.1: the reset pool from its connect attempt. A pool that can't connect (a NOLOGIN
+/// role, a bad password, a restored cluster) or can't read its grants must not take the
+/// read-only dashboard down: one log line and None (the POST answers 503 reset_disabled). Only an
+/// over-granted role refuses to start.
+pub async fn reset_pool(connected: anyhow::Result<Store>) -> anyhow::Result<Option<Store>> {
+    const DISABLED: &str = "POST /api/paper/reset answers 503 reset_disabled";
+    let reset = match connected {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("api: reset pool: {e:#}; {DISABLED}");
+            return Ok(None);
+        }
+    };
+    match reset.role_writes_outside_reset().await {
+        Ok(extra) if extra.is_empty() => Ok(Some(reset)),
+        Ok(extra) => {
+            reset.close().await;
+            anyhow::bail!(
+                "refusing to start: the reset role can write {}; connect as paper_reset_rw",
+                extra.join(", ")
+            )
+        }
+        Err(e) => {
+            eprintln!("api: reset pool: read its grants: {e}; {DISABLED}");
+            reset.close().await;
+            Ok(None)
+        }
+    }
 }
 
 /// A panicking handler must not drop the connection: turn it into the same JSON 500 every other
@@ -97,6 +161,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/paper/equity", get(paper::equity))
         .route("/api/paper/positions", get(paper::positions))
         .route("/api/paper/ledger", get(paper::ledger))
+        .route("/api/paper/reset", post(reset::reset))
+        .route("/api/paper/epochs", get(reset::epochs))
+        .route("/api/paper/ladder", get(ladder::ladder))
         .route("/api/cards", get(cards::list))
         .route("/api/cards/meta", get(cards::meta))
         .route("/api/stream", get(stream::sse))
@@ -106,32 +173,44 @@ pub fn router(state: AppState) -> Router {
         .layer(CatchPanicLayer::custom(handle_panic))
 }
 
-/// Bind `bind` and serve (see `run_on`); also logs the startup line ops tooling greps for.
+/// Bind `bind` and serve `state` (see `run_on_state`); also logs the startup line ops tooling
+/// greps for.
 pub async fn run(
-    store: Store,
+    state: AppState,
     bind: &str,
     health_every: Duration,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind).await?;
-    eprintln!("api: listening on {bind} (read-only, paper only)");
-    run_on(listener, store, health_every, shutdown).await
+    eprintln!("api: listening on {bind} (read-only except paper reset requests, paper only)");
+    run_on_state(listener, state, health_every, shutdown).await
 }
 
-/// Serve `router(AppState::new(store))` on `listener` until `shutdown` resolves, then shut down
-/// cleanly: every open SSE stream watches `AppState::shutdown_tx` and ends itself so
-/// `axum::serve`'s graceful shutdown (which otherwise waits forever for an infinite stream) can
-/// return; only then are the bridge's two tasks aborted and joined (dropping a `JoinHandle`
-/// does NOT stop its task — it must be `abort()`ed) and the store's pool closed. The bridge is
-/// stopped, and its pooled LISTEN connection freed, strictly before `store.close()`, which waits
-/// for every checked-out connection and would otherwise hang forever on that one.
+/// `run_on_state` with no reset pool.
 pub async fn run_on(
     listener: TcpListener,
     store: Store,
     health_every: Duration,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let state = AppState::new(store.clone());
+    run_on_state(listener, AppState::new(store), health_every, shutdown).await
+}
+
+/// Serve `router(state)` on `listener` until `shutdown` resolves, then shut down cleanly: every
+/// open SSE stream watches `AppState::shutdown_tx` and ends itself so `axum::serve`'s graceful
+/// shutdown (which otherwise waits forever for an infinite stream) can return; only then are the
+/// bridge's two tasks aborted and joined (dropping a `JoinHandle` does NOT stop its task — it
+/// must be `abort()`ed) and the pools closed. The bridge is stopped, and its pooled LISTEN
+/// connection freed, strictly before `store.close()`, which waits for every checked-out
+/// connection and would otherwise hang forever on that one.
+pub async fn run_on_state(
+    listener: TcpListener,
+    state: AppState,
+    health_every: Duration,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let store = state.store.clone();
+    let reset = state.reset.clone();
     let bridge = stream::spawn_bridge(store.clone(), state.events.clone(), health_every);
     let shutdown_tx = state.shutdown_tx.clone();
     axum::serve(listener, router(state))
@@ -148,6 +227,9 @@ pub async fn run_on(
     for h in bridge {
         h.abort();
         let _ = h.await;
+    }
+    if let Some(r) = reset {
+        r.close().await;
     }
     store.close().await;
     Ok(())

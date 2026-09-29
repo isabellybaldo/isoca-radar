@@ -10,6 +10,12 @@ pub struct Config {
     /// Pool size; one connection is held by the shared LISTEN.
     pub max_conns: u32,
     pub statement_timeout_ms: u32,
+    /// Phase 7a §5.1: the reset pool's URL (paper_reset_rw); None when unset or empty (POST
+    /// /api/paper/reset then answers 503).
+    pub reset_database_url: Option<String>,
+    /// Phase 7a §7.1: the policies file the ladder reads its latencies from (the copy baked into
+    /// the shared image, as analyze uses).
+    pub policies_path: String,
 }
 
 impl fmt::Debug for Config {
@@ -19,6 +25,11 @@ impl fmt::Debug for Config {
             .field("bind", &self.bind)
             .field("max_conns", &self.max_conns)
             .field("statement_timeout_ms", &self.statement_timeout_ms)
+            .field(
+                "reset_database_url",
+                &self.reset_database_url.as_ref().map(|_| "<redacted>"),
+            )
+            .field("policies_path", &self.policies_path)
             .finish()
     }
 }
@@ -56,11 +67,17 @@ impl Config {
             (100..=60_000).contains(&statement_timeout_ms),
             "API_STATEMENT_TIMEOUT_MS must be 100..=60000"
         );
+        let reset_database_url = get("RESET_DATABASE_URL").filter(|s| !s.is_empty());
+        let policies_path = get("POLICIES_PATH")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/etc/cute-trading/policies.toml".to_string());
         Ok(Self {
             database_url,
             bind,
             max_conns,
             statement_timeout_ms,
+            reset_database_url,
+            policies_path,
         })
     }
 }
@@ -105,5 +122,48 @@ mod tests {
         let c = cfg(&[url, ("API_BIND", "127.0.0.1:9000")]).unwrap();
         assert_eq!(c.bind, "127.0.0.1:9000");
         assert!(!format!("{c:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn the_reset_url_is_optional_and_redacted() {
+        let url = (
+            "DATABASE_URL",
+            "postgres://analyze_ro:pw@postgres/cute_trading",
+        );
+        assert_eq!(cfg(&[url]).unwrap().reset_database_url, None);
+        assert_eq!(
+            cfg(&[url, ("RESET_DATABASE_URL", "")])
+                .unwrap()
+                .reset_database_url,
+            None
+        );
+        let c = cfg(&[
+            url,
+            (
+                "RESET_DATABASE_URL",
+                "postgres://paper_reset_rw:hunter3@postgres/cute_trading",
+            ),
+        ])
+        .unwrap();
+        assert!(c.reset_database_url.is_some());
+        assert!(!format!("{c:?}").contains("hunter3"));
+    }
+
+    #[test]
+    fn the_policies_path_defaults_to_the_baked_copy() {
+        let url = (
+            "DATABASE_URL",
+            "postgres://analyze_ro:pw@postgres/cute_trading",
+        );
+        assert_eq!(
+            cfg(&[url]).unwrap().policies_path,
+            "/etc/cute-trading/policies.toml"
+        );
+        assert_eq!(
+            cfg(&[url, ("POLICIES_PATH", "/tmp/p.toml")])
+                .unwrap()
+                .policies_path,
+            "/tmp/p.toml"
+        );
     }
 }
