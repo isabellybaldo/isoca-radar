@@ -7,40 +7,19 @@
 **Tech Stack:** React 19.2, TypeScript 5.9, Vite 8 (rolldown), Vitest 4 + Testing Library (jsdom), hand-made SVG and HTML, plain CSS; Rust 1.98.1 + `wasm-bindgen` CLI (the version `Cargo.lock` pins) for the package; Docker (rust cargo-chef stage → node 22 → nginx-unprivileged 1.29), Traefik labels in `compose.web.yml`.
 **Spec:** docs/superpowers/specs/2026-09-30-phase7b-math-playground-design.md (§6, §7, §5.3, §8 web, §9 7b-B, §11), on docs/superpowers/specs/2026-09-27-phase7-playground-explain-design.md (§4.2–§6 "as 09-27", amended by 7b §11).
 
-## Contract assumed from 7b-A
+## Contract used from 7b-A
 
-Every name below is read or sent by 7b-B exactly as written. The TypeScript copies are `web/src/wasm/types.ts` (engine) and `web/src/math/snapshot.ts` (snapshot). Decimals are JSON strings, integers JSON numbers. The web reads only the fields listed; an extra output field is ignored (parity compares whole strings, so it still shows up there).
+The contract is `docs/superpowers/plans/2026-09-30-phase7b-A-rust.md` § "Contract for 7b-B" (authoritative; its code was compiled and tested), and the fixture cases in its Tasks 9–11. `web/src/wasm/types.ts` and `web/src/math/snapshot.ts` copy it. What 7b-B reads or sends:
 
-**Package and build**
-- C1. `crates/arb-wasm` is a workspace member; `cargo build -p arb-wasm --target wasm32-unknown-unknown [--release]` writes `target/wasm32-unknown-unknown/{release,debug}/arb_wasm.wasm`.
-- C2. `Cargo.lock` holds one `name = "wasm-bindgen"` package (the exact `=x.y.z` pin); the CLI must be that version. `scripts/build-wasm.sh`, CI and `docker/web.Dockerfile` read it from `Cargo.lock`.
-- C3. The `#[wasm_bindgen]` exports keep the `api.rs` names: `mirror_json`, `payoff_json`, `classify_json`, `depth_walk_json`, `episode_json`, `basket_json`, each `(input: string) => string`. `wasm-bindgen --target web` adds `default` (`init`) and `initSync`.
-- C4. Every output is one JSON object: a model, or `{"error": "<one sentence>"}`. Bad input never throws.
-- C5. Fixtures: `crates/arb-wasm/fixtures/*.json`, one file per function, each `[{ "name", "input", "output" }]` with `input`/`output` as exact strings. The file stem is the function name with or without `_json` (7b §3.4 writes `basket_json.json`, 09-27 §7.3 writes `payoff.json`); the web parity test accepts both and requires all six.
-
-**Shared input shapes**
-- `Level {p, s}` (decimal strings, best first); `Fee {rate: dec, exponent: int}`; `LegIn {status, bids: Level[], asks: Level[], fee: Fee | null}`, `status` ∈ `live | placeholder | other | closed_no | closed_yes | halted`.
-
-**Functions** (in = what the page sends; out = what it reads)
-- `mirror_json` in `{bids, asks}` (YES levels) → out `no_asks: Level[]`, `no_bids: Level[]` (best first; `no_asks[k]` mirrors `bids[k]`, `no_bids[k]` mirrors `asks[k]`), `d1_long: dec|null`, `d1_short: dec|null`, `crossed: bool`.
-- `payoff_json` in `{kind: "yes"|"no"|"implication", s: int, other_listed: bool, prices: [{bid, ask}] | null}` (for `implication` the page sends `s: 2`, `other_listed: false`, 2 prices or null) → out `rows: string[]`, `cols: string[]`, `possible: bool[]`, `cells: (dec|null)[][]` ("0"/"1", null in an impossible column), `basket: (dec|null)[]`, `guaranteed: dec`, `broken: bool[]`, `top_edge_gross: dec|null` (non-null only with prices).
-- `classify_json` in `{augmented: bool, legs: LegIn[]}` → out `path: string[]` (snake_case of 09-27 §3.3's `Node`: `decided, no_live, crossed, no_basket_tried, no_basket_positive, yes_basket_tried, missing_ask, yes_basket_positive, complete, incomplete, no_signal`), `kind: "yes_basket"|"yes_basket_incomplete"|"no_basket"|"implication"|null`, `realization: "settlement"|"converter"|"not_arbitrage"|null`, `net: dec|null`, `gross: dec|null`.
-- `depth_walk_json` in `{rule: "yes"|"no", legs: [{levels: Level[] (asks), fee: Fee|null}]}` (the page sends `"yes"`) → out `steps: [{q_from: dec, q_to: dec, cost_per_basket: dec, profitable: bool}]` (every segment until a leg runs out, past Q* too), `q_star: dec`, `pi: dec`.
-- `episode_json` in `{kind: "yes"|"no", gap_ms: int, updates: [{t_ms: int, legs: LegIn[]}], scenario: {proc_ms: int, net_ms: int, match_ms: int, honor_seconds_delay: bool}, seconds_delay: int}` (0 = none; the facade fixes `name: "playground"` and an empty `burst`) → out `updates: [{t_ms: int, net: dec|null}]`, `open_ms`, `close_ms`, `peak_ms`, `t_x` (int|null each), `caught: bool`, `captured: dec|null`.
-- `basket_json` in `{kind: "yes"|"no", legs: [{open: {bids, asks}, t_x: {bids, asks}, unwind: {bids, asks}}] (2–4, YES-book levels), fee: Fee|null (applies to every leg), q_request: dec, min_order: dec, convert_fee_bips: int}` → out `q_target: dec`, `q_eff: dec`, `legs: [{buy: {filled: dec, vwap: dec|null, fees: dec}, excess: dec, unwind: {filled: dec, vwap: dec|null, fees: dec}}]` (input order), `cash: {spent, fees, unwind_back, convert_back, net_cash: dec, held_unsold: [{qty: dec, basis: dec}]}` (`held_unsold` has one entry per leg, qty "0" when none), `value_at_resolution: dec|null` (YES only, not cash).
-
-**Snapshot** (`GET /math-data/public.json`)
-- `{v: 1, written_ms: int, ladder, today}`.
-- `ladder`: `epoch: int`, `start_ms: int|null`, `as_of_ms: int|null`, `break_even` (the api's `BreakEven`: `{kind: "thin"|"all"|"none"}` or `{kind: "at", latency_ms: int, direction: "loses_beyond"|"pays_beyond", not_monotone?: true}`), `measured: {latency_ms: int}|null` (no `host`), `markets_status: "live"|"warming"|"under_review"|"missing"`, `rungs: PublicRung[]`, `markets: PublicSweetRow[]`.
-- `PublicRung`: `scenario: string, latency_ms: int|null, extra: bool, n_exec: int, n_leg_risk: int, n_missed: int, gains, leg_risk, settle, unrealized, net: dec` (the api's `LadderRung` minus `account_id`; `LatencyLadder` reads nothing else).
-- `PublicSweetRow`: `side: "yes"|"no", scenario: string, fee_bips: int, latency_ms: int|null, dimension: "all"|"category", bucket: string, label: SweetLabel, n_exec: int, clusters: int, mean, lo, hi: dec|null` (exactly what `lib/sweet.ts` and `SweetLadderGrid` read).
-- `today`: `day_start_ms: int, arb: int, no: int, yes: int, edge_budget100: dec|null, hourly: [{hour: int 0–23, arb: int}]`.
-
-**Deploy**
-- D1. `compose.web.yml` declares the top-level named volume `public-data` (on the VPS `cute-trading_public-data`), and `api` mounts it read-write at `/var/lib/ct-public`; 7b-B adds only the `web` mount.
-- D2. The volume root holds `public.json`, mode 0644, the root dir 0755, both owned by 65532 (nginx runs as uid 101 and only needs read).
-- D3. `docker/rust.Dockerfile`'s first `FROM rust:1.98.1-bookworm@sha256:…` line is the image `web.Dockerfile`'s wasm stage uses (a test compares them).
-- D4. The web rollback tag `web:pre7b` is already taken by 7a-B's runbook; 7b-B uses `web:pre7b-B`.
+- **Package:** `crates/arb-wasm`, `wasm-bindgen =0.2.129` (CLI the same version, read from `Cargo.lock`); exports `mirror_json`, `payoff_json`, `classify_json`, `depth_walk_json`, `episode_json`, `basket_json`, `(input: string) => string`, never throwing (an `{"error"}` object instead); fixtures `crates/arb-wasm/fixtures/<export>.json` (`mirror_json.json` … `basket_json.json`), `[{name, input, output}]` compared byte for byte.
+- **`mirror_json`:** sends `{bids, asks}`; reads `no_asks`, `no_bids`, `best_bid`, `best_ask`, `spread`, `d1_long`, `d1_short`, `crossed`. Section a starts from fixture `fed-book`.
+- **`payoff_json`:** sends `{kind, s, other_listed, prices}` (`prices` length `s`, or 2 for `implication`, whose `s` is ignored; the page sends 2); reads `rows`, `cols`, `possible`, `cells`, `basket`, `guaranteed`, `broken`, `top_edge_gross`.
+- **`classify_json`:** sends `{augmented, legs: LegIn[]}`; reads `path` (the 14 nodes `decided`, `no_basket_tried`, `no_basket_few_legs`, `no_basket_crossed`, `no_basket_not_positive`, `no_basket_positive`, `yes_basket_tried`, `yes_basket_no_live`, `yes_basket_crossed`, `yes_basket_missing_ask`, `yes_basket_not_positive`, `yes_basket_positive`, `complete`, `incomplete`), `kind`, `realization`, `net`, `gross`, `q_star`. Section c starts from fixture `no-edge-3`.
+- **`depth_walk_json`:** sends `{rule: "yes", legs: [{levels, fee}]}`; reads `steps[] {q_from, q_to, cost, payoff, profitable}` (past Q*), `q_star`, `pi`, `pi_gross`. Payoff is read per step (the `no` rule's payoff changes as legs run out).
+- **`episode_json`:** sends `{kind, gap_ms, updates: [{t_ms, legs}], scenario: {proc_ms, net_ms, match_ms, honor_seconds_delay}, seconds_delay: int|null}`; reads `updates[] {t_ms, net}`, `open_ms`, `close_ms`, `peak_ms`, `peak_net`, `t_x`, `captured`, `caught`, with `t_x = open_ms + proc + net + match (+ seconds_delay × 1000 when honored)`, `captured` = the net of the latest update at or before `t_x`, `"0"` if the episode closed at or before `t_x`, `caught = captured > 0`.
+- **`basket_json`:** sends `{kind: "no", legs: [{open, t_x, unwind, fee}], q_request}` (fee per leg; `min_order` and `convert_fee_bips` omitted, so the defaults `"5"` and `"0"`); reads `kind`, `min_order`, `q_open`, `q_target`, `legs[] {limit, buy {requested, filled, vwap, fees, levels_used}, excess, unwind {…same}}`, `q_eff`, `cash {spent, fees, unwind_back, convert_back, net_cash, held_unsold[] {qty, basis}}`, `value_at_resolution`. Section f's start is fixture `no-all-fill` (`net_cash "2.5"`), "the usual burst" is `no-one-leg-empty-burst` (`q_eff "0"`, `net_cash "-6"`), leg C at 20 % is `no-one-leg-partial`.
+- **Snapshot** `GET /math-data/public.json`: `{v: 1, written_ms, ladder {epoch, start_ms, as_of_ms, break_even, measured {latency_ms}|null, markets_status, rungs[], markets[]}, today {day_start_ms, arb, no, yes, edge_budget100, hourly[24]}}`; rungs are `LadderRung` minus `account_id` (keyed by `scenario`); markets rows are NO side, `fee_bips` 0, the six LADDER scenarios, dimensions `all`/`category`. `measured` has no `host`: `publicToLadder` supplies `host: ""`, which `usText` never draws.
+- **Deploy:** `compose.web.yml` has the top-level `volumes: public-data: {}` and the api's `- public-data:/var/lib/ct-public` (7b-A Task 16); the api's image pre-creates the directory owned by 65532; `ci.yml` has 7b-A's `wasm` job (wasm32 check, `cargo test -p arb-wasm`); the rust image line in `docker/rust.Dockerfile` is unchanged. Web rollback tag: `web:pre7b-B` (`web:pre7b` is 7a-B's).
 
 ## Global Constraints
 
@@ -54,7 +33,8 @@ Every name below is read or sent by 7b-B exactly as written. The TypeScript copi
 - **Public bundle:** at most **350 KB gzip** for everything under `dist/math-assets/` (JS + WASM + CSS; `check-math-bundle.mjs`); no module under `src/pages/`, `src/api/` (values), `src/explain/` or `src/help.ts` (the `noDashboardCode` guard; type-only imports are erased and allowed); no `/api/` string in any math JS, CSS or HTML; the page's only request besides its own assets is `GET /math-data/public.json`.
 - **CSP (math, exact):** `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. So: no inline `<script>`, no `style=` attribute anywhere in the math page (React `style` props are not used in public components either), fonts from Google Fonts only. The dashboard CSP (`ct-csp`) is unchanged.
 - **Traefik `ct-math` (exact):** rule ``Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))``; `entrypoints=websecure`, `tls.certresolver=letsencrypt`, `service=ct-web`, `priority=1000`; middlewares `ct-math-rl@docker,ct-math-if@docker,ct-sec@docker,ct-math-csp@docker` (never `ct-auth`); `ct-math-rl` `ratelimit.average=5`, `ratelimit.burst=20`, `ratelimit.sourcecriterion.ipstrategy.depth=0`; `ct-math-if` `inflightreq.amount=4`, `inflightreq.sourcecriterion.ipstrategy.depth=0`.
-- **WASM on the PC:** `PROFILE=dev sh scripts/build-wasm.sh` for tests; `npm run build` (the 350 KB budget) needs the release package, so Task 13 and the runbook run `sh scripts/build-wasm.sh` (release, `arb-wasm` only). `wasm-bindgen-cli` is installed by the owner (7b-A); if `wasm-bindgen --version` differs from `Cargo.lock`, **stop and ask**.
+- **WASM on the PC:** `PROFILE=dev sh scripts/build-wasm.sh` for tests; `npm run build` (the 350 KB budget) needs the release package, so Task 13 and the runbook run `sh scripts/build-wasm.sh` (release, `arb-wasm` only). The lead approved that; the owner's OK is still pending, so Task 13 step 5 and runbook step 2 ask for it first. `wasm-bindgen-cli 0.2.129` is installed by the owner (7b-A); if `wasm-bindgen --version` differs from `Cargo.lock`, **stop and ask**.
+- **Engine numbers come from 7b-A's fixtures:** a test that asserts an engine output either compares with the fixture's `output` string for the same input, or reads the value from the engine for the page's input (wiring); no hand-computed engine figures.
 - **No new npm dependency** (runtime or dev); `package.json` changes only in `scripts`; `package-lock.json` untouched; no fresh `npm install` in the worktree (reuse `web/node_modules`).
 - **UI tasks (6, 7, 8, 9, 10, 11, 12):** the implementer loads the `frontend-design:frontend-design` skill before writing components or CSS, within the constraints above.
 - **Test commands (from the worktree root):** one file `cd web && npx vitest run <path>`; all `cd web && npm test`; types `cd web && npx tsc --noEmit` (dashboard) and, from Task 4 on, `cd web && npx tsc --noEmit -p tsconfig.math.json` (math); vitest does not catch unused imports (`noUnusedLocals` is on). `WASM_REQUIRED=1` in front makes a missing package a failure instead of a skip. Every task ends with `cd web && npm test && npx tsc --noEmit` green (plus the math tsc from Task 4 on).
@@ -66,7 +46,7 @@ Every name below is read or sent by 7b-B exactly as written. The TypeScript copi
 1. **The snapshot file in a shape the page did not expect:** a 404, a network error, an HTML page with 200, `v: 2`, a `v: 1` body missing `today` or with a rung whose `gains` is a JSON number, a `written_ms` in the future (clock skew), a failed re-fetch after a good load. Each must read "live numbers unavailable" (or fresh for the future stamp, or keep the last good snapshot), never throw, never draw `NaN` or a negative age. Pinned in Task 3 by `rejects every shape the page cannot draw` and `a written_ms in the future is fresh; exactly 30 min is fresh, one ms more is stale`, and in Task 11 by `404, a network error, an HTML page and v 2 all read missing` and `a failed re-fetch keeps the last good snapshot`.
 2. **The engine misbehaving or fed junk by the UI:** a trap after a Rust panic (`RuntimeError: unreachable`), a non-JSON string, an array, `{"error"}`, and the UI's own invalid input (a size of 0, two levels dragged onto one price). The section shows one sentence in `role="alert"` and the other sections keep working. Pinned in Task 4 by `turns a trap, non-JSON and an array into one sentence` and in Task 9 by `a: a size of 0 is the engine's sentence, and the page keeps working`.
 3. **Degenerate geometry (`NaN` in an SVG attribute):** an empty book, a zero-depth leg (no steps, Q* 0), every leg drained (nothing filled, `q_eff` 0), an episode that never opens (`open_ms` null) or never closes (`close_ms` null), `t_x` null. Pinned in Task 6 by `an empty book draws no bars and no NaN`, Task 7 by `no steps and Q* 0 draw no NaN` and `nothing filled says so and draws no NaN`, Task 8 by `an episode that never opens or never closes draws no NaN`.
-4. **Contract drift with 7b-A:** a fixture named `basket_json.json` beside `payoff.json`, a classify node this page does not know, and the snapshot's rungs without `account_id` (every React key `undefined`, rows collapsing). Pinned in Task 4 by `has one fixture file per engine function`, Task 6 by `shows a node the page does not know instead of dropping it`, Task 2 by `draws a ladder whose rungs carry no account_id, keyed by scenario`.
+4. **Contract drift with 7b-A:** a fixture file missing or extra, a section's start drifting from the fixture it copies (`fed-book`, `no-edge-3`, `no-all-fill`, `no-one-leg-empty-burst`), a classify node this page does not know, and the snapshot's rungs without `account_id` (every React key `undefined`, rows collapsing). Pinned in Task 4 by `has exactly one fixture file per engine export`, Tasks 9–10 by the `… is fixture …` tests, Task 6 by `shows a node the page does not know instead of dropping it`, Task 2 by `draws a ladder whose rungs carry no account_id, keyed by scenario`.
 5. **Dashboard code reaching the public bundle** through a reused module (a value import of `explain/models`, `components/EmptyState` → `api/client`, `help.ts`), or a `/api/` string shipping. Pinned in Task 1 by `the reused schematics reach no dashboard module by a value import`, and in Task 13 by `bundles the reused schematics and nothing from the dashboard` and `fails on "/api/" in an asset`.
 
 ---
@@ -352,7 +332,7 @@ export function glyphKey(r: Pick<SweetRow, 'label' | 'mean'> | undefined): Glyph
 export function cellDetail(row: LadderGridRow, col: { scenario: string; latency_ms: number }, r: GridRow | undefined): string
 // lib/ladder.ts
 export type Rung = Omit<LadderRung, 'account_id'>;
-export interface LadderIn { epoch: number; start_ms: number | null; as_of_ms: number | null; rungs: Rung[]; markets: GridRow[]; measured: { latency_ms: number } | null; markets_status: MarketsStatus; break_even: BreakEven }
+export interface LadderIn { epoch: number; start_ms: number | null; as_of_ms: number | null; rungs: Rung[]; markets: GridRow[]; measured: { latency_ms: number; host?: string } | null; markets_status: MarketsStatus; break_even: BreakEven }
 export function ladderModel(l: LadderIn): LadderModel   // body unchanged; the api's Ladder is a LadderIn
 // LadderModel: columns[].rung: Rung; extras: Rung[]; measured: { latency_ms: number } | null; markets.rows: GridRow[]
 // SweetLadderGrid({ rows: GridRow[], … })
@@ -466,7 +446,8 @@ export interface LadderIn {
   as_of_ms: number | null;
   rungs: Rung[];
   markets: GridRow[];
-  measured: { latency_ms: number } | null;
+  /** The api's Ladder carries the host; the snapshot's publicToLadder passes "" (never drawn: usText reads latency_ms only). */
+  measured: { latency_ms: number; host?: string } | null;
   markets_status: MarketsStatus;
   break_even: BreakEven;
 }
@@ -523,13 +504,13 @@ export const SNAPSHOT_URL = '/math-data/public.json';
 export const FRESH_MS = 1_800_000;   // 30 min
 export const REFETCH_MS = 300_000;   // 5 min
 export interface PublicRung { scenario: string; latency_ms: number | null; extra: boolean; n_exec: number; n_leg_risk: number; n_missed: number; gains: string; leg_risk: string; settle: string; unrealized: string; net: string }
-export interface PublicSweetRow { side: 'yes' | 'no'; scenario: string; fee_bips: number; latency_ms: number | null; dimension: 'all' | 'category'; bucket: string; label: SweetLabel; n_exec: number; clusters: number; mean: string | null; lo: string | null; hi: string | null }
+export interface PublicSweetRow { side: 'no'; scenario: string; fee_bips: 0; latency_ms: number | null; dimension: 'all' | 'category'; bucket: string; label: SweetLabel; n_exec: number; clusters: number; mean: string | null; lo: string | null; hi: string | null }
 export interface PublicLadder { epoch: number; start_ms: number | null; as_of_ms: number | null; break_even: BreakEven; measured: { latency_ms: number } | null; markets_status: MarketsStatus; rungs: PublicRung[]; markets: PublicSweetRow[] }
 export interface PublicToday { day_start_ms: number; arb: number; no: number; yes: number; edge_budget100: string | null; hourly: { hour: number; arb: number }[] }
 export interface PublicSnapshot { v: 1; written_ms: number; ladder: PublicLadder; today: PublicToday }
 export function parseSnapshot(raw: unknown): PublicSnapshot | null
 export function freshness(s: Pick<PublicSnapshot, 'written_ms'>, nowMs: number): 'fresh' | 'stale'
-export function publicToLadder(l: PublicLadder): LadderIn
+export function publicToLadder(l: PublicLadder): LadderIn   // measured gets host ""
 export function hourlyValues(t: Pick<PublicToday, 'hourly'>): number[]   // 24 slots, UTC hours
 // fixtures.ts (tests only)
 export function snapshotFixture(o?: Partial<PublicSnapshot>, writtenMs?: number): PublicSnapshot
@@ -560,10 +541,11 @@ export function snapshotFixture(o: Partial<PublicSnapshot> = {}, writtenMs: numb
         scenario: r.scenario, latency_ms: r.latency_ms, extra: r.extra, n_exec: r.n_exec, n_leg_risk: r.n_leg_risk, n_missed: r.n_missed,
         gains: r.gains, leg_risk: r.leg_risk, settle: r.settle, unrealized: r.unrealized, net: r.net,
       })),
+      // 7b-A: NO side, fee 0, the LADDER scenarios, `all` and `category` only.
       markets: l.markets.flatMap((r) =>
-        r.dimension === 'all' || r.dimension === 'category'
+        r.side === 'no' && r.fee_bips === 0 && (r.dimension === 'all' || r.dimension === 'category')
           ? [{
-              side: r.side, scenario: r.scenario, fee_bips: r.fee_bips, latency_ms: r.latency_ms, dimension: r.dimension, bucket: r.bucket,
+              side: 'no' as const, scenario: r.scenario, fee_bips: 0 as const, latency_ms: r.latency_ms, dimension: r.dimension, bucket: r.bucket,
               label: r.label, n_exec: r.n_exec, clusters: r.clusters, mean: r.mean, lo: r.lo, hi: r.hi,
             }]
           : [],
@@ -575,7 +557,8 @@ export function snapshotFixture(o: Partial<PublicSnapshot> = {}, writtenMs: numb
       no: 12,
       yes: 3,
       edge_budget100: '41.37',
-      hourly: [{ hour: 0, arb: 2 }, { hour: 1, arb: 0 }, { hour: 2, arb: 5 }, { hour: 3, arb: 8 }],
+      // 7b-A writes 24 entries, hours 0–23 UTC
+      hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, arb: [2, 0, 5, 8][hour] ?? 0 })),
     },
     ...o,
   };
@@ -617,6 +600,8 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
       ['break_even at without a latency', { ...b, ladder: { ...b.ladder, break_even: { kind: 'at' } } }],
       ['an unknown markets_status', { ...b, ladder: { ...b.ladder, markets_status: 'busy' } }],
       ['a market row without a label', { ...b, ladder: { ...b.ladder, markets: [{ ...b.ladder.markets[0], label: undefined }] } }],
+      ['a YES-side market row', { ...b, ladder: { ...b.ladder, markets: [{ ...b.ladder.markets[0], side: 'yes' }] } }],
+      ['a market row with a fee', { ...b, ladder: { ...b.ladder, markets: [{ ...b.ladder.markets[0], fee_bips: 10 }] } }],
       ['hourly not a list', { ...b, today: { ...b.today, hourly: {} } }],
       ['edge as a JSON number', { ...b, today: { ...b.today, edge_budget100: 41.37 } }],
     ];
@@ -645,6 +630,7 @@ describe('publicToLadder (spec 7b §7.2)', () => {
     const drift = { ...s.ladder, markets: [...s.ladder.markets, { ...s.ladder.markets[0], dimension: 'days' as 'all', bucket: '1-7' }] };
     const l = publicToLadder(drift);
     expect(l.markets).toHaveLength(s.ladder.markets.length);
+    expect(l.measured).toEqual({ latency_ms: 155, host: '' });
     const { container } = render(<LatencyLadder model={ladderModel(l)} />);
     expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big');
     expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
@@ -664,7 +650,7 @@ Expected: FAIL: `Failed to resolve import "./snapshot"`.
 ```ts
 // web/src/math/snapshot.ts
 // Spec 7b §5.1 and §6.3: the public snapshot the api writes every 5 minutes (plan 7b-A) and nginx serves
-// as a static file. The types list exactly the fields the page reads ("Contract assumed from 7b-A");
+// as a static file. The types copy 7b-A's "Contract for 7b-B" (the fields the page reads);
 // parseSnapshot turns anything else (bad JSON, v ≠ 1, a missing or mistyped field) into null, which the
 // page shows as "live numbers unavailable". Type-only imports from src/api are erased (spec 7b §7.2).
 import type { BreakEven, MarketsStatus, SweetLabel } from '../api/types';
@@ -690,10 +676,11 @@ export interface PublicRung {
   net: string;
 }
 
+/** 7b-A: the rows the "which markets" grid draws: NO side, fee 0, the six LADDER scenarios. */
 export interface PublicSweetRow {
-  side: 'yes' | 'no';
+  side: 'no';
   scenario: string;
-  fee_bips: number;
+  fee_bips: 0;
   latency_ms: number | null;
   dimension: 'all' | 'category';
   bucket: string;
@@ -748,7 +735,7 @@ function isRung(x: unknown): boolean {
 }
 
 function isRow(x: unknown): boolean {
-  return isObj(x) && (x.side === 'yes' || x.side === 'no') && typeof x.scenario === 'string' && isInt(x.fee_bips)
+  return isObj(x) && x.side === 'no' && typeof x.scenario === 'string' && x.fee_bips === 0
     && isIntOrNull(x.latency_ms) && typeof x.dimension === 'string' && typeof x.bucket === 'string' && typeof x.label === 'string'
     && isInt(x.n_exec) && isInt(x.clusters) && isDecOrNull(x.mean) && isDecOrNull(x.lo) && isDecOrNull(x.hi);
 }
@@ -778,7 +765,8 @@ export function freshness(s: Pick<PublicSnapshot, 'written_ms'>, nowMs: number):
 }
 
 /** §7.2: the snapshot's ladder as ladderModel's input. Only `all` and `category` rows ship (§5.1); a row of
- *  another dimension is dropped here rather than trusted. */
+ *  another dimension is dropped here rather than trusted. The snapshot drops the measured host (it names
+ *  the VPS); the Ladder shape gets "", which usText never draws (7b-A's contract). */
 export function publicToLadder(l: PublicLadder): LadderIn {
   return {
     epoch: l.epoch,
@@ -786,7 +774,7 @@ export function publicToLadder(l: PublicLadder): LadderIn {
     as_of_ms: l.as_of_ms,
     rungs: l.rungs,
     markets: l.markets.filter((r) => r.dimension === 'all' || r.dimension === 'category'),
-    measured: l.measured,
+    measured: l.measured === null ? null : { latency_ms: l.measured.latency_ms, host: '' },
     markets_status: l.markets_status,
     break_even: l.break_even,
   };
@@ -827,11 +815,11 @@ git commit -m "web: the public snapshot contract: types, parse (anything else is
 - Test: `web/src/wasm/call.test.ts`, `web/src/wasm/parity.test.ts`
 
 **Interfaces:**
-- Consumes: 7b-A's crate, exports and fixtures (C1–C5).
+- Consumes: 7b-A's crate (`wasm-bindgen =0.2.129`), its six exports and `crates/arb-wasm/fixtures/<export>.json` ("Contract for 7b-B").
 - Produces:
 
 ```ts
-// types.ts: the whole engine contract ("Contract assumed from 7b-A"), plus
+// types.ts: the engine contract (7b-A "Contract for 7b-B"), plus
 export const ENGINE_FNS: readonly ['mirror_json', 'payoff_json', 'classify_json', 'depth_walk_json', 'episode_json', 'basket_json'];
 export type EngineFn = (typeof ENGINE_FNS)[number];
 export type Engine = Record<EngineFn, (input: string) => string>;
@@ -845,15 +833,18 @@ export async function loadEngine(): Promise<Engine>
 // testEngine.ts (tests only)
 export const HAVE_PKG: boolean; export const WASM_REQUIRED: boolean;
 export function skipReason(what: string): string;
-export function fixtureFn(file: string): string;   // 'payoff.json' → 'payoff_json'; 'basket_json.json' → 'basket_json'
+export const FIXTURES: string;                     // <web>/../crates/arb-wasm/fixtures
+export interface FixtureCase { name: string; input: string; output: string }
+export function fixtureCases(fn: EngineFn): FixtureCase[];            // crates/arb-wasm/fixtures/<fn>.json
+export function fixtureCase(fn: EngineFn, name: string): FixtureCase; // throws when the case is missing
 export function loadTestEngine(): Promise<Engine>;
 ```
 
 - [ ] **Step 1: Check that 7b-A is in the tree and the CLI matches**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && grep -c 'crates/arb-wasm' Cargo.toml && ls crates/arb-wasm/fixtures && awk '/^name = "wasm-bindgen"/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock && wasm-bindgen --version && rustup target list --installed | grep wasm32`
-Expected: `1`; six `.json` files; a version `0.2.<n>`; `wasm-bindgen 0.2.<n>` (the same); `wasm32-unknown-unknown`.
-If not: no `crates/arb-wasm` = 7b-A is not merged into this branch: **STOP** and report. A missing or different CLI: **STOP** and ask the owner to run `cargo install wasm-bindgen-cli --locked --version <the Cargo.lock version>`.
+Expected: `1`; `basket_json.json classify_json.json depth_walk_json.json episode_json.json mirror_json.json payoff_json.json`; `0.2.129`; `wasm-bindgen 0.2.129`; `wasm32-unknown-unknown`.
+If not: no `crates/arb-wasm` = 7b-A is not merged into this branch: **STOP** and report. A missing or different CLI: **STOP** and ask the owner to run `cargo install --locked --version 0.2.129 wasm-bindgen-cli`.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -861,7 +852,6 @@ If not: no `crates/arb-wasm` = 7b-A is not merged into this branch: **STOP** and
 // web/src/wasm/call.test.ts
 import { describe, expect, it } from 'vitest';
 import { ENGINE_BROKE, call } from './call';
-import { fixtureFn } from './testEngine';
 import { ENGINE_FNS, type Engine, isError } from './types';
 
 const engine = (f: (input: string) => string): Engine => Object.fromEntries(ENGINE_FNS.map((n) => [n, f])) as Engine;
@@ -889,30 +879,19 @@ describe('call (review focus 2)', () => {
     }
   });
 });
-
-describe('fixtureFn (review focus 4)', () => {
-  it('maps both fixture file names to the export', () => {
-    expect(fixtureFn('payoff.json')).toBe('payoff_json');
-    expect(fixtureFn('depth_walk.json')).toBe('depth_walk_json');
-    expect(fixtureFn('basket_json.json')).toBe('basket_json');
-  });
-});
 ```
 
 ```ts
 // web/src/wasm/parity.test.ts
-// 09-27 §4.3, 7b §3.4: the WASM build returns exactly the strings the native fixtures hold. The fixtures
-// are read with node fs (as theme.test.ts reads theme.css); vite's fs.allow stays as it is (7b §11).
+// 09-27 §4.3, 7b §3.4: the WASM build returns exactly the strings the native fixtures hold
+// (crates/arb-wasm/fixtures/<export>.json, 7b-A). Read with node fs; vite's fs.allow stays as it is (7b §11).
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { HAVE_PKG, WASM_REQUIRED, fixtureFn, loadTestEngine, skipReason } from './testEngine';
-import { ENGINE_FNS, type Engine, type EngineFn } from './types';
+import { FIXTURES, HAVE_PKG, WASM_REQUIRED, fixtureCases, loadTestEngine, skipReason } from './testEngine';
+import { ENGINE_FNS, type Engine } from './types';
 
-declare const process: { cwd(): string };
-const DIR = `${process.cwd()}/../crates/arb-wasm/fixtures`;
-type Case = { name: string; input: string; output: string };
-const FILES: string[] = existsSync(DIR) ? readdirSync(DIR).filter((f: string) => f.endsWith('.json')).sort() : [];
+const FILES: string[] = existsSync(FIXTURES) ? readdirSync(FIXTURES).filter((f: string) => f.endsWith('.json')).sort() : [];
 
 if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('parity'));
 
@@ -922,16 +901,15 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('native = WASM (parity)', () => {
     engine = await loadTestEngine();
   });
 
-  it('has one fixture file per engine function (review focus 4)', () => {
-    expect(FILES.map(fixtureFn).sort()).toEqual([...ENGINE_FNS].sort());
+  it('has exactly one fixture file per engine export (review focus 4)', () => {
+    expect(FILES).toEqual(ENGINE_FNS.map((f) => `${f}.json`).sort());
   });
 
-  for (const file of FILES) {
-    it(`${file}: every case, byte for byte`, () => {
-      const fn = fixtureFn(file) as EngineFn;
-      const cases = JSON.parse(readFileSync(`${DIR}/${file}`, 'utf8')) as Case[];
+  for (const fn of ENGINE_FNS) {
+    it(`${fn}.json: every case, byte for byte`, () => {
+      const cases = fixtureCases(fn);
       expect(cases.length).toBeGreaterThan(0);
-      for (const c of cases) expect(engine[fn](c.input), `${file} ${c.name}`).toBe(c.output);
+      for (const c of cases) expect(engine[fn](c.input), `${fn} ${c.name}`).toBe(c.output);
     });
   }
 });
@@ -989,20 +967,30 @@ Expected: the cargo build, then `arb_wasm.d.ts arb_wasm.js arb_wasm_bg.wasm arb_
 
 ```ts
 // web/src/wasm/types.ts
-// The JSON contract with crates/arb-wasm (plan 7b-A; spec 7b §3.4, 09-27 §4.1), written out in the 7b-B
-// plan's "Contract assumed from 7b-A". Decimals are strings. Each model lists only the fields the page
-// reads; the parity test compares whole strings, so an extra output field never breaks the page.
+// The JSON contract with crates/arb-wasm, copied from 7b-A's "Contract for 7b-B" (field order = serialized
+// order). Dec is a JSON string holding a normalized decimal. The parity test compares whole strings.
 
 export type Dec = string;
 export interface Level { p: Dec; s: Dec }
+export interface Book { bids: Level[]; asks: Level[] }
 export interface Fee { rate: Dec; exponent: number }
 export type LegStatus = 'live' | 'placeholder' | 'other' | 'closed_no' | 'closed_yes' | 'halted';
 export interface LegIn { status: LegStatus; bids: Level[]; asks: Level[]; fee: Fee | null }
 
 export interface MirrorIn { bids: Level[]; asks: Level[] }
-export interface MirrorModel { no_asks: Level[]; no_bids: Level[]; d1_long: Dec | null; d1_short: Dec | null; crossed: boolean }
+export interface MirrorModel {
+  no_asks: Level[];
+  no_bids: Level[];
+  best_bid: Level | null;
+  best_ask: Level | null;
+  spread: Dec | null;
+  d1_long: Dec | null;
+  d1_short: Dec | null;
+  crossed: boolean;
+}
 
 export type PayoffKind = 'yes' | 'no' | 'implication';
+/** prices: length s, or 2 for the implication (whose s is ignored). */
 export interface PayoffIn { kind: PayoffKind; s: number; other_listed: boolean; prices: { bid: Dec; ask: Dec }[] | null }
 export interface PayoffMatrix {
   rows: string[];
@@ -1015,41 +1003,62 @@ export interface PayoffMatrix {
   top_edge_gross: Dec | null;
 }
 
+export const CLASSIFY_NODES = [
+  'decided', 'no_basket_tried', 'no_basket_few_legs', 'no_basket_crossed', 'no_basket_not_positive', 'no_basket_positive',
+  'yes_basket_tried', 'yes_basket_no_live', 'yes_basket_crossed', 'yes_basket_missing_ask', 'yes_basket_not_positive',
+  'yes_basket_positive', 'complete', 'incomplete',
+] as const;
+export type ClassifyNode = (typeof CLASSIFY_NODES)[number];
 export type SignalKind = 'yes_basket' | 'yes_basket_incomplete' | 'no_basket' | 'implication';
 export type Realization = 'settlement' | 'converter' | 'not_arbitrage';
 export interface ClassifyIn { augmented: boolean; legs: LegIn[] }
-export interface ClassifyModel { path: string[]; kind: SignalKind | null; realization: Realization | null; net: Dec | null; gross: Dec | null }
+/** path is typed string[]: a node this page does not know is still drawn (review focus 4). */
+export interface ClassifyModel {
+  path: string[];
+  kind: SignalKind | null;
+  realization: Realization | null;
+  net: Dec | null;
+  gross: Dec | null;
+  q_star: Dec | null;
+}
 
 export interface DepthWalkIn { rule: 'yes' | 'no'; legs: { levels: Level[]; fee: Fee | null }[] }
-export interface WalkStep { q_from: Dec; q_to: Dec; cost_per_basket: Dec; profitable: boolean }
-export interface WalkModel { steps: WalkStep[]; q_star: Dec; pi: Dec }
+/** payoff per step: 1 for the YES rule; for the nested NO rule, active legs − 1. */
+export interface WalkStep { q_from: Dec; q_to: Dec; cost: Dec; payoff: Dec; profitable: boolean }
+export interface WalkModel { steps: WalkStep[]; q_star: Dec; pi: Dec; pi_gross: Dec }
 
 export interface ScenarioIn { proc_ms: number; net_ms: number; match_ms: number; honor_seconds_delay: boolean }
-export interface EpisodeIn { kind: 'yes' | 'no'; gap_ms: number; updates: { t_ms: number; legs: LegIn[] }[]; scenario: ScenarioIn; seconds_delay: number }
+export interface EpisodeIn {
+  kind: 'yes' | 'no';
+  gap_ms: number;
+  updates: { t_ms: number; legs: LegIn[] }[];
+  scenario: ScenarioIn;
+  /** 0–10 s, or null. */
+  seconds_delay: number | null;
+}
 export interface EpisodeModel {
   updates: { t_ms: number; net: Dec | null }[];
   open_ms: number | null;
   close_ms: number | null;
   peak_ms: number | null;
+  peak_net: Dec | null;
   t_x: number | null;
-  caught: boolean;
   captured: Dec | null;
+  caught: boolean;
 }
 
-export interface BookIn { bids: Level[]; asks: Level[] }
-export interface BasketIn {
-  kind: 'yes' | 'no';
-  legs: { open: BookIn; t_x: BookIn; unwind: BookIn }[];
-  fee: Fee | null;
-  q_request: Dec;
-  min_order: Dec;
-  convert_fee_bips: number;
-}
-export interface Fill { filled: Dec; vwap: Dec | null; fees: Dec }
+/** Every book is a YES book; for kind "no" the buy walks the mirrored bids, the unwind the mirrored asks. */
+export interface BasketLegIn { open: Book; t_x: Book; unwind: Book; fee: Fee | null }
+/** min_order ("5") and convert_fee_bips ("0") are left to their defaults by the page. */
+export interface BasketIn { kind: 'yes' | 'no'; legs: BasketLegIn[]; q_request: Dec }
+export interface Fill { requested: Dec; filled: Dec; vwap: Dec | null; fees: Dec; levels_used: number }
 export interface BasketModel {
+  kind: 'yes' | 'no';
+  min_order: Dec;
+  q_open: Dec;
   q_target: Dec;
+  legs: { limit: Dec; buy: Fill; excess: Dec; unwind: Fill }[];
   q_eff: Dec;
-  legs: { buy: Fill; excess: Dec; unwind: Fill }[];
   cash: { spent: Dec; fees: Dec; unwind_back: Dec; convert_back: Dec; net_cash: Dec; held_unsold: { qty: Dec; basis: Dec }[] };
   value_at_resolution: Dec | null;
 }
@@ -1111,7 +1120,7 @@ export async function loadEngine(): Promise<Engine> {
 // `npm test` works without Rust, 09-27 §4.2) and the .wasm bytes from disk through initSync.
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
 import { readFileSync } from 'node:fs';
-import { ENGINE_FNS, type Engine } from './types';
+import { ENGINE_FNS, type Engine, type EngineFn } from './types';
 
 declare const process: { cwd(): string; env: Record<string, string | undefined> };
 
@@ -1129,10 +1138,23 @@ export function skipReason(what: string): string {
   return `${what}: web/src/wasm/pkg is missing, skipped (run scripts/build-wasm.sh; WASM_REQUIRED=1 makes this a failure)`;
 }
 
-/** Fixture file → export: 'payoff.json' → 'payoff_json', 'basket_json.json' → 'basket_json' (C5). */
-export function fixtureFn(file: string): string {
-  const stem = file.replace(/\.json$/, '');
-  return stem.endsWith('_json') ? stem : `${stem}_json`;
+/** 7b-A's golden fixtures: crates/arb-wasm/fixtures/<export>.json, [{name, input, output}] as exact strings. */
+export const FIXTURES = `${process.cwd()}/../crates/arb-wasm/fixtures`;
+export interface FixtureCase {
+  name: string;
+  input: string;
+  output: string;
+}
+
+export function fixtureCases(fn: EngineFn): FixtureCase[] {
+  return JSON.parse(readFileSync(`${FIXTURES}/${fn}.json`, 'utf8')) as FixtureCase[];
+}
+
+/** One named case (sections start from these: fed-book, no-edge-3, no-all-fill, …); throws when missing. */
+export function fixtureCase(fn: EngineFn, name: string): FixtureCase {
+  const c = fixtureCases(fn).find((x) => x.name === name);
+  if (c === undefined) throw new Error(`no fixture case ${fn}/${name}`);
+  return c;
 }
 
 let cached: Promise<Engine> | null = null;
@@ -1163,8 +1185,8 @@ export function loadTestEngine(): Promise<Engine> {
 - [ ] **Step 6: Run to verify pass**
 
 Run: `cd web && WASM_REQUIRED=1 npx vitest run src/wasm`
-Expected: PASS: `call.test.ts` 4 tests; `parity.test.ts` one test per fixture file plus `has one fixture file per engine function` (7 tests).
-If a fixture case fails: the native and WASM outputs differ; report the case name and both strings (a 7b-A issue; do not edit fixtures here). If only `has one fixture file…` fails: list the file names in the report (contract C5).
+Expected: PASS: `call.test.ts` 3 tests; `parity.test.ts` `has exactly one fixture file per engine export` plus one test per export (7 tests).
+If a fixture case fails: the native and WASM outputs differ; report the case name and both strings (a 7b-A issue; do not edit fixtures here).
 
 - [ ] **Step 7: The dashboard stays Rust-free**
 
@@ -1188,7 +1210,7 @@ git commit -m "wasm: build script into web/src/wasm/pkg, tsconfig split, engine 
 ### Task 5: CI's web job builds the engine and requires it
 
 **Files:**
-- Modify: `.github/workflows/ci.yml` (the `web` job, lines 38-53)
+- Modify: `.github/workflows/ci.yml` (the `web` job; 7b-A's `wasm` job, above it, stays as it is)
 - Test: `web/src/deploy.test.ts` (new; Task 14 extends it)
 
 **Interfaces:**
@@ -1218,12 +1240,14 @@ function job(yml: string, name: string): string {
 }
 
 describe('ci (09-27 §4.3)', () => {
-  it('the web job builds the engine, runs both parity sides and the full build, with WASM_REQUIRED', () => {
+  it('the web job builds the engine, runs the WASM side of parity and the full build, with WASM_REQUIRED', () => {
     const web = job(repo('.github/workflows/ci.yml'), 'web');
     expect(web).toContain('WASM_REQUIRED: "1"');
     expect(web).toContain('rustup target add wasm32-unknown-unknown');
     expect(web).toContain('cargo install wasm-bindgen-cli --locked --version');
-    const steps = ['sh scripts/build-wasm.sh', 'cargo test -p arb-wasm', 'npm ci', 'npm test', 'npm run build'].map((s) => web.indexOf(s));
+    expect(web).not.toContain('cargo test -p arb-wasm'); // 7b-A's wasm job runs the native side
+    expect(repo('.github/workflows/ci.yml')).toContain('\n  wasm:\n');
+    const steps = ['sh scripts/build-wasm.sh', 'npm ci', 'npm test', 'npm run build'].map((s) => web.indexOf(s));
     expect(steps.every((i) => i >= 0)).toBe(true);
     expect([...steps].sort((a, b) => a - b)).toEqual(steps);
   });
@@ -1255,9 +1279,8 @@ Expected: FAIL: `expected '…' to contain 'WASM_REQUIRED: "1"'`.
           path: ~/.cargo/bin/wasm-bindgen
           key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}
       - run: command -v wasm-bindgen || cargo install wasm-bindgen-cli --locked --version "${{ steps.wbg.outputs.version }}"
+      # the native side of parity is 7b-A's wasm job (cargo test -p arb-wasm)
       - run: sh scripts/build-wasm.sh
-      # the native side built alone (the rust job runs it again under workspace feature unification)
-      - run: cargo test -p arb-wasm
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -1287,7 +1310,7 @@ Expected: all green, no tsc output.
 
 ```bash
 git add .github/workflows/ci.yml web/src/deploy.test.ts
-git commit -m "ci: web job builds arb-wasm with the Cargo.lock wasm-bindgen, runs both parity sides with WASM_REQUIRED, then the full build"
+git commit -m "ci: web job builds arb-wasm with the Cargo.lock wasm-bindgen and runs the WASM side of parity with WASM_REQUIRED, then the full build"
 ```
 
 ---
@@ -1306,7 +1329,7 @@ git commit -m "ci: web job builds arb-wasm with the Cargo.lock wasm-bindgen, run
 ```ts
 export const CROSSED = 'Crossed book. Somewhere a feed is lying.';
 export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[]; model: MirrorModel }): JSX.Element
-export const NODES: [string, string][];              // 09-27 §3.3's Node order with its label
+export const NODES: [ClassifyNode, string][];        // 7b-A's 14 nodes in classify's order, with a label each
 export function endText(m: ClassifyModel): string;   // 'NO basket · converted' | 'nothing' | …
 export function ClassifyTree({ model }: { model: ClassifyModel }): JSX.Element
 ```
@@ -1324,6 +1347,7 @@ const BIDS = [{ p: '0.54', s: '5603.74' }, { p: '0.53', s: '85887.16' }];
 const ASKS = [{ p: '0.55', s: '32356.03' }];
 const MODEL: MirrorModel = {
   no_asks: [{ p: '0.46', s: '5603.74' }, { p: '0.47', s: '85887.16' }], no_bids: [{ p: '0.45', s: '32356.03' }],
+  best_bid: { p: '0.54', s: '5603.74' }, best_ask: { p: '0.55', s: '32356.03' }, spread: '0.01',
   d1_long: '1.01', d1_short: '0.99', crossed: false,
 };
 
@@ -1343,16 +1367,17 @@ describe('MirrorBooks (parent §5.7 a)', () => {
     expect(screen.getByText('short 0.99')).toBeInTheDocument();
     expect(screen.getByText('NO ask 0.46 (1 − 0.54)')).toBeInTheDocument();
     expect(screen.getByText('NO bid 0.45 (1 − 0.55)')).toBeInTheDocument();
+    expect(screen.getByText('spread 0.01')).toBeInTheDocument();
     expect(screen.queryByText(CROSSED)).toBeNull();
   });
 
   it('names a crossed book in the alert colour', () => {
-    render(<MirrorBooks bids={BIDS} asks={ASKS} model={{ ...MODEL, crossed: true, d1_long: '0.99', d1_short: '1.01' }} />);
+    render(<MirrorBooks bids={BIDS} asks={ASKS} model={{ ...MODEL, crossed: true, spread: '-0.01', d1_long: '0.99', d1_short: '1.01' }} />);
     expect(screen.getByText(CROSSED)).toHaveClass('mb-alert');
   });
 
   it('an empty book draws no bars and no NaN (review focus 3)', () => {
-    const { container } = render(<MirrorBooks bids={[]} asks={[]} model={{ no_asks: [], no_bids: [], d1_long: null, d1_short: null, crossed: false }} />);
+    const { container } = render(<MirrorBooks bids={[]} asks={[]} model={{ no_asks: [], no_bids: [], best_bid: null, best_ask: null, spread: null, d1_long: null, d1_short: null, crossed: false }} />);
     expect(container.innerHTML).not.toContain('NaN');
     expect(container.querySelectorAll('rect')).toHaveLength(0);
     expect(screen.getByText('D1 long —')).toBeInTheDocument();
@@ -1371,24 +1396,26 @@ const lit = (c: HTMLElement) => [...c.querySelectorAll('li.cl-node.lit')].map((l
 
 describe('ClassifyTree (parent §5.7 c)', () => {
   it('lights the path classify took and ends in the kind', () => {
-    const m: ClassifyModel = { path: ['no_basket_tried', 'no_basket_positive', 'complete'], kind: 'no_basket', realization: 'converter', net: '4.1', gross: '5.2' };
+    // 7b-A fixture classify_json/no-edge-3's output
+    const m: ClassifyModel = { path: ['no_basket_tried', 'no_basket_positive'], kind: 'no_basket', realization: 'converter', net: '0.5', gross: '0.5', q_star: '10' };
     const { container } = render(<ClassifyTree model={m} />);
-    expect(container.querySelectorAll('li.cl-node')).toHaveLength(NODES.length);
-    expect(lit(container)).toEqual(['no_basket_tried', 'no_basket_positive', 'complete']);
+    expect(container.querySelectorAll('li.cl-node')).toHaveLength(14);
+    expect(lit(container)).toEqual(['no_basket_tried', 'no_basket_positive']);
     expect(screen.getByText('NO basket · converted')).toHaveClass('cl-end');
-    expect(screen.getByText('+$4.10')).toBeInTheDocument();
+    expect(container.querySelector('.cl-net')).toHaveTextContent('net Π +$0.50 on the table · gross +$0.50 · Q* 10');
   });
 
   it('ends in nothing for a decided event', () => {
-    const { container } = render(<ClassifyTree model={{ path: ['decided'], kind: null, realization: null, net: null, gross: null }} />);
+    const { container } = render(<ClassifyTree model={{ path: ['decided'], kind: null, realization: null, net: null, gross: null, q_star: null }} />);
     expect(lit(container)).toEqual(['decided']);
     expect(screen.getByText('nothing')).toHaveClass('cl-end');
     expect(container.querySelector('.cl-net')).toBeNull();
   });
 
   it('shows a node the page does not know instead of dropping it (review focus 4)', () => {
-    const { container } = render(<ClassifyTree model={{ path: ['no_basket_tried', 'brand_new_node'], kind: null, realization: null, net: null, gross: null }} />);
+    const { container } = render(<ClassifyTree model={{ path: ['no_basket_tried', 'brand_new_node'], kind: null, realization: null, net: null, gross: null, q_star: null }} />);
     expect(lit(container)).toEqual(['no_basket_tried', 'brand_new_node']);
+    expect(container.querySelectorAll('li.cl-node')).toHaveLength(15);
     expect(screen.getByText('brand_new_node')).toBeInTheDocument();
   });
 });
@@ -1460,6 +1487,7 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
       <ul className="plain mb-refl" aria-label="the mirror at the top of the book">
         {bids[0] && model.no_asks[0] && <li>{`NO ask ${model.no_asks[0].p} (1 − ${bids[0].p})`}</li>}
         {asks[0] && model.no_bids[0] && <li>{`NO bid ${model.no_bids[0].p} (1 − ${asks[0].p})`}</li>}
+        {model.spread !== null && <li>{`spread ${model.spread}`}</li>}
       </ul>
       <p className="dim mb-note">bars: size at each price, teal bids and salmon asks; a line joins YES price p to NO price 1 − p</p>
     </figure>
@@ -1470,21 +1498,24 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
 ```tsx
 // web/src/schematics/ClassifyTree.tsx
 import { Money } from '../components/Money';
-import type { ClassifyModel } from '../wasm/types';
+import type { ClassifyModel, ClassifyNode } from '../wasm/types';
 
-/** 09-27 §3.3: the tests classify runs, in its order (the Node enum, snake_case), with a label each. */
-export const NODES: [string, string][] = [
+/** 7b-A's classify path nodes, in the order classify runs them, with a label each. */
+export const NODES: [ClassifyNode, string][] = [
   ['decided', 'is the event decided?'],
-  ['no_live', 'no live leg'],
-  ['crossed', 'a crossed book: our state is wrong'],
-  ['no_basket_tried', 'NO basket: Σ YES bids − 1'],
+  ['no_basket_tried', 'NO basket over the legs with a YES bid'],
+  ['no_basket_few_legs', 'fewer than two legs have a YES bid'],
+  ['no_basket_crossed', 'a crossed book: our state is wrong'],
+  ['no_basket_not_positive', 'Σ YES bids − 1 is not positive'],
   ['no_basket_positive', 'the NO basket pays'],
-  ['yes_basket_tried', 'YES basket: 1 − Σ asks'],
-  ['missing_ask', 'a live leg has no ask'],
+  ['yes_basket_tried', 'YES basket over every live leg'],
+  ['yes_basket_no_live', 'no live leg'],
+  ['yes_basket_crossed', 'a crossed book: our state is wrong'],
+  ['yes_basket_missing_ask', 'a live leg has no ask'],
+  ['yes_basket_not_positive', '1 − Σ asks is not positive'],
   ['yes_basket_positive', 'the YES basket pays'],
   ['complete', 'every outcome is in the set'],
   ['incomplete', 'an outcome is not in the set'],
-  ['no_signal', 'nothing to trade'],
 ];
 
 const KIND: Record<string, string> = {
@@ -1504,12 +1535,12 @@ export function endText(m: ClassifyModel): string {
  * stretch). A node the page does not know is shown under its own name, never dropped (contract drift shows).
  */
 export function ClassifyTree({ model }: { model: ClassifyModel }) {
-  const known = new Set(NODES.map(([id]) => id));
+  const known = new Set<string>(NODES.map(([id]) => id));
   const extra = model.path.filter((n) => !known.has(n)).map((n): [string, string] => [n, n]);
   return (
     <figure className="ctree" aria-label="classify one update">
       <ol className="cl-path" aria-label="the tests classify runs">
-        {[...NODES, ...extra].map(([id, text]) => {
+        {[...(NODES as [string, string][]), ...extra].map(([id, text]) => {
           const on = model.path.includes(id);
           return (
             <li key={id} className={on ? 'cl-node lit' : 'cl-node'} data-node={id} aria-current={on ? 'step' : undefined}>
@@ -1523,6 +1554,7 @@ export function ClassifyTree({ model }: { model: ClassifyModel }) {
       {model.net !== null && (
         <p className="cl-net">
           net Π <Money value={model.net} signed cents /> on the table · gross <Money value={model.gross} signed cents />
+          {model.q_star !== null && ` · Q* ${model.q_star}`}
         </p>
       )}
     </figure>
@@ -1589,10 +1621,10 @@ git commit -m "web: schematics a (one book twice, mirror lines, D1) and c (class
 - Produces:
 
 ```ts
-export function DepthStairs({ model, payoff }: { model: WalkModel; payoff: string }): JSX.Element
+export function DepthStairs({ model }: { model: WalkModel }): JSX.Element   // payoff read per step
 export interface Verdict { big: string; tone: 'pos' | 'neg' | null }
 export function basketVerdict(m: BasketModel): Verdict
-export function BasketLegs({ model, names }: { model: BasketModel; names: string[] }): JSX.Element
+export function BasketLegs({ model, names }: { model: BasketModel; names: string[] }): JSX.Element   // reads 7b-A's basket_json output
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -1604,39 +1636,48 @@ import { describe, expect, it } from 'vitest';
 import type { WalkModel } from '../wasm/types';
 import { DepthStairs } from './DepthStairs';
 
-/** Section d's start (3 legs × 3 levels): four paying steps to Q* = 100, then one that costs 1.08 > 1. */
-const WALK: WalkModel = {
+/** 7b-A fixture depth_walk_json/yes-two-legs's output (its test depth_walk_draws_past_q_star, verbatim). */
+const YES_TWO: WalkModel = JSON.parse(
+  '{"steps":[{"q_from":"0","q_to":"10","cost":"0.9","payoff":"1","profitable":true},{"q_from":"10","q_to":"15","cost":"1","payoff":"1","profitable":false}],"q_star":"10","pi":"1","pi_gross":"1"}',
+) as WalkModel;
+/** The nested NO rule: the payoff falls as legs run out (a view model, not an engine figure). */
+const NESTED: WalkModel = {
   steps: [
-    { q_from: '0', q_to: '30', cost_per_basket: '0.94', profitable: true },
-    { q_from: '30', q_to: '40', cost_per_basket: '0.95', profitable: true },
-    { q_from: '40', q_to: '50', cost_per_basket: '0.97', profitable: true },
-    { q_from: '50', q_to: '100', cost_per_basket: '0.99', profitable: true },
-    { q_from: '100', q_to: '200', cost_per_basket: '1.08', profitable: false },
+    { q_from: '0', q_to: '10', cost: '1.9', payoff: '2', profitable: true },
+    { q_from: '10', q_to: '30', cost: '1.42', payoff: '1', profitable: false },
   ],
-  q_star: '100',
-  pi: '3.1',
+  q_star: '10',
+  pi: '1',
+  pi_gross: '1',
 };
 
 describe('DepthStairs (parent §5.7 d)', () => {
   it('shades Π up to Q*, draws the steps past it, marks Q*, and says Π and Q* in HTML', () => {
-    const { container } = render(<DepthStairs model={WALK} payoff="1" />);
+    const { container } = render(<DepthStairs model={YES_TWO} />);
     const svg = container.querySelector('svg.ds-svg');
     expect(svg).toHaveAttribute('preserveAspectRatio', 'none');
     expect(svg?.querySelector('text')).toBeNull();
-    expect(container.querySelectorAll('rect.ds-pi')).toHaveLength(4);
-    expect(container.querySelectorAll('rect.ds-loss')).toHaveLength(1);
-    expect(container.querySelectorAll('line.ds-cost')).toHaveLength(5);
-    expect(Number(container.querySelector('line.ds-qstar')?.getAttribute('x1'))).toBeCloseTo(150);
-    const pay = Number(container.querySelector('line.ds-pay')?.getAttribute('y1'));
-    const loss = container.querySelector('rect.ds-loss');
-    expect(Number(loss?.getAttribute('y')) + Number(loss?.getAttribute('height'))).toBeCloseTo(pay);
-    expect(screen.getByText('+$3.10')).toBeInTheDocument();
-    expect(screen.getByText('Q* 100')).toBeInTheDocument();
-    expect(screen.getByText('200 shares')).toBeInTheDocument();
+    expect(container.querySelectorAll('rect.ds-pi')).toHaveLength(1);
+    expect(container.querySelectorAll('rect.ds-loss')).toHaveLength(0); // cost 1 = payoff 1: a zero-height step
+    expect(container.querySelectorAll('line.ds-cost')).toHaveLength(2);
+    expect(container.querySelectorAll('line.ds-pay')).toHaveLength(2);
+    expect(Number(container.querySelector('line.ds-qstar')?.getAttribute('x1'))).toBeCloseTo(200); // 10 of 15 shares
+    expect(container.querySelector('.ds-big')).toHaveTextContent(/^Π \+\$1\.00/);
+    expect(screen.getByText('Q* 10')).toBeInTheDocument();
+    expect(container.querySelector('.ds-gross')).toHaveTextContent('before fees +$1.00');
+    expect(screen.getByText('15 shares')).toBeInTheDocument();
   });
 
-  it('no steps and Q* 0 draw no NaN (review focus 3)', () => {
-    const { container } = render(<DepthStairs model={{ steps: [], q_star: '0', pi: '0' }} payoff="1" />);
+  it('draws each step against its own payoff (the nested NO rule)', () => {
+    const { container } = render(<DepthStairs model={NESTED} />);
+    const pays = [...container.querySelectorAll('line.ds-pay')].map((l) => Number(l.getAttribute('y1')));
+    expect(pays[0]).toBeLessThan(pays[1]); // payoff 2 sits above payoff 1
+    const loss = container.querySelector('rect.ds-loss');
+    expect(Number(loss?.getAttribute('y')) + Number(loss?.getAttribute('height'))).toBeCloseTo(pays[1]);
+  });
+
+  it('no steps and Q* 0 draw no NaN (review focus 3; fixture zero-depth-leg)', () => {
+    const { container } = render(<DepthStairs model={{ steps: [], q_star: '0', pi: '0', pi_gross: '0' }} />);
     expect(container.innerHTML).not.toContain('NaN');
     expect(container.querySelectorAll('rect.ds-pi, rect.ds-loss')).toHaveLength(0);
     expect(screen.getByText('Q* 0')).toBeInTheDocument();
@@ -1651,42 +1692,42 @@ import { describe, expect, it } from 'vitest';
 import type { BasketModel, Fill } from '../wasm/types';
 import { BasketLegs, basketVerdict } from './BasketLegs';
 
-const fill = (filled: string, vwap: string | null = null): Fill => ({ filled, vwap, fees: '0' });
+const fill = (requested: string, filled: string, vwap: string | null = null): Fill => ({ requested, filled, vwap, fees: '0', levels_used: filled === '0' ? 0 : 1 });
 const none = { qty: '0', basis: '0' };
-/** Section f's start: three NO legs, all filled at 0.60 / 0.65 / 0.70, converted at 2 per basket. */
+/** The shape and the checked figures of 7b-A fixture basket_json/no-all-fill (section f's start). */
 const ALL: BasketModel = {
+  kind: 'no',
+  min_order: '5',
+  q_open: '100',
   q_target: '50',
-  q_eff: '50',
   legs: [
-    { buy: fill('50', '0.6'), excess: '0', unwind: fill('0') },
-    { buy: fill('50', '0.65'), excess: '0', unwind: fill('0') },
-    { buy: fill('50', '0.7'), excess: '0', unwind: fill('0') },
+    { limit: '0.6', buy: fill('50', '50', '0.6'), excess: '0', unwind: fill('0', '0') },
+    { limit: '0.65', buy: fill('50', '50', '0.65'), excess: '0', unwind: fill('0', '0') },
+    { limit: '0.7', buy: fill('50', '50', '0.7'), excess: '0', unwind: fill('0', '0') },
   ],
+  q_eff: '50',
   cash: { spent: '97.5', fees: '0', unwind_back: '0', convert_back: '100', net_cash: '2.5', held_unsold: [none, none, none] },
   value_at_resolution: null,
 };
-/** The usual burst: leg A empty at t_x, the others sold back 5 ticks against us. */
+/** The shape and the checked figures of fixture no-one-leg-empty-burst: leg B empty at t_x, A and C sold
+ *  back 5 ticks against us at 0.54 and 0.64. */
 const BURST: BasketModel = {
-  q_target: '50',
-  q_eff: '0',
+  ...ALL,
   legs: [
-    { buy: fill('0'), excess: '0', unwind: fill('0') },
-    { buy: fill('50', '0.65'), excess: '50', unwind: fill('50', '0.59') },
-    { buy: fill('50', '0.7'), excess: '50', unwind: fill('50', '0.64') },
+    { limit: '0.6', buy: fill('50', '50', '0.6'), excess: '50', unwind: fill('50', '50', '0.54') },
+    { limit: '0.65', buy: fill('50', '0'), excess: '0', unwind: fill('0', '0') },
+    { limit: '0.7', buy: fill('50', '50', '0.7'), excess: '50', unwind: fill('50', '50', '0.64') },
   ],
-  cash: { spent: '67.5', fees: '0', unwind_back: '61.5', convert_back: '0', net_cash: '-6', held_unsold: [none, none, none] },
-  value_at_resolution: null,
+  q_eff: '0',
+  cash: { spent: '65', fees: '0', unwind_back: '59', convert_back: '0', net_cash: '-6', held_unsold: [none, none, none] },
 };
 const legs = () => within(screen.getByRole('list', { name: 'legs' })).getAllByRole('listitem');
 
-describe('basketVerdict (spec 7b §6.2 f)', () => {
-  it('says filled with the signed net on paper, or caught and lost, or a leg short, or nothing filled', () => {
+describe('basketVerdict (spec 7b §6.2 f, 7b-A contract)', () => {
+  it('says "caught, and lost $x" when net cash is below zero, "filled, $x on paper" otherwise', () => {
     expect(basketVerdict(ALL)).toEqual({ big: 'filled, +$2.50 on paper', tone: 'pos' });
     expect(basketVerdict(BURST)).toEqual({ big: 'caught, and lost $6.00', tone: 'neg' });
-    const short = { ...BURST, cash: { ...BURST.cash, net_cash: '1.1' } };
-    expect(basketVerdict(short)).toEqual({ big: 'caught, a leg short: +$1.10 on paper', tone: 'pos' });
-    const nothing = { ...BURST, legs: BURST.legs.map((l) => ({ ...l, buy: fill('0'), excess: '0', unwind: fill('0') })), cash: { ...BURST.cash, net_cash: '0' } };
-    expect(basketVerdict(nothing)).toEqual({ big: 'nothing filled', tone: null });
+    expect(basketVerdict({ ...BURST, cash: { ...BURST.cash, net_cash: '0' } })).toEqual({ big: 'filled, $0.00 on paper', tone: null });
   });
 });
 
@@ -1694,8 +1735,8 @@ describe('BasketLegs (spec 7b §6.2 f)', () => {
   it('draws planned vs filled per leg, q_eff as one line, and the excess split into sold and held', () => {
     const held: BasketModel = {
       ...BURST,
-      legs: [BURST.legs[0], { ...BURST.legs[1], unwind: fill('45', '0.59') }, BURST.legs[2]],
-      cash: { ...BURST.cash, held_unsold: [none, { qty: '5', basis: '3.25' }, none] },
+      legs: [{ ...BURST.legs[0], unwind: fill('50', '45', '0.54') }, BURST.legs[1], BURST.legs[2]],
+      cash: { ...BURST.cash, held_unsold: [{ qty: '5', basis: '3' }, none, none] },
     };
     const { container } = render(<BasketLegs model={held} names={['A', 'B', 'C']} />);
     const svg = container.querySelector('svg.bl-svg');
@@ -1704,21 +1745,25 @@ describe('BasketLegs (spec 7b §6.2 f)', () => {
     expect(container.querySelectorAll('rect.bl-plan')).toHaveLength(3);
     expect(container.querySelectorAll('line.bl-qeff')).toHaveLength(1);
     expect(Number(container.querySelector('line.bl-qeff')?.getAttribute('y1'))).toBeCloseTo(120); // q_eff 0 sits on the floor
-    const b = container.querySelector('g[data-leg="B"]');
-    expect(Number(b?.querySelector('rect.bl-sold')?.getAttribute('height'))).toBeGreaterThan(0);
-    expect(Number(b?.querySelector('rect.bl-held')?.getAttribute('height'))).toBeGreaterThan(0);
-    expect(Number(container.querySelector('g[data-leg="A"] rect.bl-fill')?.getAttribute('height'))).toBe(0);
-    expect(legs()[0]).toHaveTextContent('0 of 50');
-    expect(legs()[1]).toHaveTextContent('sold 45 at 0.59');
-    expect(legs()[1]).toHaveTextContent('held 5, $3.25 cost, not cash');
+    const a = container.querySelector('g[data-leg="A"]');
+    expect(Number(a?.querySelector('rect.bl-sold')?.getAttribute('height'))).toBeGreaterThan(0);
+    expect(Number(a?.querySelector('rect.bl-held')?.getAttribute('height'))).toBeGreaterThan(0);
+    expect(Number(container.querySelector('g[data-leg="B"] rect.bl-fill')?.getAttribute('height'))).toBe(0);
+    expect(legs()[1]).toHaveTextContent(/^leg B0 of 50/);
+    expect(legs()[0]).toHaveTextContent('sold 45 at 0.54');
+    expect(legs()[0]).toHaveTextContent('held 5, $3.00 cost, not cash');
     expect(screen.getByText('caught, and lost $6.00')).toHaveClass('bl-big');
   });
 
-  it('nothing filled says so and draws no NaN (review focus 3)', () => {
-    const zero: BasketModel = { ...ALL, q_target: '0', q_eff: '0', legs: ALL.legs.map(() => ({ buy: fill('0'), excess: '0', unwind: fill('0') })), cash: { ...ALL.cash, net_cash: '0' } };
+  it('nothing filled draws no NaN (review focus 3)', () => {
+    const zero: BasketModel = {
+      ...ALL, q_target: '0', q_eff: '0',
+      legs: ALL.legs.map((l) => ({ ...l, buy: fill('0', '0'), excess: '0', unwind: fill('0', '0') })),
+      cash: { ...ALL.cash, spent: '0', convert_back: '0', net_cash: '0' },
+    };
     const { container } = render(<BasketLegs model={zero} names={['A', 'B', 'C']} />);
     expect(container.innerHTML).not.toContain('NaN');
-    expect(screen.getByText('nothing filled')).toBeInTheDocument();
+    expect(screen.getByText('filled, $0.00 on paper')).toBeInTheDocument();
   });
 });
 ```
@@ -1743,15 +1788,15 @@ const geo = (v: string): number => {
 };
 
 /**
- * Parent §5.7 (d): the cost of each next basket as a staircase against what a basket pays. Between the
- * cost and the payoff each step is shaded: teal where it pays (up to Q*), salmon past Q* where it costs
- * more than it pays (walk_steps keeps those). Π and Q* are HTML; numbers are geometry only in the SVG.
+ * Parent §5.7 (d): the cost of each next basket as a staircase against what that basket pays (1 for the
+ * YES rule; active legs − 1 for the nested NO rule, so the payoff is read per step). Between cost and payoff
+ * each step is shaded: teal where it pays (up to Q*), salmon past Q* where it costs more than it pays
+ * (walk_steps keeps those). Π, Π before fees and Q* are HTML; numbers are geometry only in the SVG.
  */
-export function DepthStairs({ model, payoff }: { model: WalkModel; payoff: string }) {
+export function DepthStairs({ model }: { model: WalkModel }) {
   const last = model.steps.length > 0 ? model.steps[model.steps.length - 1].q_to : '0';
   const qMax = Math.max(1, geo(last));
-  const pay = geo(payoff);
-  const yMax = Math.max(pay, ...model.steps.map((s) => geo(s.cost_per_basket))) * 1.1 || 1;
+  const yMax = Math.max(0, ...model.steps.flatMap((s) => [geo(s.cost), geo(s.payoff)])) * 1.1 || 1;
   const sx = (q: string) => (geo(q) / qMax) * W;
   const sy = (v: number) => H - (v / yMax) * H;
   const qs = sx(model.q_star);
@@ -1763,21 +1808,26 @@ export function DepthStairs({ model, payoff }: { model: WalkModel; payoff: strin
         </span>
         <span>{`Q* ${model.q_star}`}</span>
       </p>
-      <p className="dim">on the table, if every level stayed put</p>
+      <p className="dim">
+        on the table, if every level stayed put · <span className="ds-gross">before fees <Money value={model.pi_gross} signed cents /></span>
+      </p>
       <svg className="ds-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="the cost staircase">
         {model.steps.map((s, i) => {
-          const c = sy(geo(s.cost_per_basket));
-          const p = sy(pay);
+          const c = sy(geo(s.cost));
+          const p = sy(geo(s.payoff));
           const x = sx(s.q_from);
-          return (
-            <rect key={i} className={s.profitable ? 'ds-pi' : 'ds-loss'} x={x} y={Math.min(c, p)} width={Math.max(0, sx(s.q_to) - x)} height={Math.abs(c - p)} />
-          );
+          const w = Math.max(0, sx(s.q_to) - x);
+          if (Math.abs(c - p) === 0) return null;
+          return <rect key={i} className={s.profitable ? 'ds-pi' : 'ds-loss'} x={x} y={Math.min(c, p)} width={w} height={Math.abs(c - p)} />;
         })}
         {model.steps.map((s, i) => {
-          const y = sy(geo(s.cost_per_basket));
+          const y = sy(geo(s.cost));
           return <line key={`c${i}`} className="ds-cost" x1={sx(s.q_from)} x2={sx(s.q_to)} y1={y} y2={y} />;
         })}
-        <line className="ds-pay" x1={0} x2={W} y1={sy(pay)} y2={sy(pay)} />
+        {model.steps.map((s, i) => {
+          const y = sy(geo(s.payoff));
+          return <line key={`p${i}`} className="ds-pay" x1={sx(s.q_from)} x2={sx(s.q_to)} y1={y} y2={y} />;
+        })}
         <line className="ds-qstar" x1={qs} x2={qs} y1={0} y2={H} />
       </svg>
       <ol className="ds-axis" aria-hidden="true">
@@ -1787,7 +1837,7 @@ export function DepthStairs({ model, payoff }: { model: WalkModel; payoff: strin
       <ul className="plain ds-legend" aria-label="legend">
         <li><span className="ds-sw pi" aria-hidden="true" />the next basket pays more than it costs</li>
         <li><span className="ds-sw loss" aria-hidden="true" />past Q*: it costs more than it pays</li>
-        <li><span className="ds-sw pay" aria-hidden="true" />{`what a basket pays: ${payoff}`}</li>
+        <li><span className="ds-sw pay" aria-hidden="true" />what a basket pays</li>
       </ul>
     </figure>
   );
@@ -1812,17 +1862,13 @@ export interface Verdict {
   tone: 'pos' | 'neg' | null;
 }
 
-/** Spec 7b §6.2 f: the big number is net_cash. A leg that fell short (some excess) with cash down reads
- *  "caught, and lost $x"; every leg even reads "filled, ±$x on paper". Money through money.ts only. */
+/** Spec 7b §6.2 f and 7b-A's contract: the big number is net_cash, "caught, and lost $x" when it is below
+ *  zero, "filled, $x on paper" otherwise. Money through money.ts only. */
 export function basketVerdict(m: BasketModel): Verdict {
   const net = m.cash.net_cash;
   const s = signOf(net);
-  const tone = s > 0 ? 'pos' : s < 0 ? 'neg' : null;
-  if (!m.legs.some((l) => signOf(l.buy.filled) > 0)) return { big: 'nothing filled', tone: null };
-  const short = m.legs.some((l) => signOf(l.excess) > 0);
-  if (short && s < 0) return { big: `caught, and lost ${formatMoneyCents(net.replace(/^-/, ''))}`, tone };
-  if (short) return { big: `caught, a leg short: ${formatMoneyCents(net, { signed: true })} on paper`, tone };
-  return { big: `filled, ${formatMoneyCents(net, { signed: true })} on paper`, tone };
+  if (s < 0) return { big: `caught, and lost ${formatMoneyCents(net.replace(/^-/, ''))}`, tone: 'neg' };
+  return { big: `filled, ${formatMoneyCents(net, { signed: true })} on paper`, tone: s > 0 ? 'pos' : null };
 }
 
 /**
@@ -1865,14 +1911,15 @@ export function BasketLegs({ model, names }: { model: BasketModel; names: string
           return (
             <li key={i}>
               <b>{`leg ${names[i] ?? i + 1}`}</b>
-              <span>{`${formatDecimal(l.buy.filled)} of ${formatDecimal(model.q_target)}`}</span>
+              <span>{`${formatDecimal(l.buy.filled)} of ${formatDecimal(l.buy.requested)}`}</span>
               {signOf(l.unwind.filled) > 0 && <span>{`sold ${formatDecimal(l.unwind.filled)}${l.unwind.vwap === null ? '' : ` at ${l.unwind.vwap}`}`}</span>}
+              {signOf(l.unwind.requested) > 0 && signOf(l.unwind.filled) === 0 && <span>{`${formatDecimal(l.unwind.requested)} to sell, no order went out`}</span>}
               {h !== undefined && signOf(h.qty) > 0 && <span>{`held ${formatDecimal(h.qty)}, ${formatMoneyCents(h.basis)} cost, not cash`}</span>}
             </li>
           );
         })}
       </ol>
-      <p className="dim">{`the line: ${formatDecimal(model.q_eff)} full baskets (q_eff)`}</p>
+      <p className="dim">{`the line: ${formatDecimal(model.q_eff)} full baskets (q_eff) · planned ${formatDecimal(model.q_target)} of the ${formatDecimal(model.q_open)} the book at open could fill`}</p>
       <dl className="bl-cash">
         <div><dt>spent</dt><dd><Money value={model.cash.spent} cents /></dd></div>
         <div><dt>fees</dt><dd><Money value={model.cash.fees} cents /></dd></div>
@@ -1961,7 +2008,7 @@ git commit -m "web: schematics d (cost staircase past Q*) and f (planned vs fill
 - Test: `web/src/math/adapt.test.tsx`
 
 **Interfaces:**
-- Consumes: `PayoffMatrix`, `PayoffKind`, `EpisodeModel` (`wasm/types.ts`); `payoffStructure` (`explain/models.ts`, test only); `fixtureFn` (`wasm/testEngine.ts`, test only).
+- Consumes: `PayoffMatrix`, `PayoffKind`, `EpisodeModel` (`wasm/types.ts`); `payoffStructure` (`explain/models.ts`, test only); `FIXTURES`, `fixtureCases` (`wasm/testEngine.ts`, test only).
 - Produces:
 
 ```ts
@@ -1980,21 +2027,19 @@ export function episodeRows(m: EpisodeModel): DurationRow[]
 ```tsx
 // web/src/math/adapt.test.tsx
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { payoffStructure } from '../explain/models';
 import { DurationBars } from '../schematics/DurationBars';
 import { PayoffGrid } from '../schematics/PayoffGrid';
 import { UpdateBars } from '../schematics/UpdateBars';
-import { fixtureFn } from '../wasm/testEngine';
+import { FIXTURES, fixtureCases } from '../wasm/testEngine';
 import { type EpisodeModel, type PayoffMatrix, isError } from '../wasm/types';
 import { episodeRows, matrixToPayoff } from './adapt';
 
-declare const process: { cwd(): string };
-
 const IMPLICATION: PayoffMatrix = {
-  rows: ['NO A', 'YES B'],
+  rows: ['NO_A', 'YES_B'],
   cols: ['A∧B', 'A∧¬B', '¬A∧B', '¬A∧¬B'],
   possible: [true, false, true, true],
   cells: [['0', null, '1', '1'], ['1', null, '1', '0']],
@@ -2003,15 +2048,16 @@ const IMPLICATION: PayoffMatrix = {
   broken: [false, false, false, false],
   top_edge_gross: null,
 };
-/** Section e's start at sp-idle: open at u2 (400 ms), peak u3, close u5 (1900 ms), t_x 700 ms. */
+/** A view model with section e's shape: open at u2 (400 ms), peak u3, close u5 (1900 ms), t_x 700 ms. */
 const EPISODE: EpisodeModel = {
   updates: [{ t_ms: 0, net: null }, { t_ms: 400, net: '1.9' }, { t_ms: 900, net: '5.8' }, { t_ms: 1400, net: '1.9' }, { t_ms: 1900, net: null }],
   open_ms: 400,
   close_ms: 1900,
   peak_ms: 900,
+  peak_net: '5.8',
   t_x: 700,
-  caught: true,
   captured: '1.9',
+  caught: true,
 };
 
 describe('b reuses PayoffGrid (spec 7b §1 change 3)', () => {
@@ -2024,7 +2070,7 @@ describe('b reuses PayoffGrid (spec 7b §1 change 3)', () => {
 
   it('keeps the YES basket ✗ on the uncovered column', () => {
     const m: PayoffMatrix = {
-      rows: ['YES A', 'YES B'], cols: ['A', 'B', 'Other'], possible: [true, true, true],
+      rows: ['YES_A', 'YES_B'], cols: ['A', 'B', 'Other'], possible: [true, true, true],
       cells: [['1', '0', '0'], ['0', '1', '0']], basket: ['1', '1', '0'], guaranteed: '1', broken: [false, false, true], top_edge_gross: null,
     };
     render(<PayoffGrid model={matrixToPayoff(m, 'yes')} label="payoff of the YES basket" />);
@@ -2050,7 +2096,7 @@ describe('e reuses DurationBars and adds UpdateBars (spec 7b §6.2 e)', () => {
   });
 
   it('an episode that never opens or never closes draws no NaN (review focus 3)', () => {
-    const never: EpisodeModel = { ...EPISODE, updates: EPISODE.updates.map((u) => ({ ...u, net: null })), open_ms: null, close_ms: null, peak_ms: null, t_x: null, caught: false, captured: null };
+    const never: EpisodeModel = { ...EPISODE, updates: EPISODE.updates.map((u) => ({ ...u, net: null })), open_ms: null, close_ms: null, peak_ms: null, peak_net: null, t_x: null, caught: false, captured: null };
     expect(episodeRows(never)).toEqual([]);
     const open: EpisodeModel = { ...EPISODE, close_ms: null, t_x: null };
     expect(episodeRows(open)).toEqual([{ kind: 'row', label: 'on the table', ms: 1500, open: true, ticks: [500, 1000, 1500] }]);
@@ -2060,12 +2106,11 @@ describe('e reuses DurationBars and adds UpdateBars (spec 7b §6.2 e)', () => {
   });
 });
 
-const DIR = `${process.cwd()}/../crates/arb-wasm/fixtures`;
-const PAYOFF_FILE: string | undefined = existsSync(DIR) ? readdirSync(DIR).find((f: string) => fixtureFn(f) === 'payoff_json') : undefined;
+const HAVE_PAYOFF: boolean = existsSync(`${FIXTURES}/payoff_json.json`);
 
-describe.skipIf(PAYOFF_FILE === undefined)('the panel payoff structure against the payoff fixtures (09-27 §7.3, left open by 7a-B)', () => {
+describe.skipIf(!HAVE_PAYOFF)('the panel payoff structure against the payoff fixtures (09-27 §7.3, left open by 7a-B)', () => {
   it('agrees on every YES and NO case without prices, S 2–6', () => {
-    const cases = JSON.parse(readFileSync(`${DIR}/${PAYOFF_FILE}`, 'utf8')) as { name: string; input: string; output: string }[];
+    const cases = fixtureCases('payoff_json');
     let checked = 0;
     for (const c of cases) {
       const i = JSON.parse(c.input) as { kind?: string; s?: number; other_listed?: boolean; prices?: unknown };
@@ -2301,9 +2346,11 @@ export function Range(p: { label: string; min: number; max: number; step?: numbe
 export function Seg<T extends string | number>(p: { label: string; options: [T, string][]; value: T; onPick: (v: T) => void }): JSX.Element
 export function Check(p: { label: string; checked: boolean; onChange: (v: boolean) => void }): JSX.Element
 // sections
+export const MIRROR_START: MirrorIn;   // = fixture mirror_json/fed-book's input
 export function MirrorSection({ engine }: { engine: Engine }): JSX.Element
-export function payoffInput(st: PayoffState): PayoffIn; export function PayoffSection({ engine }: { engine: Engine }): JSX.Element
-export function classifyInput(st: ClassifyState): ClassifyIn; export function ClassifySection({ engine }: { engine: Engine }): JSX.Element
+export function payoffInput(st: PayoffState): PayoffIn; export const PAYOFF_START: PayoffState; export function PayoffSection({ engine }: { engine: Engine }): JSX.Element
+export function classifyInput(st: ClassifyState): ClassifyIn; export const CLASSIFY_START: ClassifyState;   // = fixture classify_json/no-edge-3's input
+export function ClassifySection({ engine }: { engine: Engine }): JSX.Element
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -2353,16 +2400,21 @@ describe('ticks', () => {
 
 ```tsx
 // web/src/math/sections-abc.test.tsx
+// Engine figures come from 7b-A's fixtures (the sections start from fixture inputs) or from the engine for
+// the page's own input; none is computed by hand here.
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { formatDecimal } from '../lib/money';
 import { CROSSED } from '../schematics/MirrorBooks';
-import { HAVE_PKG, WASM_REQUIRED, loadTestEngine, skipReason } from '../wasm/testEngine';
-import type { Engine } from '../wasm/types';
-import { ClassifySection } from './sections/ClassifySection';
-import { MirrorSection } from './sections/MirrorSection';
-import { PayoffSection } from './sections/PayoffSection';
+import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine, skipReason } from '../wasm/testEngine';
+import type { ClassifyModel, Engine, MirrorModel, PayoffMatrix } from '../wasm/types';
+import { CLASSIFY_START, ClassifySection, classifyInput } from './sections/ClassifySection';
+import { MIRROR_START, MirrorSection } from './sections/MirrorSection';
+import { PAYOFF_START, PayoffSection, payoffInput } from './sections/PayoffSection';
 
 if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('sections a–c'));
+
+const lit = (c: HTMLElement) => [...c.querySelectorAll('li.cl-node.lit')].map((li) => li.getAttribute('data-node'));
 
 describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine (09-27 §8)', () => {
   let engine: Engine;
@@ -2370,11 +2422,20 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     engine = await loadTestEngine();
   });
 
-  it('a: the Fed book mirrors to D1 1.01 / 0.99, and crossing it raises the alert', async () => {
+  it('a: the start is fixture fed-book, and the page draws its output (review focus 4)', () => {
+    const fx = fixtureCase('mirror_json', 'fed-book');
+    expect(MIRROR_START).toEqual(JSON.parse(fx.input));
+    expect(engine.mirror_json(JSON.stringify(MIRROR_START))).toBe(fx.output);
+    const m = JSON.parse(fx.output) as MirrorModel;
     render(<MirrorSection engine={engine} />);
     expect(screen.getByRole('heading', { name: 'a · one book, twice' })).toBeInTheDocument();
-    expect(screen.getByText('D1 long 1.01')).toBeInTheDocument();
-    expect(screen.getByText('short 0.99')).toBeInTheDocument();
+    expect(screen.getByText(`D1 long ${m.d1_long}`)).toBeInTheDocument();
+    expect(screen.getByText(`short ${m.d1_short}`)).toBeInTheDocument();
+    expect(screen.getByText(`spread ${m.spread}`)).toBeInTheDocument();
+  });
+
+  it('a: crossing the book raises the alert, and reset clears it', async () => {
+    render(<MirrorSection engine={engine} />);
     fireEvent.click(screen.getByRole('button', { name: 'cross the book' }));
     expect(await screen.findByText(CROSSED)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'reset' }));
@@ -2384,7 +2445,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
   it("a: a size of 0 is the engine's sentence, and the page keeps working (review focus 2)", async () => {
     const { container } = render(<MirrorSection engine={engine} />);
     fireEvent.change(screen.getByLabelText('YES bid 1 size'), { target: { value: '0' } });
-    expect((await screen.findByRole('alert')).textContent).toMatch(/\w/);
+    expect(await screen.findByRole('alert')).toHaveTextContent('size "0" must be above 0 and at most 1,000,000, with at most 6 decimals');
     expect(container.querySelector('svg.mb-svg')).toBeNull();
     fireEvent.change(screen.getByLabelText('YES bid 1 size'), { target: { value: '100' } });
     await waitFor(() => expect(container.querySelector('svg.mb-svg')).not.toBeNull());
@@ -2392,27 +2453,33 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
 
   it('b: the YES basket with Other unlisted breaks on Other; the NO basket never does; the implication has an impossible column', async () => {
     render(<PayoffSection engine={engine} />);
-    expect(screen.getByRole('columnheader', { name: /✗/ })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Other ✗' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'NO basket' }));
     await waitFor(() => expect(screen.queryByRole('columnheader', { name: /✗/ })).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'implication A ⇒ B' }));
-    expect(await screen.findByRole('columnheader', { name: /\(impossible\)/ })).toBeInTheDocument();
+    expect(await screen.findByRole('columnheader', { name: 'A∧¬B (impossible)' })).toBeInTheDocument();
   });
 
-  it('b: with prices, the YES formula carries the engine value (1 − 0.94)', async () => {
+  it("b: with prices, the formula line carries the engine's top_edge_gross for the page's input", async () => {
     render(<PayoffSection engine={engine} />);
     fireEvent.click(screen.getByLabelText('“Other” is listed'));
     fireEvent.click(screen.getByLabelText('with prices'));
+    const m = JSON.parse(engine.payoff_json(JSON.stringify(payoffInput({ ...PAYOFF_START, listed: true, priced: true })))) as PayoffMatrix;
+    expect(m.top_edge_gross).not.toBeNull();
     expect(await screen.findByText('1 − Σ asks =')).toBeInTheDocument();
-    expect(screen.getByText('0.06')).toHaveClass('m-big');
+    expect(screen.getByText(formatDecimal(m.top_edge_gross))).toHaveClass('m-big');
   });
 
-  it('c: three live legs with Σ bids 1.05 light the NO basket; a leg closed YES ends in nothing', async () => {
+  it('c: the start is fixture no-edge-3 and lights its path; a leg closed YES ends in nothing (review focus 4)', async () => {
+    const fx = fixtureCase('classify_json', 'no-edge-3');
+    expect(classifyInput(CLASSIFY_START)).toEqual(JSON.parse(fx.input));
+    const m = JSON.parse(fx.output) as ClassifyModel;
     const { container } = render(<ClassifySection engine={engine} />);
-    expect(container.querySelector('li[data-node="no_basket_positive"]')).toHaveClass('lit');
-    expect(container.querySelector('.cl-end')).toHaveTextContent(/^NO basket/);
+    expect(lit(container)).toEqual(m.path);
+    expect(container.querySelector('.cl-end')).toHaveTextContent('NO basket · converted');
+    expect(container.querySelector('.cl-net')).toHaveTextContent(`Q* ${m.q_star}`);
     fireEvent.change(screen.getByLabelText('leg A status'), { target: { value: 'closed_yes' } });
-    await waitFor(() => expect(container.querySelector('li[data-node="decided"]')).toHaveClass('lit'));
+    await waitFor(() => expect(lit(container)).toEqual(['decided']));
     expect(container.querySelector('.cl-end')).toHaveTextContent(/^nothing$/);
   });
 });
@@ -2492,8 +2559,10 @@ export function fromTick(t: number): string {
 
 export const LEGS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
-/** Parent §5.7 (a): the Fed book, best first. */
-export const FED_BIDS: Level[] = [{ p: '0.54', s: '5603.74' }, { p: '0.53', s: '85887.16' }, { p: '0.52', s: '42239.53' }];
+/** Parent §5.7 (a): the Fed book, best first; the same levels as 7b-A's fixture mirror_json/fed-book. */
+export const FED_BIDS: Level[] = [
+  { p: '0.54', s: '5603.74' }, { p: '0.53', s: '85887.16' }, { p: '0.52', s: '42239.53' }, { p: '0.51', s: '28133.09' },
+];
 export const FED_ASKS: Level[] = [
   { p: '0.55', s: '32356.03' }, { p: '0.56', s: '252281.27' }, { p: '0.57', s: '23963.36' }, { p: '0.58', s: '5637.30' },
 ];
@@ -2506,7 +2575,7 @@ export interface ClassifyLeg {
   bid: number;
   ask: number;
 }
-/** Section c: three live legs, Σ YES bids 1.05, a small NO-basket edge. */
+/** Section c: three live legs, Σ YES bids 1.05, a small NO-basket edge (7b-A's fixture classify_json/no-edge-3). */
 export const CLASSIFY_LEGS: ClassifyLeg[] = [
   { status: 'live', bid: 40, ask: 41 },
   { status: 'live', bid: 35, ask: 36 },
@@ -2648,7 +2717,8 @@ import { FED_ASKS, FED_BIDS, fromTick, toTick } from '../defaults';
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Out, Range, Section } from './Section';
 
-const START: MirrorIn = { bids: FED_BIDS, asks: FED_ASKS };
+export const MIRROR_START: MirrorIn = { bids: FED_BIDS, asks: FED_ASKS };
+const START = MIRROR_START;
 const SIDE = { bids: 'bid', asks: 'ask' } as const;
 
 /** Best bid one tick above the best ask; the other bids at or above it go (no two levels at one price). */
@@ -2721,13 +2791,15 @@ export interface PayoffState {
   priced: boolean;
   ticks: number[];
 }
-const START: PayoffState = { kind: 'yes', s: 3, listed: false, priced: false, ticks: PAYOFF_TICKS };
+export const PAYOFF_START: PayoffState = { kind: 'yes', s: 3, listed: false, priced: false, ticks: PAYOFF_TICKS };
+const START = PAYOFF_START;
 const KINDS: [PayoffKind, string][] = [['yes', 'YES basket'], ['no', 'NO basket'], ['implication', 'implication A ⇒ B']];
 const SIZES: [number, string][] = [2, 3, 4, 5, 6].map((k): [number, string] => [k, `S ${k}`]);
 /** Parent §5.7 (b), L5: the gross edge at the top of the book; the value is the engine's. */
 const FORMULA: Record<PayoffKind, string | null> = { yes: '1 − Σ asks', no: 'Σ bids − 1', implication: null };
 
-/** The engine input: the implication has two legs (A, B); a price tick is the YES ask or the NO bid. */
+/** The engine input: prices has length s, or 2 for the implication (whose s the engine ignores; the page
+ *  sends 2); a price tick is the YES ask or the NO bid. */
 export function payoffInput(st: PayoffState): PayoffIn {
   const n = st.kind === 'implication' ? 2 : st.s;
   const prices = st.priced
@@ -2804,14 +2876,15 @@ export interface ClassifyState {
   legs: ClassifyLeg[];
   augmented: boolean;
 }
-const START: ClassifyState = { legs: CLASSIFY_LEGS, augmented: false };
+export const CLASSIFY_START: ClassifyState = { legs: CLASSIFY_LEGS, augmented: false };
+const START = CLASSIFY_START;
 const STATUSES: LegStatus[] = ['live', 'placeholder', 'other', 'halted', 'closed_no', 'closed_yes'];
 
-/** One level a side per leg (100 shares), no fees: the update classify reads. */
+/** One level a side per leg (10 shares, as 7b-A's classify fixtures), no fees: the update classify reads. */
 export function classifyInput(st: ClassifyState): ClassifyIn {
   return {
     augmented: st.augmented,
-    legs: st.legs.map((l) => ({ status: l.status, bids: [{ p: fromTick(l.bid), s: '100' }], asks: [{ p: fromTick(l.ask), s: '100' }], fee: null })),
+    legs: st.legs.map((l) => ({ status: l.status, bids: [{ p: fromTick(l.bid), s: '10' }], asks: [{ p: fromTick(l.ask), s: '10' }], fee: null })),
   };
 }
 
@@ -2856,8 +2929,8 @@ export function ClassifySection({ engine }: { engine: Engine }) {
 - [ ] **Step 5: Run to verify pass**
 
 Run: `cd web && WASM_REQUIRED=1 npx vitest run src/math/useFrameThrottle.test.tsx src/math/sections-abc.test.tsx`
-Expected: PASS (2 + 5 tests).
-If `c` fails on a node name (e.g. `no_basket_positive` absent from the path): print the engine's `path` for the default input and report it (contract drift, "Contract assumed from 7b-A"); do not rename nodes on one side only.
+Expected: PASS (2 + 6 tests).
+If a `… is fixture …` test fails on the input: the section's start drifted from 7b-A's fixture: fix `defaults.ts`, never the fixture.
 
 - [ ] **Step 6: Types, full suite**
 
@@ -2891,13 +2964,14 @@ export interface FState { depth: number[]; against: number[]; q: number; fees: b
 export const CRYPTO_FEE: Fee;                                     // { rate: '0.07', exponent: 1 }
 export function drain(levels: Level[], pct: number): Level[];      // sizes cut to pct %, whole shares, empty levels gone
 export function against(b: LegBook, ticks: number): LegBook;       // YES asks up `ticks` (for NO: its bids fall)
-export function basketInput(books: LegBook[], st: FState): BasketIn
+export function basketInput(books: LegBook[], st: FState): BasketIn // kind "no", fee per leg, min_order / convert_fee_bips left to their defaults
 // defaults.ts (append)
 export const WALK_LEGS: Level[][]; export const NEW_WALK_LEG: Level[];
 export function exactlyOne(legs: Level[][]): Level[][];
 export const EPISODE_T: number[]; export const EPISODE_BIDS: number[][];
 export const PRESETS: readonly { name: string; proc_ms: number; net_ms: number; match_ms: number }[];
-export const F_BOOKS: LegBook[]; export const F_START: FState; export const F_BURST: FState;
+export const F_BOOKS: LegBook[]; export const F_START: FState; export const F_BURST: FState;   // = fixtures no-all-fill, no-one-leg-empty-burst
+export function depthInput(st: DepthState): DepthWalkIn; export const DEPTH_START: DepthState;
 // sections
 export function DepthSection({ engine }: { engine: Engine }): JSX.Element
 export function EpisodeSection({ engine }: { engine: Engine }): JSX.Element
@@ -2937,47 +3011,68 @@ describe('starting states', () => {
 
 ```ts
 // web/src/math/basket.test.ts
+// @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
+import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { FIXTURES, fixtureCase } from '../wasm/testEngine';
 import { CRYPTO_FEE, against, basketInput, drain } from './basket';
 import { F_BOOKS, F_BURST, F_START } from './defaults';
 
-describe('section f input (spec 7b §6.2 f, §3.4)', () => {
+/** What JSON.stringify would send (undefined fields gone), to compare with a fixture's parsed input. */
+const wire = (x: unknown): unknown => JSON.parse(JSON.stringify(x));
+
+describe('section f input (spec 7b §6.2 f, 7b-A basket_json)', () => {
   it('drains the t_x depth in whole shares and drops an emptied level', () => {
-    expect(drain(F_BOOKS[0].bids, 50)).toEqual([{ p: '0.40', s: '30' }, { p: '0.39', s: '50' }]);
+    expect(drain(F_BOOKS[0].bids, 50)).toEqual([{ p: '0.40', s: '50' }]);
     expect(drain(F_BOOKS[0].bids, 0)).toEqual([]);
     expect(drain(F_BOOKS[0].bids, 100)).toEqual(F_BOOKS[0].bids);
   });
 
   it('moves the unwind book against a NO holder: the YES asks rise, the bids stay', () => {
     const b = against(F_BOOKS[1], 5);
-    expect(b.asks.map((l) => l.p)).toEqual(['0.41', '0.42']);
+    expect(b.asks).toEqual([{ p: '0.41', s: '100' }]);
     expect(b.bids).toEqual(F_BOOKS[1].bids);
   });
 
-  it('builds a NO basket_json input: open, t_x and unwind books per leg, as the sim sizes it', () => {
+  it('sends a fee on every leg, and no min_order or convert_fee_bips (the engine defaults "5" and "0")', () => {
     const start = basketInput(F_BOOKS, F_START);
-    expect(start).toMatchObject({ kind: 'no', fee: null, q_request: '50', min_order: '5', convert_fee_bips: 0 });
-    expect(start.legs).toHaveLength(3);
-    expect(start.legs[0]).toEqual({ open: F_BOOKS[0], t_x: F_BOOKS[0], unwind: F_BOOKS[0] });
-    const burst = basketInput(F_BOOKS, F_BURST);
-    expect(burst.legs[0].t_x).toEqual({ bids: [], asks: [] });
-    expect(burst.legs[1].unwind.asks[0].p).toBe('0.41');
-    expect(basketInput(F_BOOKS, { ...F_START, fees: true }).fee).toEqual(CRYPTO_FEE);
+    expect(Object.keys(start).sort()).toEqual(['kind', 'legs', 'q_request']);
+    expect(start.legs.map((l) => l.fee)).toEqual([null, null, null]);
+    expect(basketInput(F_BOOKS, { ...F_START, fees: true }).legs.map((l) => l.fee)).toEqual([CRYPTO_FEE, CRYPTO_FEE, CRYPTO_FEE]);
+  });
+});
+
+describe.skipIf(!existsSync(`${FIXTURES}/basket_json.json`))('section f starts from 7b-A fixtures (review focus 4)', () => {
+  it('the start is fixture no-all-fill, the usual burst is no-one-leg-empty-burst', () => {
+    expect(wire(basketInput(F_BOOKS, F_START))).toEqual(JSON.parse(fixtureCase('basket_json', 'no-all-fill').input));
+    expect(wire(basketInput(F_BOOKS, F_BURST))).toEqual(JSON.parse(fixtureCase('basket_json', 'no-one-leg-empty-burst').input));
+  });
+
+  it('leg C at 20 % is no-one-leg-partial, fees on is no-fees-on', () => {
+    expect(wire(basketInput(F_BOOKS, { ...F_START, depth: [100, 100, 20] }))).toEqual(JSON.parse(fixtureCase('basket_json', 'no-one-leg-partial').input));
+    expect(wire(basketInput(F_BOOKS, { ...F_START, fees: true }))).toEqual(JSON.parse(fixtureCase('basket_json', 'no-fees-on').input));
   });
 });
 ```
 
 ```tsx
 // web/src/math/sections-def.test.tsx
+// Engine figures come from 7b-A's fixtures, from the engine for the page's own input, or from the contract's
+// stated rules (t_x = open_ms + proc + net + match; a YES step whose cost equals the payoff does not pay).
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { HAVE_PKG, WASM_REQUIRED, loadTestEngine, skipReason } from '../wasm/testEngine';
-import type { Engine } from '../wasm/types';
-import { DepthSection } from './sections/DepthSection';
+import { basketVerdict } from '../schematics/BasketLegs';
+import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine, skipReason } from '../wasm/testEngine';
+import type { BasketModel, Engine, WalkModel } from '../wasm/types';
+import { basketInput } from './basket';
+import { F_BOOKS, F_BURST, F_START } from './defaults';
+import { DEPTH_START, DepthSection, depthInput } from './sections/DepthSection';
 import { EpisodeSection } from './sections/EpisodeSection';
 import { LegMissSection } from './sections/LegMissSection';
 
 if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('sections d–f'));
+
+const legItems = () => within(screen.getByRole('list', { name: 'legs' })).getAllByRole('listitem');
 
 describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine (7b §8)', () => {
   let engine: Engine;
@@ -2985,16 +3080,16 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
     engine = await loadTestEngine();
   });
 
-  it('d: three legs walk to Q* 100 for Π $3.10; "exactly 1.00" leaves nothing to take', async () => {
+  it("d: the page draws the engine's walk for its start; \"exactly 1.00\" leaves nothing to take", async () => {
+    const m = JSON.parse(engine.depth_walk_json(JSON.stringify(depthInput(DEPTH_START)))) as WalkModel;
     const { container } = render(<DepthSection engine={engine} />);
-    expect(screen.getByText('Q* 100')).toBeInTheDocument();
-    expect(screen.getByText('+$3.10')).toBeInTheDocument();
-    expect(container.querySelectorAll('rect.ds-loss').length).toBeGreaterThan(0);
+    expect(screen.getByText(`Q* ${m.q_star}`)).toBeInTheDocument();
+    expect(container.querySelectorAll('rect.ds-pi').length).toBe(m.steps.filter((s) => s.profitable && s.cost !== s.payoff).length);
     fireEvent.click(screen.getByRole('button', { name: 'exactly 1.00' }));
     expect(await screen.findByText('Q* 0')).toBeInTheDocument();
   });
 
-  it('e: sp-idle catches the example episode; 1,000 ms of net and match misses it', async () => {
+  it('e: sp-idle catches the example episode 300 ms after it opens; 1,000 ms of net and match misses it', async () => {
     const { container } = render(<EpisodeSection engine={engine} />);
     expect(screen.getByText('caught')).toHaveClass('m-verdict');
     expect(screen.getByText(/^captured at 300 ms:/)).toBeInTheDocument();
@@ -3004,23 +3099,26 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
     expect(await screen.findByText('missed')).toBeInTheDocument();
   });
 
-  it('f: the start fills every leg on paper; the usual burst is caught and loses', async () => {
+  it('f: the start is fixture no-all-fill and says its net cash; the usual burst is no-one-leg-empty-burst', async () => {
+    const all = fixtureCase('basket_json', 'no-all-fill');
+    const burst = fixtureCase('basket_json', 'no-one-leg-empty-burst');
+    expect(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, F_START)))).toBe(all.output);
+    expect(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, F_BURST)))).toBe(burst.output);
     render(<LegMissSection engine={engine}><p>live part</p></LegMissSection>);
-    expect(screen.getByText(/^filled, \+\$\d+\.\d\d on paper$/)).toHaveClass('bl-big');
+    expect(screen.getByText(basketVerdict(JSON.parse(all.output) as BasketModel).big)).toHaveClass('bl-big');
+    expect(screen.getByText('filled, +$2.50 on paper')).toBeInTheDocument();
     expect(screen.getByText('live part')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'the usual burst' }));
-    expect(await screen.findByText(/^caught, and lost \$\d+\.\d\d$/)).toBeInTheDocument();
-    expect(within(screen.getByRole('list', { name: 'legs' })).getAllByRole('listitem')[0]).toHaveTextContent(/^leg A0 of 50/);
+    expect(await screen.findByText('caught, and lost $6.00')).toBeInTheDocument();
+    expect(legItems()[1]).toHaveTextContent(/^leg B0 of 50/);
+    expect(legItems()[0]).toHaveTextContent('sold 50 at 0.54');
+    expect(legItems()[2]).toHaveTextContent('sold 50 at 0.64');
   });
 
-  it('f: draining leg A to half at t_x leaves it short of the plan', async () => {
+  it('f: leg C at 20 % at t_x (fixture no-one-leg-partial) fills 20 of 50', async () => {
     render(<LegMissSection engine={engine} />);
-    fireEvent.change(screen.getByLabelText('leg A depth left at t_x'), { target: { value: '50' } });
-    await waitFor(() => {
-      const a = within(screen.getByRole('list', { name: 'legs' })).getAllByRole('listitem')[0];
-      expect(a.textContent).toMatch(/^leg A\d+ of 50/);
-      expect(a.textContent).not.toMatch(/^leg A50 of 50/);
-    });
+    fireEvent.change(screen.getByLabelText('leg C depth left at t_x'), { target: { value: '20' } });
+    await waitFor(() => expect(legItems()[2]).toHaveTextContent(/^leg C20 of 50/));
   });
 });
 ```
@@ -3055,7 +3153,8 @@ export interface FState {
 /** fee = shares × 0.07 × p(1 − p): the crypto schedule (crates/arb-core/tests/fee.rs). */
 export const CRYPTO_FEE: Fee = { rate: '0.07', exponent: 1 };
 
-/** Sizes cut to `pct` % in whole shares (sizes are shares, not money); a level cut to 0 is gone. */
+/** Sizes cut to `pct` % in whole shares (sizes are shares, not money); a level cut to 0 is gone. Applied to
+ *  the side a NO buy walks (the YES bids); the t_x asks stay, as in 7b-A's fixtures. */
 export function drain(levels: Level[], pct: number): Level[] {
   return levels.map((l) => ({ p: l.p, s: String(Math.floor((Number(l.s) * pct) / 100)) })).filter((l) => l.s !== '0');
 }
@@ -3065,30 +3164,30 @@ export function against(b: LegBook, ticks: number): LegBook {
   return { bids: b.bids, asks: b.asks.map((l) => ({ p: fromTick(toTick(l.p) + ticks), s: l.s })) };
 }
 
+/** 7b-A's basket_json input: kind "no", the fee on every leg, min_order and convert_fee_bips left to the
+ *  engine's defaults ("5", the sim's min_order_shares, and "0"). */
 export function basketInput(books: LegBook[], st: FState): BasketIn {
   return {
     kind: 'no',
     legs: books.map((b, i) => ({
       open: b,
-      t_x: { bids: drain(b.bids, st.depth[i] ?? 100), asks: drain(b.asks, st.depth[i] ?? 100) },
+      t_x: { bids: drain(b.bids, st.depth[i] ?? 100), asks: b.asks },
       unwind: against(b, st.against[i] ?? 0),
+      fee: st.fees ? CRYPTO_FEE : null,
     })),
-    fee: st.fees ? CRYPTO_FEE : null,
     q_request: String(st.q),
-    min_order: '5',
-    convert_fee_bips: 0,
   };
 }
 ```
 
-`drain(F_BOOKS[0].bids, 100)` must return the same strings (`'60'`, `'100'`), which `String(Math.floor(60))` does.
+`drain(F_BOOKS[0].bids, 100)` must return the same string (`'100'`), which `String(Math.floor(100))` does.
 
 Append to `web/src/math/defaults.ts`:
 
 ```ts
 import type { FState, LegBook } from './basket';
 
-/** Section d: three legs, three ask levels each; Σ best asks 0.94. Q* = 100, Π = 3.10 before fees. */
+/** Section d: three legs, three ask levels each; Σ best asks 0.94 (a positive edge). */
 export const WALK_LEGS: Level[][] = [
   [{ p: '0.30', s: '40' }, { p: '0.32', s: '60' }, { p: '0.35', s: '100' }],
   [{ p: '0.31', s: '50' }, { p: '0.33', s: '50' }, { p: '0.36', s: '100' }],
@@ -3119,16 +3218,18 @@ export const PRESETS = [
   { name: 'sp-idle', proc_ms: 5, net_ms: 145, match_ms: 150 },
 ] as const;
 
-/** Section f (7b §6.2): a 3-leg NO basket, positive at open (Σ YES bids 1.05), 60 then 100 deep a side. */
+/** Section f (7b §6.2), exactly 7b-A's fixture basket_json/no-all-fill: a 3-leg NO basket, YES bids
+ *  0.40 / 0.35 / 0.30 × 100 (NO asks 0.60 / 0.65 / 0.70, Σ 1.95 < 2), asks a tick up. */
 export const F_BOOKS: LegBook[] = [
-  { bids: [{ p: '0.40', s: '60' }, { p: '0.39', s: '100' }], asks: [{ p: '0.41', s: '60' }, { p: '0.42', s: '100' }] },
-  { bids: [{ p: '0.35', s: '60' }, { p: '0.34', s: '100' }], asks: [{ p: '0.36', s: '60' }, { p: '0.37', s: '100' }] },
-  { bids: [{ p: '0.30', s: '60' }, { p: '0.29', s: '100' }], asks: [{ p: '0.31', s: '60' }, { p: '0.32', s: '100' }] },
+  { bids: [{ p: '0.40', s: '100' }], asks: [{ p: '0.41', s: '100' }] },
+  { bids: [{ p: '0.35', s: '100' }], asks: [{ p: '0.36', s: '100' }] },
+  { bids: [{ p: '0.30', s: '100' }], asks: [{ p: '0.31', s: '100' }] },
 ];
-/** t_x books equal the open ones, 50 shares: all fill, a small positive net. */
+/** t_x and unwind books equal the open ones, 50 shares: fixture no-all-fill (net_cash "2.5"). */
 export const F_START: FState = { depth: [100, 100, 100], against: [0, 0, 0], q: 50, fees: false };
-/** "the usual burst": leg A empty at t_x, the unwind book 5 ticks against us. */
-export const F_BURST: FState = { depth: [0, 100, 100], against: [5, 5, 5], q: 50, fees: false };
+/** "the usual burst" = fixture no-one-leg-empty-burst: leg B without bids at t_x, every unwind book 5 ticks
+ *  against us (q_eff "0", net_cash "-6"). */
+export const F_BURST: FState = { depth: [100, 0, 100], against: [5, 5, 5], q: 50, fees: false };
 ```
 
 (Put the new `import type` line at the top of `defaults.ts`, beside the existing one; `basket.ts` imports values from `defaults.ts` and `defaults.ts` imports only types from `basket.ts`, so there is no runtime cycle.)
@@ -3148,11 +3249,12 @@ import { LEGS, NEW_WALK_LEG, WALK_LEGS, exactlyOne, fromTick, toTick } from '../
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section } from './Section';
 
-interface DepthState {
+export interface DepthState {
   legs: Level[][];
   fees: boolean;
 }
-const START: DepthState = { legs: WALK_LEGS, fees: false };
+export const DEPTH_START: DepthState = { legs: WALK_LEGS, fees: false };
+const START = DEPTH_START;
 
 export function depthInput(st: DepthState): DepthWalkIn {
   return { rule: 'yes', legs: st.legs.map((levels) => ({ levels, fee: st.fees ? CRYPTO_FEE : null })) };
@@ -3186,7 +3288,7 @@ export function DepthSection({ engine }: { engine: Engine }) {
         </>
       }
     >
-      <Out out={out}>{(m) => <DepthStairs model={m} payoff="1" />}</Out>
+      <Out out={out}>{(m) => <DepthStairs model={m} />}</Out>
     </Section>
   );
 }
@@ -3225,7 +3327,7 @@ export function episodeInput(st: EpisodeState): EpisodeIn {
     gap_ms: 30_000,
     updates: EPISODE_T.slice(0, st.upto).map((t, i) => ({ t_ms: t, legs: EPISODE_BIDS[i].map(leg) })),
     scenario: { ...st.sc, honor_seconds_delay: true },
-    seconds_delay: st.delay ? 1 : 0,
+    seconds_delay: st.delay ? 1 : null,
   };
 }
 
@@ -3335,8 +3437,8 @@ export function LegMissSection({ engine, children }: { engine: Engine; children?
 - [ ] **Step 5: Run to verify pass**
 
 Run: `cd web && WASM_REQUIRED=1 npx vitest run src/math/defaults.test.ts src/math/basket.test.ts src/math/sections-def.test.tsx`
-Expected: PASS (2 + 3 + 4 tests).
-If `d` shows another Q* or Π, or `f`'s start is not `filled, +$…`: print the engine output for the default input and report it with the hand calculation in the comments above (`WALK_LEGS`, `F_BOOKS`); a different settle or walk rule in 7b-A is a contract question, not a test to loosen.
+Expected: PASS (2 + 5 + 4 tests).
+If a fixture comparison fails: the section's input drifted from 7b-A's fixture (fix `defaults.ts` / `basket.ts`), or the engine differs from its own fixture (report it; a 7b-A issue). Never edit a fixture here.
 
 - [ ] **Step 6: Types, full suite**
 
@@ -4170,7 +4272,9 @@ if (total > LIMIT) fail('over the 350 KB gzip budget');
 Run: `cd web && WASM_REQUIRED=1 npx vitest run src/math/guard.test.ts src/math/checkBundle.test.ts src/math/build.test.ts`
 Expected: PASS (2 + 3 + 1 tests).
 
-- [ ] **Step 5: The full build on the release package**
+- [ ] **Step 5: The full build on the release package (owner's OK first)**
+
+A release build of `arb-wasm` on the PC is approved by the lead but still **pending the owner's OK** (it breaks the earlier "debug builds only on the PC" rule, for one crate). Ask before running this step; without the OK, skip it and leave the size check to CI and the Docker build.
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && sh scripts/build-wasm.sh >/dev/null && cd web && npm run build 2>&1 | tail -8 && ls dist/math.html dist/math-assets && (grep -l 'EventSource\|/api/' dist/math-assets/*.js || echo clean)`
 Expected: the per-file gzip lines and `math-assets total: <n> B gzip (limit 350000)` with n ≤ 350000; `dist/math.html`; `dist/math-assets/` with one `.js`, one `.css`, one `.wasm` and a `.gz` beside each; `clean`.
@@ -4419,7 +4523,7 @@ cd /c/Users/Isabelly/PycharmProjects/cute-trading && git status --short --untrac
 → expected: no status lines, `main`, then `<sha> <subject>` of the merged 7b-B commit.
 if not: commit or stash the listed changes, then run this step again.
 
-2. Release engine, web tests with the engine required, both typechecks, both builds and the size check.
+2. Release engine, web tests with the engine required, both typechecks, both builds and the size check. PENDING OWNER OK: this is a release build of `arb-wasm` on the PC (lead-approved; the owner has not yet approved it). Without the OK, skip it: step 5's Docker build runs the same size check.
 ```bash
 cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH" && sh scripts/build-wasm.sh >/dev/null && echo wasm-ok && cd web && npm ci --no-audit --no-fund >/dev/null && ( set -o pipefail; WASM_REQUIRED=1 npm test 2>&1 | grep -E '^ +(Test Files|Tests) ' ) && echo tests-ok && ( set -o pipefail; npm run build 2>&1 | grep -E 'math-assets total|check-math-bundle|error' ) && ls dist/math.html && echo build-ok
 ```
@@ -4645,11 +4749,12 @@ git commit -m "runbook: 7b-B web: release engine and size check, ship web + comp
 | 09-27 §8 deploy | `/math` 200, wasm 200 `application/wasm` + gzip, `/math/`, `/math.html`, `/api/today` to login, plain HTTP → https; flood with `docker stats`, dashboard loads, phone on mobile data | 15 |
 
 **Decisions and gaps:**
-- **Rollback tag `web:pre7b-B`, not `pre7b`:** 7a-B's runbook already created `web:pre7b` on the VPS (its step 7), so the spec's "pre7b tag per image" is taken for the web image; 7b-B also saves `compose.web.yml.pre7b-B`, because the old image under the new labels would serve the dashboard shell at `/math` without login.
+- **Contract:** every engine type, request and fixture name follows 7b-A's "Contract for 7b-B"; sections a, c and f start from 7b-A fixture inputs (`fed-book`, `no-edge-3`, `no-all-fill`; the burst is `no-one-leg-empty-burst`), and the tests compare with the fixture outputs instead of hand-computed figures.
+- **Rollback tag `web:pre7b-B`, not `pre7b`** (the lead's decision): 7a-B's runbook already created `web:pre7b` on the VPS (its step 7), so the spec's "pre7b tag per image" is taken for the web image; 7b-B also saves `compose.web.yml.pre7b-B`, because the old image under the new labels would serve the dashboard shell at `/math` without login.
 - **gzip_static for `/math-assets/`** (09-27 §5.2/§11 open item): the check script writes the `.gz` files, so nginx does no gzip work for the assets; `public.json` stays `gzip on` (7b §5.3).
 - **`oha` is optional** (09-27 §11 open item): the runbook uses it when present, otherwise a 3,000-request `curl` loop with 50 in parallel.
-- **A failed re-fetch keeps the last good snapshot** (7b §6.3 names the missing cases for a load; for a later failure the page keeps what it had and shows it stale by its own `written_ms`).
+- **A failed re-fetch keeps the last good snapshot, shown stale** (the lead's decision; 7b §6.3 names the missing cases for a load; for a later failure the page keeps what it had and shows it stale by its own `written_ms`).
 - **The release wasm is size-optimized** with cargo's per-invocation profile variables (`opt-level=s`, LTO, one codegen unit) in `build-wasm.sh` and the Dockerfile; no `wasm-opt` (09-27 §4.2). If the budget still fails, Task 13 and the runbook stop for the owner.
-- **The PC builds the release package** for `npm run build` (Task 13 step 5, runbook step 2): the 350 KB check cannot pass on a debug build.
+- **The PC builds the release package** for `npm run build` (Task 13 step 5, runbook step 2): the 350 KB check cannot pass on a debug build. Lead-approved; the owner's OK is pending, and both steps say so.
 - **jsdom has no layout:** the 360 px rule is pinned by `theme.test.ts` over `theme.css` and `math.css`, and checked in Chrome (runbook step 22).
 - **The panel's payoff structure is checked against `payoff` fixtures** (Task 8), closing the gap 7a-B's plan left for 7b.
