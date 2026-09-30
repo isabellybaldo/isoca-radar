@@ -1149,7 +1149,7 @@ Expected: no warnings, `syntax-ok`, then `Error: usage: replay_dump <capture dir
 - [ ] **Step 4: Run the identity check itself, if 7a's busy hour is on the PC**
 
 Run: `ls "$HOME"/probe/cap/*/*.jsonl.zst && bash scripts/replay-identity.sh "$HOME/probe/cap" main 2>&1 | tail -7`
-Expected: two `frames <N> parse_errors <n> paper_rows <R>` lines with the same numbers, `base rows R order <h1> sorted <h2>`, `head rows R order <h1> sorted <h2>` (identical hashes), `IDENTICAL`. (Debug builds: an 800 MB hour replays for a long time; leave it running.) No `.jsonl.zst` under `$HOME/probe/cap`: skip this step; the runbook fetches an hour (steps 4–5).
+Expected: two `frames <N> parse_errors <n> paper_rows <R>` lines with the same numbers, `base rows R order <h1> sorted <h2>`, `head rows R order <h1> sorted <h2>` (identical hashes), `IDENTICAL`. Measured while writing this plan, on the PC with this plan's code against `main` 384e765 and the 2026-09-28 17:00 hour (812 MB, 6,721,810 frames): `paper_rows 2871` on both sides, identical hashes, `IDENTICAL`, 29 minutes in debug. No `.jsonl.zst` under `$HOME/probe/cap`: skip this step; the runbook fetches an hour (steps 4–5).
 
 - [ ] **Step 5: Commit**
 
@@ -6101,7 +6101,7 @@ K="$(find "$HOME/probe/cap" -name '*.jsonl.zst' 2>/dev/null | head -1)"; if [ -n
 → expected: a `.jsonl.zst` path and `probe-kept`, or `busy hour: …` and the fetched `.jsonl.zst` plus its `universe-*.json.zst` files.
 if not: `busy hour:` empty = no closed hour in 2 days: drop `-mmin -2880` and run again.
 
-5. The replay identity check (spec §3.3): `main` and the branch replay the hour to the same paper fills, execs and ledger rows (two debug builds and two replays of the hour: this takes long; leave it running).
+5. The replay identity check (spec §3.3): `main` and the branch replay the hour to the same paper fills, execs and ledger rows (two debug builds and two replays of the hour: about 30 minutes for an 800 MB hour).
 ```bash
 cd /c/Users/Isabelly/PycharmProjects/cute-trading/.claude/worktrees/phase7b && export PATH="$HOME/.cargo/bin:$PATH" && bash scripts/replay-identity.sh "$HOME/probe/cap" main 2>&1 | tail -7 | tee "$HOME/probe/identity.txt"
 ```
