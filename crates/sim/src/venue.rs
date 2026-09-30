@@ -219,3 +219,121 @@ pub fn unwind_sell(
     };
     (requested, fill)
 }
+
+/// A NO→collateral conversion's terms (7b §3.2): `s` legs, `q` sets, the adapter fee in basis
+/// points. Valued as `Account::convert` books it; the complement YES it returns count 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConvertTerms {
+    pub s: usize,
+    pub q: Decimal,
+    pub fee_bips: Decimal,
+}
+
+/// Shares a leg still holds that were bought beyond the full sets and never sold, at their cost
+/// basis (fees included). Cost still held, not cash.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeldUnsold {
+    pub qty: Decimal,
+    pub basis: Decimal,
+}
+
+/// A basket's cash, as the ledger books it (7b §3.2). Every figure is ≥ 0 except `net_cash`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BasketCash {
+    /// Σ buy notional + buy fees.
+    pub spent: Decimal,
+    /// Every fee paid: buys, unwinds and the conversion (already inside the other figures).
+    pub fees: Decimal,
+    /// Σ unwind notional − unwind fees.
+    pub unwind_back: Decimal,
+    /// (s − 1)·q − the conversion fee.
+    pub convert_back: Decimal,
+    /// unwind_back + convert_back − spent: the Σ cash_delta of the ledger rows.
+    pub net_cash: Decimal,
+    /// One per leg, in leg order.
+    pub held_unsold: Vec<HeldUnsold>,
+}
+
+/// `Account::take_out` on a (qty, basis) pair: the same 12 dp basis rounding.
+fn take_out(pos: &mut (Decimal, Decimal), qty: Decimal) -> (Decimal, Decimal) {
+    let (held, basis) = *pos;
+    let q = qty.min(held);
+    if q <= Decimal::ZERO {
+        return (Decimal::ZERO, Decimal::ZERO);
+    }
+    let out = if q == held {
+        basis
+    } else {
+        (basis * q / held).round_dp_with_strategy(12, RoundingStrategy::MidpointNearestEven)
+    };
+    *pos = (held - q, basis - out);
+    (q, out)
+}
+
+/// What a basket did to cash (7b §3.2), in the ledger's order: every buy, then each leg's unwind
+/// (`unwinds[i]` is leg i's; a missing entry is no unwind), then the conversion when `convert` is
+/// given (capped, like `Account::convert`, by what every leg still holds). `held_unsold` is each
+/// leg's excess that was never sold: for a conversion everything left after it, otherwise what
+/// is left beyond the `q_eff` full sets kept to resolution.
+pub fn basket_cash(
+    buy: &BasketBuy,
+    unwinds: &[OrderFill],
+    convert: Option<ConvertTerms>,
+) -> BasketCash {
+    let mut cash = BasketCash::default();
+    let mut pos: Vec<(Decimal, Decimal)> = Vec::with_capacity(buy.per_leg.len());
+    for f in &buy.per_leg {
+        if f.filled > Decimal::ZERO {
+            let cost = f.notional + f.fees;
+            cash.spent += cost;
+            cash.fees += f.fees;
+            pos.push((f.filled, cost));
+        } else {
+            pos.push((Decimal::ZERO, Decimal::ZERO));
+        }
+    }
+    for (i, u) in unwinds.iter().enumerate() {
+        if u.filled > Decimal::ZERO {
+            cash.unwind_back += u.notional - u.fees;
+            cash.fees += u.fees;
+            if let Some(p) = pos.get_mut(i) {
+                take_out(p, u.filled);
+            }
+        }
+    }
+    if let Some(t) = convert
+        && t.s >= 2
+    {
+        let held = pos.iter().map(|p| p.0).min().unwrap_or(Decimal::ZERO);
+        let q = t.q.min(held);
+        if q > Decimal::ZERO {
+            for p in &mut pos {
+                take_out(p, q);
+            }
+            let gross = (Decimal::from(t.s) - Decimal::ONE) * q;
+            let fee = gross * t.fee_bips / Decimal::from(10_000);
+            cash.convert_back = gross - fee;
+            cash.fees += fee;
+        }
+    }
+    cash.net_cash = cash.unwind_back + cash.convert_back - cash.spent;
+    let kept = if convert.is_some() {
+        Decimal::ZERO
+    } else {
+        buy.q_eff
+    };
+    cash.held_unsold = pos
+        .into_iter()
+        .map(|(qty, basis)| {
+            let unsold = (qty - kept).max(Decimal::ZERO);
+            let basis = if unsold == qty {
+                basis
+            } else {
+                (basis * unsold / qty)
+                    .round_dp_with_strategy(12, RoundingStrategy::MidpointNearestEven)
+            };
+            HeldUnsold { qty: unsold, basis }
+        })
+        .collect();
+    cash
+}

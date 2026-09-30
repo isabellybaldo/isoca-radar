@@ -9,7 +9,9 @@ use proptest::prelude::*;
 use rust_decimal::Decimal;
 use sim::consumed::ConsumedLiquidity;
 use sim::types::{LegKey, Outcome};
-use sim::venue::{FillLeg, OrderFill, basket_buy, unwind_sell};
+use sim::venue::{
+    BasketBuy, ConvertTerms, FillLeg, HeldUnsold, OrderFill, basket_buy, basket_cash, unwind_sell,
+};
 use std::collections::HashMap;
 
 fn key(i: usize, outcome: Outcome) -> LegKey {
@@ -249,6 +251,148 @@ proptest! {
         prop_assert!(f.filled <= cap);
         if cap < Decimal::from(min) {
             prop_assert_eq!(f, OrderFill::default());
+        }
+    }
+}
+
+fn of(filled: &str, notional: &str, fees: &str) -> OrderFill {
+    OrderFill {
+        filled: d(filled),
+        notional: d(notional),
+        fees: d(fees),
+        levels_used: 1,
+    }
+}
+
+#[test]
+fn a_caught_no_basket_with_one_short_leg_loses_cash_and_holds_the_rest() {
+    // A fills 10 @ 0.50, B 6 @ 0.50: 6 sets convert (s = 2 pays 1 each), A's 4 extra stay held
+    let buy = BasketBuy {
+        per_leg: vec![of("10", "5", "0"), of("6", "3", "0")],
+        q_eff: d("6"),
+        excess: vec![d("4"), d("0")],
+    };
+    let c = basket_cash(
+        &buy,
+        &[OrderFill::default(), OrderFill::default()],
+        Some(ConvertTerms {
+            s: 2,
+            q: d("6"),
+            fee_bips: d("50"),
+        }),
+    );
+    assert_eq!((c.spent, c.unwind_back), (d("8"), d("0")));
+    assert_eq!(
+        (c.convert_back, c.fees),
+        (d("5.97"), d("0.03")),
+        "6 − 6 × 50 bips"
+    );
+    assert_eq!(c.net_cash, d("-2.03"));
+    assert_eq!(
+        c.held_unsold,
+        vec![
+            HeldUnsold {
+                qty: d("4"),
+                basis: d("2")
+            },
+            HeldUnsold {
+                qty: d("0"),
+                basis: d("0")
+            }
+        ]
+    );
+}
+
+#[test]
+fn a_yes_basket_keeps_its_full_sets_and_counts_only_the_unsold_excess() {
+    let buy = BasketBuy {
+        per_leg: vec![of("10", "3", "0.1"), of("6", "3.6", "0.1")],
+        q_eff: d("6"),
+        excess: vec![d("4"), d("0")],
+    };
+    // 3 of A's 4 extra sold at 0.25 with a 0.01 fee
+    let c = basket_cash(&buy, &[of("3", "0.75", "0.01"), OrderFill::default()], None);
+    assert_eq!(
+        (c.spent, c.unwind_back, c.convert_back),
+        (d("6.8"), d("0.74"), d("0"))
+    );
+    assert_eq!((c.fees, c.net_cash), (d("0.21"), d("-6.06")));
+    assert_eq!(
+        c.held_unsold[0].qty,
+        d("1"),
+        "10 − 3 sold − 6 kept to resolution"
+    );
+    assert_eq!(c.held_unsold[1].qty, d("0"));
+}
+
+fn spec(fee_bips: Decimal) -> sim::config::AccountSpec {
+    sim::config::AccountSpec {
+        policy: sim::config::PolicyKind::P0Converter,
+        scenario: "t".into(),
+        bankroll: d("1000000"),
+        per_trade: d("100"),
+        fee_bips,
+    }
+}
+
+proptest! {
+    #[test]
+    fn basket_cash_is_what_the_ledger_books(
+        tx in prop::collection::vec(yes_book(), 2..=6),
+        unwind in prop::collection::vec(yes_book(), 6),
+        no in any::<bool>(),
+        limit in 1u32..=99,
+        q in 5u32..=500,
+        bips in prop_oneof![Just(0u32), Just(50u32), 0u32..=10_000],
+    ) {
+        let outcome = if no { Outcome::No } else { Outcome::Yes };
+        let fee = FeeSchedule::new(d("0.07"), 1).unwrap();
+        let legs: Vec<FillLeg> = (0..tx.len())
+            .map(|i| FillLeg { key: key(i, outcome), fee, limit: Price::new(Decimal::new(limit.into(), 2)).unwrap() })
+            .collect();
+        let mut c = ConsumedLiquidity::default();
+        let buy = basket_buy(&books(tx), &legs, Decimal::from(q), &mut c);
+        let unwinds: Vec<OrderFill> = legs
+            .iter()
+            .zip(buy.per_leg.iter().zip(&buy.excess))
+            .enumerate()
+            .map(|(i, (l, (f, x)))| {
+                if *x > Decimal::ZERO {
+                    unwind_sell(Some(&unwind[i]), &l.key, fee, *x, f.filled, d("5"), &mut c).1
+                } else {
+                    OrderFill::default()
+                }
+            })
+            .collect();
+        let fee_bips = Decimal::from(bips);
+        let convert = no.then_some(ConvertTerms { s: legs.len(), q: buy.q_eff, fee_bips });
+        let cash = basket_cash(&buy, &unwinds, convert);
+
+        let mut acct = sim::account::Account::new(spec(fee_bips));
+        let mut rows = Vec::new();
+        for (l, f) in legs.iter().zip(&buy.per_leg) {
+            rows.extend(acct.buy(0, "e", &l.key, f));
+        }
+        for (l, u) in legs.iter().zip(&unwinds) {
+            rows.extend(acct.sell(1, "e", &l.key, u));
+        }
+        if no && buy.q_eff > Decimal::ZERO {
+            let s_legs: Vec<LegKey> = legs.iter().map(|l| l.key.clone()).collect();
+            rows.extend(acct.convert(2, "e", &s_legs, &[], buy.q_eff));
+        }
+        let cash_delta: Decimal = rows.iter().map(|r| r.cash_delta).sum();
+        let realized: Decimal = rows.iter().map(|r| r.realized_delta).sum();
+        let open_basis = acct.valuation(|_| None).basis_open;
+        prop_assert_eq!(cash.net_cash, cash_delta);
+        prop_assert_eq!(realized, cash.net_cash + open_basis, "realized = net cash + the basis still held");
+        let held_basis: Decimal = cash.held_unsold.iter().map(|h| h.basis).sum();
+        if no {
+            prop_assert_eq!(held_basis, open_basis, "after the conversion only unsold excess is held");
+        } else {
+            prop_assert!(held_basis <= open_basis);
+        }
+        for ((h, x), u) in cash.held_unsold.iter().zip(&buy.excess).zip(&unwinds) {
+            prop_assert_eq!(h.qty, *x - u.filled);
         }
     }
 }
