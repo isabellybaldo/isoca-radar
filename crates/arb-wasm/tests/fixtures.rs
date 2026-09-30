@@ -4,7 +4,9 @@
 //! compares byte for byte. `UPDATE_FIXTURES=1` rewrites the files from these cases; a reviewer
 //! reads the diff. Without it, a file whose names, inputs or outputs differ from here fails.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use arb_wasm::api::{classify_json, depth_walk_json, episode_json, mirror_json, payoff_json};
+use arb_wasm::api::{
+    basket_json, classify_json, depth_walk_json, episode_json, mirror_json, payoff_json,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
@@ -621,6 +623,219 @@ fn episode() {
                 "seconds-delay-11",
                 episode_in("no", None, short(), 1, 50, true, json!(11)),
             ),
+        ],
+    );
+}
+// ---- basket (7b §3.4) ----
+fn bk(bids: &[(&str, &str)], asks: &[(&str, &str)]) -> Value {
+    let side = |v: &[(&str, &str)]| Value::Array(v.iter().map(|(p, s)| lv(p, s)).collect());
+    json!({ "bids": side(bids), "asks": side(asks) })
+}
+
+fn bleg(open: Value, t_x: Value, unwind: Value, fee: Value) -> Value {
+    json!({ "open": open, "t_x": t_x, "unwind": unwind, "fee": fee })
+}
+
+/// Section f's default: a 3-leg NO basket, YES bids 0.40/0.35/0.30 (NO asks 0.60/0.65/0.70,
+/// Σ 1.95 < 2), YES asks one tick up; 100 deep everywhere; t_x and unwind books = open.
+fn f_book(i: usize) -> Value {
+    let (b, a) = [("0.40", "0.41"), ("0.35", "0.36"), ("0.30", "0.31")][i];
+    bk(&[(b, "100")], &[(a, "100")])
+}
+
+fn f_legs() -> Vec<Value> {
+    (0..3)
+        .map(|i| bleg(f_book(i), f_book(i), f_book(i), Value::Null))
+        .collect()
+}
+
+fn basket_in(kind: &str, legs: Vec<Value>, q: &str, extra: &[(&str, &str)]) -> String {
+    let mut v = json!({ "kind": kind, "legs": legs, "q_request": q });
+    for (k, x) in extra {
+        v[*k] = json!(x);
+    }
+    v.to_string()
+}
+
+/// "The usual burst": leg 1 empty at t_x, and the unwind books 5 ticks against us (for NO the
+/// YES asks rise 0.05).
+fn burst_legs() -> Vec<Value> {
+    let against = [
+        bk(&[("0.40", "100")], &[("0.46", "100")]),
+        bk(&[("0.35", "100")], &[("0.41", "100")]),
+        bk(&[("0.30", "100")], &[("0.36", "100")]),
+    ];
+    (0..3)
+        .map(|i| {
+            let tx = if i == 1 {
+                bk(&[], &[("0.36", "100")])
+            } else {
+                f_book(i)
+            };
+            bleg(f_book(i), tx, against[i].clone(), Value::Null)
+        })
+        .collect()
+}
+
+fn yes_book(b: &str, a: &str) -> Value {
+    bk(&[(b, "100")], &[(a, "100")])
+}
+
+#[test]
+fn basket() {
+    let f = f_legs();
+    let mut partial = f_legs();
+    partial[2]["t_x"] = bk(&[("0.30", "20")], &[("0.31", "100")]); // leg 2: 20 of 50
+    let mut below_min = f_legs();
+    below_min[0]["t_x"] = bk(&[("0.40", "47")], &[("0.41", "100")]); // excess 3 on legs 1, 2
+    let mut unwind_empty = burst_legs();
+    for l in &mut unwind_empty {
+        l["unwind"] = bk(&[("0.40", "100")], &[]);
+    }
+    let fees_on: Vec<Value> = (0..3)
+        .map(|i| bleg(f_book(i), f_book(i), f_book(i), fee7()))
+        .collect();
+    let yes: Vec<Value> = [("0.29", "0.30"), ("0.29", "0.30"), ("0.29", "0.30")]
+        .iter()
+        .map(|(b, a)| bleg(yes_book(b, a), yes_book(b, a), yes_book(b, a), Value::Null))
+        .collect();
+    let mut yes_empty = yes.clone();
+    yes_empty[0]["t_x"] = bk(&[("0.29", "100")], &[]);
+    yes_empty[1]["unwind"] = bk(&[("0.20", "100")], &[("0.30", "100")]);
+    yes_empty[2]["unwind"] = bk(&[("0.20", "100")], &[("0.30", "100")]);
+    let no_edge: Vec<Value> = (0..3)
+        .map(|_| {
+            bleg(
+                yes_book("0.30", "0.31"),
+                yes_book("0.30", "0.31"),
+                yes_book("0.30", "0.31"),
+                Value::Null,
+            )
+        })
+        .collect();
+    let thin: Vec<Value> = (0..3)
+        .map(|i| {
+            let (b, a) = [("0.40", "0.41"), ("0.35", "0.36"), ("0.30", "0.31")][i];
+            let t = bk(&[(b, "4")], &[(a, "100")]);
+            bleg(t.clone(), t.clone(), t, Value::Null)
+        })
+        .collect();
+    let two_legs: Vec<Value> = [("0.60", "0.61"), ("0.50", "0.51")]
+        .iter()
+        .map(|(b, a)| {
+            let t = yes_book(b, a);
+            bleg(t.clone(), t.clone(), t, Value::Null)
+        })
+        .collect();
+    let four_legs: Vec<Value> = ["0.30", "0.30", "0.25", "0.25"]
+        .iter()
+        .map(|b| {
+            let t = bk(&[(b, "100")], &[("0.99", "100")]);
+            bleg(t.clone(), t.clone(), t, Value::Null)
+        })
+        .collect();
+    let mut five_legs = four_legs.clone();
+    five_legs.push(four_legs[0].clone());
+    let one_leg = vec![f[0].clone()];
+    let mut eight_levels = f_legs();
+    eight_levels[0]["unwind"] = json!({ "bids": [], "asks": eight(41) });
+    let mut nine_levels = f_legs();
+    nine_levels[0]["unwind"] = json!({ "bids": [], "asks": eight(41) });
+    nine_levels[0]["unwind"]["asks"]
+        .as_array_mut()
+        .unwrap()
+        .push(lv("0.49", "1"));
+    let mut penny = burst_legs();
+    penny[0]["unwind"] = bk(&[], &[("0.99", "100")]); // NO sells at 0.01
+    let mut penny_bad = burst_legs();
+    penny_bad[0]["unwind"] = bk(&[], &[("1.00", "100")]);
+    let mut top = burst_legs();
+    top[2]["unwind"] = bk(&[], &[("0.01", "100")]); // NO sells at 0.99
+    let mut top_bad = burst_legs();
+    top_bad[2]["unwind"] = bk(&[], &[("0.00", "100")]);
+    let big = |s: &str| -> Vec<Value> {
+        (0..3)
+            .map(|i| {
+                let (b, a) = [("0.40", "0.41"), ("0.35", "0.36"), ("0.30", "0.31")][i];
+                let t = bk(&[(b, s)], &[(a, s)]);
+                bleg(t.clone(), t.clone(), t, Value::Null)
+            })
+            .collect()
+    };
+    let default = basket_in("no", f.clone(), "50", &[]);
+    check(
+        "basket_json",
+        basket_json,
+        vec![
+            ("no-all-fill", default.clone()),
+            (
+                "no-one-leg-empty-burst",
+                basket_in("no", burst_legs(), "50", &[]),
+            ),
+            ("no-one-leg-partial", basket_in("no", partial, "50", &[])),
+            ("no-excess-below-min", basket_in("no", below_min, "50", &[])),
+            (
+                "no-unwind-book-empty",
+                basket_in("no", unwind_empty, "50", &[]),
+            ),
+            (
+                "no-convert-fee-0",
+                basket_in("no", f.clone(), "50", &[("convert_fee_bips", "0")]),
+            ),
+            (
+                "no-convert-fee-50",
+                basket_in("no", f.clone(), "50", &[("convert_fee_bips", "50")]),
+            ),
+            (
+                "no-convert-fee-10000",
+                basket_in("no", f.clone(), "50", &[("convert_fee_bips", "10000")]),
+            ),
+            (
+                "no-convert-fee-10001",
+                basket_in("no", f.clone(), "50", &[("convert_fee_bips", "10001")]),
+            ),
+            ("no-fees-on", basket_in("no", fees_on, "50", &[])),
+            (
+                "no-min-order-10",
+                basket_in("no", f.clone(), "50", &[("min_order", "10")]),
+            ),
+            ("yes-all-fill", basket_in("yes", yes.clone(), "50", &[])),
+            ("yes-one-leg-empty", basket_in("yes", yes_empty, "50", &[])),
+            (
+                "yes-convert-fee",
+                basket_in("yes", yes, "50", &[("convert_fee_bips", "50")]),
+            ),
+            ("no-edge-at-open", basket_in("no", no_edge, "50", &[])),
+            ("too-thin-at-open", basket_in("no", thin, "50", &[])),
+            (
+                "q-request-below-min",
+                basket_in("no", f.clone(), "4.99", &[]),
+            ),
+            (
+                "q-request-json-number",
+                default.replace(r#""q_request":"50""#, r#""q_request":50"#),
+            ),
+            (
+                "q-request-1000000",
+                basket_in("no", big("1000000"), "1000000", &[]),
+            ),
+            (
+                "q-request-1000001",
+                basket_in("no", big("1000000"), "1000001", &[]),
+            ),
+            ("one-leg", basket_in("no", one_leg, "50", &[])),
+            ("two-legs", basket_in("no", two_legs, "50", &[])),
+            ("four-legs", basket_in("no", four_legs, "50", &[])),
+            ("five-legs", basket_in("no", five_legs, "50", &[])),
+            ("eight-levels", basket_in("no", eight_levels, "50", &[])),
+            ("nine-levels", basket_in("no", nine_levels, "50", &[])),
+            ("price-0.99", basket_in("no", penny, "50", &[])),
+            ("price-1.00", basket_in("no", penny_bad, "50", &[])),
+            ("price-0.01", basket_in("no", top, "50", &[])),
+            ("price-0.00", basket_in("no", top_bad, "50", &[])),
+            ("bad-kind", basket_in("maybe", f.clone(), "50", &[])),
+            ("input-16384", pad(&default, 16 * 1024)),
+            ("input-16385", pad(&default, 16 * 1024 + 1)),
         ],
     );
 }

@@ -1,6 +1,8 @@
 //! Hand-computed expectations for the facade (09-27 spec §4.1, 7b §3.4) and its limits.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use arb_wasm::api::{classify_json, depth_walk_json, episode_json, mirror_json, payoff_json};
+use arb_wasm::api::{
+    basket_json, classify_json, depth_walk_json, episode_json, mirror_json, payoff_json,
+};
 use serde_json::Value;
 
 fn v(out: &str) -> Value {
@@ -140,4 +142,109 @@ fn a_slow_trader_misses_a_short_episode() {
         out.ends_with(r#""t_x":1295,"captured":"0","caught":false}"#),
         "{out}"
     );
+}
+/// Section f's three NO legs (YES bids 0.40/0.35/0.30, asks a tick up, 100 deep), with leg 1's
+/// t_x bid ("" = no bid) and the three unwind books' asks given.
+fn f_input(tx1_bids: &str, unwind_asks: [&str; 3]) -> String {
+    let book = |b: &str, a: &str| {
+        let bids = if b.is_empty() {
+            String::new()
+        } else {
+            format!(r#"{{"p":"{b}","s":"100"}}"#)
+        };
+        format!(r#"{{"bids":[{bids}],"asks":[{{"p":"{a}","s":"100"}}]}}"#)
+    };
+    let (b, a) = (["0.40", "0.35", "0.30"], ["0.41", "0.36", "0.31"]);
+    let legs: Vec<String> = (0..3)
+        .map(|i| {
+            let tx = if i == 1 {
+                book(tx1_bids, a[i])
+            } else {
+                book(b[i], a[i])
+            };
+            format!(
+                r#"{{"open":{},"t_x":{tx},"unwind":{},"fee":null}}"#,
+                book(b[i], a[i]),
+                book(b[i], unwind_asks[i])
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"kind":"no","legs":[{}],"q_request":"50"}}"#,
+        legs.join(",")
+    )
+}
+
+#[test]
+fn the_default_no_basket_fills_and_converts_for_a_small_gain() {
+    // NO asks 0.60 + 0.65 + 0.70 = 1.95 per set, 3 legs convert for 2: 50 sets spend 97.5, get 100
+    let o = v(&basket_json(&f_input("0.35", ["0.41", "0.36", "0.31"])));
+    assert_eq!(
+        (o["q_open"].clone(), o["q_target"].clone()),
+        ("100".into(), "50".into())
+    );
+    assert_eq!(o["q_eff"], "50");
+    assert_eq!(o["legs"][0]["limit"], "0.6");
+    assert_eq!(o["cash"]["spent"], "97.5");
+    assert_eq!(o["cash"]["convert_back"], "100");
+    assert_eq!(o["cash"]["net_cash"], "2.5");
+    assert!(o["value_at_resolution"].is_null());
+}
+
+#[test]
+fn the_usual_burst_is_caught_and_loses() {
+    // leg 1 empty at t_x: q_eff 0, legs 0 and 2 unwind 50 each into YES asks 5 ticks up:
+    // NO bids 1 − 0.46 = 0.54 and 1 − 0.36 = 0.64 → back 27 + 32 = 59; spent 30 + 35 = 65
+    let o = v(&basket_json(&f_input("", ["0.46", "0.41", "0.36"])));
+    assert_eq!(o["q_eff"], "0");
+    assert_eq!(
+        (
+            o["legs"][0]["excess"].clone(),
+            o["legs"][1]["excess"].clone()
+        ),
+        ("50".into(), "0".into())
+    );
+    assert_eq!(o["legs"][0]["unwind"]["vwap"], "0.54");
+    assert_eq!(o["cash"]["unwind_back"], "59");
+    assert_eq!(o["cash"]["net_cash"], "-6");
+    assert_eq!(o["cash"]["convert_back"], "0");
+}
+
+#[test]
+fn a_request_below_the_minimum_is_an_error_not_a_clamp() {
+    let input = f_input("0.35", ["0.41", "0.36", "0.31"])
+        .replace(r#""kind":"no""#, r#""kind":"no","min_order":"60""#);
+    assert_eq!(
+        err(&basket_json(&input)),
+        "q_request must be at least the minimum order of 60 shares"
+    );
+}
+
+#[test]
+fn a_request_past_the_open_depth_plans_q_open_and_sizes_round_like_the_policy() {
+    // NO asks 1 − 0.33 = 0.67 and 1 − 0.70 = 0.30: Σ 0.97 < 1, 100 deep on each leg
+    let input = |q: &str| {
+        let book = |b: &str, a: &str| {
+            format!(r#"{{"bids":[{{"p":"{b}","s":"100"}}],"asks":[{{"p":"{a}","s":"100"}}]}}"#)
+        };
+        let leg = |b: &str, a: &str| {
+            let k = book(b, a);
+            format!(r#"{{"open":{k},"t_x":{k},"unwind":{k},"fee":null}}"#)
+        };
+        format!(
+            r#"{{"kind":"no","legs":[{},{}],"q_request":"{q}"}}"#,
+            leg("0.33", "0.34"),
+            leg("0.70", "0.71")
+        )
+    };
+    let past = v(&basket_json(&input("500")));
+    assert_eq!(
+        (past["q_open"].clone(), past["q_target"].clone()),
+        ("100".into(), "100".into()),
+        "the policy's min(budget, depth at open): q_open is shown beside it"
+    );
+    // 0.67 × 7.5 = 5.025 has 3 dp: `settle` rounds the size down to 7 (0.67 × 7 = 4.69)
+    let odd = v(&basket_json(&input("7.5")));
+    assert_eq!(odd["q_target"], "7");
+    assert_eq!(odd["legs"][0]["buy"]["filled"], "7");
 }

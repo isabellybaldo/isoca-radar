@@ -34,4 +34,9 @@ mod bindings {
     pub fn episode_json(input: &str) -> String {
         crate::api::episode_json(input)
     }
+
+    #[wasm_bindgen]
+    pub fn basket_json(input: &str) -> String {
+        crate::api::basket_json(input)
+    }
 }
