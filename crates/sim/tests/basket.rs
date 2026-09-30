@@ -384,12 +384,39 @@ proptest! {
         let realized: Decimal = rows.iter().map(|r| r.realized_delta).sum();
         let open_basis = acct.valuation(|_| None).basis_open;
         prop_assert_eq!(cash.net_cash, cash_delta);
+        let sum = |k: sim::account::EntryKind| -> Decimal {
+            rows.iter().filter(|r| r.kind == k).map(|r| r.cash_delta).sum()
+        };
+        prop_assert_eq!(cash.spent, -sum(sim::account::EntryKind::Buy));
+        prop_assert_eq!(cash.unwind_back, sum(sim::account::EntryKind::Sell));
+        prop_assert_eq!(cash.convert_back, sum(sim::account::EntryKind::Convert));
+        let row_fees: Decimal = rows.iter().map(|r| r.fees).sum();
+        prop_assert_eq!(cash.fees, row_fees);
+        prop_assert_eq!(cash.fees, acct.fees_paid);
         prop_assert_eq!(realized, cash.net_cash + open_basis, "realized = net cash + the basis still held");
         let held_basis: Decimal = cash.held_unsold.iter().map(|h| h.basis).sum();
         if no {
             prop_assert_eq!(held_basis, open_basis, "after the conversion only unsold excess is held");
         } else {
             prop_assert!(held_basis <= open_basis);
+        }
+        // held basis against the ledger's position, per leg. NO: the position is exactly the
+        // unsold excess. YES: the position also holds the q_eff kept sets; the ledger never
+        // splits them out, so the split is re-derived here with Account::take_out's 12 dp
+        // formula (this is the pin on basket_cash's copy of that rounding).
+        for (l, h) in legs.iter().zip(&cash.held_unsold) {
+            let (pq, pb) = acct.positions.get(&l.key).map_or((Decimal::ZERO, Decimal::ZERO), |p| (p.qty, p.basis));
+            if no {
+                prop_assert_eq!((h.qty, h.basis), (pq, pb));
+            } else {
+                prop_assert_eq!(pq, h.qty + buy.q_eff.min(pq));
+                let want = if h.qty == pq {
+                    pb
+                } else {
+                    (pb * h.qty / pq).round_dp_with_strategy(12, rust_decimal::RoundingStrategy::MidpointNearestEven)
+                };
+                prop_assert_eq!(h.basis, want);
+            }
         }
         for ((h, x), u) in cash.held_unsold.iter().zip(&buy.excess).zip(&unwinds) {
             prop_assert_eq!(h.qty, *x - u.filled);
