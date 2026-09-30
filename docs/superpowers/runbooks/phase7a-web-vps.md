@@ -59,8 +59,8 @@ if not: check the key path is quoted with forward slashes and the port is 50158.
 cd /home/isoca/projects/cute-trading && { docker image inspect cute-trading/web:pre7b >/dev/null 2>&1 || docker tag cute-trading/web:dev cute-trading/web:pre7b; } && docker image inspect -f '{{.Id}}' cute-trading/web:pre7b cute-trading/web:pre7a; docker inspect -f '{{.Image}}' cute-trading-web-1
 ```
 → expected: three identical `sha256:…` lines (pre7b, pre7a, the running web).
-if not: the running ID differs from the first line = `docker tag <the running sha256 ID> cute-trading/web:pre7b` and run the last two commands again until the first and third lines match; only `pre7a` differs or is missing = write it in Results and go on (never retag `pre7a`).
-if not: a re-run after step 10 shows pre7b equal to the NEW running web = `docker tag <the previous web sha256 ID (the pre7a ID if that is what ran before)> cute-trading/web:pre7b` and report.
+if not (first run, before step 8 only): the running ID differs from the first line = `docker tag <the running sha256 ID> cute-trading/web:pre7b` and run the last two commands again until the first and third lines match; only `pre7a` differs or is missing = write it in Results and go on (never retag `pre7a`).
+if not (a re-run after step 10): the running web is the NEW image, so a different third line is expected: leave `pre7b` as it is and check that the first line equals the second (`pre7a`); if `pre7b` equals the NEW running web = `docker tag <the pre7a sha256 ID> cute-trading/web:pre7b` and report.
 **STOP**
 
 8. Load the new image (moves `web:dev`; `web:pre7b` and `web:pre7a` stay).
