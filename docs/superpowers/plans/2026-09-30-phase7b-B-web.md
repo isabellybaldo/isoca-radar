@@ -7,6 +7,8 @@
 **Tech Stack:** React 19.2, TypeScript 5.9, Vite 8 (rolldown), Vitest 4 + Testing Library (jsdom), hand-made SVG and HTML, plain CSS; Rust 1.98.1 + `wasm-bindgen` CLI (the version `Cargo.lock` pins) for the package; Docker (rust cargo-chef stage → node 22 → nginx-unprivileged 1.29), Traefik labels in `compose.web.yml`.
 **Spec:** docs/superpowers/specs/2026-09-30-phase7b-math-playground-design.md (§6, §7, §5.3, §8 web, §9 7b-B, §11), on docs/superpowers/specs/2026-09-27-phase7-playground-explain-design.md (§4.2–§6 "as 09-27", amended by 7b §11).
 
+> **Ruling (controller, 2026-09-30, from 7b-A preflight P9):** `depth_walk_json`'s `pi`/`pi_gross` are the authoritative totals (conservative fees, as `fill::walk`); `steps[].cost` is for drawing (exact fees) and may differ in the 5th decimal. Never assert Σ steps == `pi`.
+
 ## Contract used from 7b-A
 
 The contract is `docs/superpowers/plans/2026-09-30-phase7b-A-rust.md` § "Contract for 7b-B" (authoritative; its code was compiled and tested), and the fixture cases in its Tasks 9–11. `web/src/wasm/types.ts` and `web/src/math/snapshot.ts` copy it. What 7b-B reads or sends:
