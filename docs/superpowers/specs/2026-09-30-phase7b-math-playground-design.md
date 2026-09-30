@@ -41,7 +41,7 @@ web/src/schematics/ a..f (pure views) ◄── math.html → src/math/ ◄─�
 
 ### 3.1 `arb-core` additions
 
-As 09-27 §3: `payoff`, `book::d1_sums`, `detect::classify`, `fill::walk_steps`, with their property tests.
+As 09-27 §3: `payoff`, `book::d1_sums`, `classify` and `walk_steps`, with their property tests. **Placement (plan 7b-A):** `fill.rs` and `detect.rs` are premise-locked, and editing them would restart every card and break the 0006 backfill test. So `walk_steps` lives in a new `arb_core::steps` and `classify` in a new `arb_core::classify`. `classify` reads the same conditions as the detectors, and a proptest checks that they agree. The extraction in §3.2 bumps the `sim` premise from 2 to 3, refreshed once in `premises.lock`, so Edge capture and SWEET start counting anew from the first scanner run on the 7b image.
 
 ### 3.2 Extracting the sim's fill arithmetic
 
@@ -71,7 +71,7 @@ The fill arithmetic of `PaperTrader::execute` and `PaperTrader::unwind` (`crates
   - a missing book;
   - `held` needing rounding.
 - New property test (random books, 2–6 legs): `q_eff ≤` every `per_leg.filled`, every `excess ≥ 0`, and an unwind never sells more than `min(round2(qty), round2(held))`.
-- **`basket_cash` against the ledger:** for random fills, `net_cash` equals the sum of `cash_delta` over the ledger rows that `Account::buy`/`sell`/`convert` produce for the same fills. Also, the ledger's realized total plus the open basis equals `net_cash` plus the `held_unsold` basis.
+- **`basket_cash` against the ledger:** for random fills, `net_cash` equals the sum of `cash_delta` over the ledger rows that `Account::buy`/`sell`/`convert` produce for the same fills, and the ledger's realized total equals `net_cash` plus the open basis (for a NO basket, the open basis is Σ `held_unsold.basis`). *(Corrected by plan 7b-A: the first draft's identity failed on a two-leg example.)*
 - **The replay identity check (runbook step, before merging 7b-A):** run `scanner::replay::replay_dir_paper_with` over one busy raw hour at `main` and at the branch, through a small script in `scripts/`. The `fills`, `exec` and ledger outputs must be byte-identical (a sorted dump compared with `sha256sum`).
 
 ### 3.4 `arb-wasm`
@@ -130,7 +130,7 @@ As 09-27 §4, with one more function. **All book inputs are YES-book levels**, a
 
 - **Whitelist test:** it serializes a fully populated snapshot and compares every key path to a fixed list in the test. A new field fails until the list names it.
 - **Content test:** the api's store fixture is seeded with recognisable market ids, token ids, event titles and account ids. The snapshot built from it must contain none of those strings, and none of the fixture host name.
-- **Size test:** a snapshot with 20 categories × every scenario, both sides, and 24 hourly rows serializes under 64 KiB.
+- **Size test:** a snapshot with the `all` rows plus 20 categories, for what the grid draws (NO side, fee 0, the six LADDER scenarios), and 24 hourly rows serializes under 64 KiB (about 32 KB). `markets` holds only those rows. *(Corrected by plan 7b-A: both sides × every scenario came to about 82 KB.)*
 
 ### 5.3 Serving
 
