@@ -218,13 +218,26 @@ pub fn write_atomic_with(
             opts.mode(0o644); // nginx (another uid) reads it through a read-only mount (7b-B)
         }
         let mut f = opts.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // mode() above is masked by umask and only applies on create; fchmod is not.
+            f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        }
         f.write_all(bytes)?;
         f.sync_all()?;
     }
     before_rename(&tmp)?;
     std::fs::rename(&tmp, dir.join(PUBLIC_FILE))?;
     #[cfg(unix)]
-    std::fs::File::open(dir)?.sync_all()?;
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("the new file is already in place, but the directory fsync failed: {e}"),
+            )
+        })?;
     Ok(())
 }
 
@@ -587,6 +600,10 @@ mod write_tests {
     fn the_file_is_readable_by_nginx_s_uid() {
         use std::os::unix::fs::PermissionsExt;
         let d = tmp_dir("mode");
+        // a leftover 0600 tmp (and any umask) must not leak into the published file
+        std::fs::write(d.join(PUBLIC_TMP), b"stale").unwrap();
+        std::fs::set_permissions(d.join(PUBLIC_TMP), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
         write_atomic(&d, b"{}").unwrap();
         let mode = std::fs::metadata(d.join(PUBLIC_FILE))
             .unwrap()

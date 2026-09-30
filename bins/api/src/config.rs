@@ -79,7 +79,11 @@ impl Config {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/etc/cute-trading/policies.toml".to_string());
         let public_dir = get("PUBLIC_DIR").filter(|s| !s.is_empty());
-        let public_every_s = parse_or(get("PUBLIC_EVERY_S"), 300, "PUBLIC_EVERY_S")?;
+        let public_every_s = parse_or(
+            get("PUBLIC_EVERY_S").filter(|s| !s.is_empty()),
+            300,
+            "PUBLIC_EVERY_S",
+        )?;
         anyhow::ensure!(
             (10..=3_600).contains(&public_every_s),
             "PUBLIC_EVERY_S must be 10..=3600"
@@ -186,6 +190,12 @@ mod tests {
         assert!(cfg(&[url, ("PUBLIC_EVERY_S", "9")]).is_err());
         assert!(cfg(&[url, ("PUBLIC_EVERY_S", "3601")]).is_err());
         assert!(cfg(&[url, ("PUBLIC_EVERY_S", "5m")]).is_err());
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "0")]).is_err());
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "99999999999")]).is_err());
+        assert_eq!(
+            cfg(&[url, ("PUBLIC_EVERY_S", "")]).unwrap().public_every_s,
+            300
+        );
     }
 
     #[test]
