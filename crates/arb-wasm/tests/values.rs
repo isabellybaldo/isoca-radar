@@ -86,3 +86,14 @@ fn deeply_nested_input_under_16_kib_is_one_error_not_a_crash() {
         }
     }
 }
+
+#[test]
+fn duplicate_price_error_has_no_newline_even_when_the_input_has_one() {
+    // Price::parse trims whitespace, so "0.50\n" duplicates "0.50"; the message prints the
+    // normalized price, never the raw string.
+    let e = err(&mirror_json(
+        r#"{"bids":[{"p":"0.50","s":"1"},{"p":"0.50\n","s":"2"}],"asks":[]}"#,
+    ));
+    assert_eq!(e, "two levels at the same price 0.5");
+    assert!(!e.contains('\n'));
+}

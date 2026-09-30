@@ -57,7 +57,7 @@
   {
     "name": "duplicate-price",
     "input": "{\"asks\":[],\"bids\":[{\"p\":\"0.50\",\"s\":\"1\"},{\"p\":\"0.50\",\"s\":\"2\"}]}",
-    "output": "{\"error\":\"two levels at the same price 0.50\"}"
+    "output": "{\"error\":\"two levels at the same price 0.5\"}"
   },
   {
     "name": "size-zero",

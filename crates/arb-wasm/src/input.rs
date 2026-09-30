@@ -91,7 +91,7 @@ pub fn levels(v: &[LevelIn]) -> Result<Vec<(Price, Shares)>, String> {
     for l in v {
         let p = price(&l.p)?;
         if out.iter().any(|(q, _)| *q == p) {
-            return Err(format!("two levels at the same price {}", l.p));
+            return Err(format!("two levels at the same price {}", d(p.get())));
         }
         out.push((p, size(&l.s)?));
     }
