@@ -4,7 +4,7 @@
 //! compares byte for byte. `UPDATE_FIXTURES=1` rewrites the files from these cases; a reviewer
 //! reads the diff. Without it, a file whose names, inputs or outputs differ from here fails.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use arb_wasm::api::{mirror_json, payoff_json};
+use arb_wasm::api::{classify_json, depth_walk_json, episode_json, mirror_json, payoff_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
@@ -215,6 +215,381 @@ fn payoff() {
                 ),
             ),
             ("bad-kind", payoff_in("maybe", 3, true, Value::Null)),
+        ],
+    );
+}
+
+// ---- classify ----
+fn leg(status: &str, bid: Option<&str>, ask: Option<&str>, fee: Value) -> Value {
+    let side = |p: Option<&str>| p.map_or_else(|| json!([]), |p| json!([lv(p, "10")]));
+    json!({ "status": status, "bids": side(bid), "asks": side(ask), "fee": fee })
+}
+
+fn live(bid: &str, ask: &str) -> Value {
+    leg("live", Some(bid), Some(ask), Value::Null)
+}
+
+fn fee7() -> Value {
+    json!({ "rate": "0.07", "exponent": 1 })
+}
+
+fn classify_in(augmented: bool, legs: Vec<Value>) -> String {
+    json!({ "augmented": augmented, "legs": legs }).to_string()
+}
+
+fn no_edge_3() -> Vec<Value> {
+    vec![
+        live("0.40", "0.41"),
+        live("0.35", "0.36"),
+        live("0.30", "0.31"),
+    ]
+}
+
+#[test]
+fn classify() {
+    let fees_on: Vec<Value> = [("0.40", "0.41"), ("0.35", "0.36"), ("0.30", "0.31")]
+        .iter()
+        .map(|(b, a)| leg("live", Some(b), Some(a), fee7()))
+        .collect();
+    check(
+        "classify_json",
+        classify_json,
+        vec![
+            ("no-edge-3", classify_in(false, no_edge_3())),
+            (
+                "yes-incomplete-other",
+                classify_in(
+                    false,
+                    vec![
+                        live("0.20", "0.30"),
+                        live("0.20", "0.30"),
+                        leg("other", None, None, Value::Null),
+                    ],
+                ),
+            ),
+            (
+                "decided",
+                classify_in(
+                    false,
+                    vec![
+                        leg("closed_yes", None, None, Value::Null),
+                        live("0.20", "0.30"),
+                    ],
+                ),
+            ),
+            (
+                "missing-ask",
+                classify_in(
+                    false,
+                    vec![
+                        live("0.20", "0.30"),
+                        leg("live", Some("0.20"), None, Value::Null),
+                    ],
+                ),
+            ),
+            (
+                "crossed-leg",
+                classify_in(false, vec![live("0.56", "0.55"), live("0.30", "0.31")]),
+            ),
+            (
+                "nothing",
+                classify_in(false, vec![live("0.40", "0.52"), live("0.40", "0.52")]),
+            ),
+            ("fees-on", classify_in(false, fees_on)),
+            (
+                "augmented-complete",
+                classify_in(
+                    true,
+                    vec![
+                        live("0.20", "0.30"),
+                        live("0.20", "0.30"),
+                        live("0.20", "0.30"),
+                    ],
+                ),
+            ),
+            (
+                "six-legs",
+                classify_in(false, vec![live("0.10", "0.12"); 6]),
+            ),
+            (
+                "seven-legs",
+                classify_in(false, vec![live("0.10", "0.12"); 7]),
+            ),
+            ("zero-legs", classify_in(false, vec![])),
+            (
+                "bad-status",
+                classify_in(
+                    false,
+                    vec![leg("won", None, None, Value::Null), live("0.20", "0.30")],
+                ),
+            ),
+            (
+                "fee-rate-1",
+                classify_in(
+                    false,
+                    vec![
+                        leg(
+                            "live",
+                            Some("0.40"),
+                            Some("0.41"),
+                            json!({ "rate": "1", "exponent": 1 }),
+                        ),
+                        live("0.35", "0.36"),
+                    ],
+                ),
+            ),
+        ],
+    );
+}
+
+// ---- depth walk ----
+fn wleg(levels: Value, fee: Value) -> Value {
+    json!({ "levels": levels, "fee": fee })
+}
+
+fn walk_in(rule: &str, legs: Vec<Value>) -> String {
+    json!({ "rule": rule, "legs": legs }).to_string()
+}
+
+#[test]
+fn depth_walk() {
+    let yes_two = vec![
+        wleg(json!([lv("0.30", "10"), lv("0.40", "10")]), Value::Null),
+        wleg(json!([lv("0.60", "15")]), Value::Null),
+    ];
+    let no_three = vec![
+        wleg(json!([lv("0.60", "10"), lv("0.62", "20")]), Value::Null),
+        wleg(json!([lv("0.65", "15"), lv("0.70", "30")]), Value::Null),
+        wleg(json!([lv("0.70", "5"), lv("0.72", "40")]), Value::Null),
+    ];
+    let three_levels = |a: &str, b: &str, c: &str| {
+        wleg(json!([lv(a, "10"), lv(b, "10"), lv(c, "10")]), Value::Null)
+    };
+    check(
+        "depth_walk_json",
+        depth_walk_json,
+        vec![
+            ("yes-two-legs", walk_in("yes", yes_two.clone())),
+            ("no-nested-three", walk_in("no", no_three)),
+            (
+                "exactly-one",
+                walk_in(
+                    "yes",
+                    vec![
+                        wleg(json!([lv("0.50", "10")]), Value::Null),
+                        wleg(json!([lv("0.50", "10")]), Value::Null),
+                    ],
+                ),
+            ),
+            (
+                "fees-on",
+                walk_in(
+                    "yes",
+                    vec![
+                        wleg(json!([lv("0.30", "10"), lv("0.40", "10")]), fee7()),
+                        wleg(json!([lv("0.60", "15")]), fee7()),
+                    ],
+                ),
+            ),
+            (
+                "zero-depth-leg",
+                walk_in(
+                    "yes",
+                    vec![
+                        wleg(json!([]), Value::Null),
+                        wleg(json!([lv("0.60", "15")]), Value::Null),
+                    ],
+                ),
+            ),
+            (
+                "four-legs-three-levels",
+                walk_in(
+                    "yes",
+                    vec![
+                        three_levels("0.20", "0.21", "0.25"),
+                        three_levels("0.22", "0.23", "0.24"),
+                        three_levels("0.24", "0.26", "0.28"),
+                        three_levels("0.25", "0.27", "0.30"),
+                    ],
+                ),
+            ),
+            ("bad-rule", walk_in("maybe", yes_two.clone())),
+            (
+                "seven-legs",
+                walk_in("yes", vec![wleg(json!([lv("0.10", "1")]), Value::Null); 7]),
+            ),
+        ],
+    );
+}
+
+// ---- episode ----
+fn two(b0: &str, a0: &str, b1: &str, a1: &str) -> Value {
+    json!([live(b0, a0), live(b1, a1)])
+}
+
+fn open_no() -> Value {
+    two("0.60", "0.61", "0.50", "0.51") // NO asks 0.40 + 0.50 = 0.90 < 1
+}
+
+fn shut_no() -> Value {
+    two("0.40", "0.41", "0.50", "0.51")
+}
+
+fn episode_in(
+    kind: &str,
+    gap_ms: Option<i64>,
+    updates: Vec<(i64, Value)>,
+    net_ms: i64,
+    match_ms: i64,
+    honor: bool,
+    seconds_delay: Value,
+) -> String {
+    let updates: Vec<Value> = updates
+        .into_iter()
+        .map(|(t, legs)| json!({ "t_ms": t, "legs": legs }))
+        .collect();
+    let mut v = json!({
+        "kind": kind,
+        "updates": updates,
+        "scenario": { "proc_ms": 0, "net_ms": net_ms, "match_ms": match_ms, "honor_seconds_delay": honor },
+        "seconds_delay": seconds_delay,
+    });
+    if let Some(g) = gap_ms {
+        v["gap_ms"] = json!(g);
+    }
+    v.to_string()
+}
+
+#[test]
+fn episode() {
+    let short = || vec![(0, shut_no()), (1000, open_no()), (1200, shut_no())];
+    let yes_open = two("0.20", "0.30", "0.30", "0.40"); // YES asks 0.70 < 1
+    let shut_yes = two("0.50", "0.60", "0.40", "0.50"); // YES asks 1.10, YES bids 0.90: nothing
+    let many = |n: i64| (0..n).map(|i| (i * 100, open_no())).collect::<Vec<_>>();
+    check(
+        "episode_json",
+        episode_json,
+        vec![
+            (
+                "slow-miss",
+                episode_in("no", Some(30_000), short(), 145, 150, false, Value::Null),
+            ),
+            (
+                "fast-catch",
+                episode_in("no", Some(30_000), short(), 1, 50, false, Value::Null),
+            ),
+            (
+                "never-opens",
+                episode_in(
+                    "no",
+                    None,
+                    vec![(0, shut_no()), (500, shut_no())],
+                    1,
+                    50,
+                    false,
+                    Value::Null,
+                ),
+            ),
+            (
+                "still-open-at-end",
+                episode_in(
+                    "no",
+                    None,
+                    vec![(0, shut_no()), (1000, open_no()), (5000, open_no())],
+                    145,
+                    150,
+                    false,
+                    Value::Null,
+                ),
+            ),
+            (
+                "seconds-delay-ignored",
+                episode_in(
+                    "no",
+                    None,
+                    vec![(0, shut_no()), (100, open_no()), (900, shut_no())],
+                    1,
+                    50,
+                    false,
+                    json!(1),
+                ),
+            ),
+            (
+                "seconds-delay-honored",
+                episode_in(
+                    "no",
+                    None,
+                    vec![(0, shut_no()), (100, open_no()), (900, shut_no())],
+                    1,
+                    50,
+                    true,
+                    json!(1),
+                ),
+            ),
+            (
+                "yes-kind",
+                episode_in(
+                    "yes",
+                    None,
+                    vec![(0, shut_yes.clone()), (100, yes_open), (2000, shut_yes)],
+                    1,
+                    50,
+                    false,
+                    Value::Null,
+                ),
+            ),
+            (
+                "gap-censor",
+                episode_in(
+                    "no",
+                    Some(100),
+                    vec![(0, open_no()), (500, open_no()), (600, shut_no())],
+                    1,
+                    50,
+                    false,
+                    Value::Null,
+                ),
+            ),
+            (
+                "one-update",
+                episode_in("no", None, vec![(0, open_no())], 1, 50, false, Value::Null),
+            ),
+            (
+                "eight-updates",
+                episode_in("no", None, many(8), 1, 50, false, Value::Null),
+            ),
+            (
+                "nine-updates",
+                episode_in("no", None, many(9), 1, 50, false, Value::Null),
+            ),
+            (
+                "non-increasing-t",
+                episode_in(
+                    "no",
+                    None,
+                    vec![(100, open_no()), (100, shut_no())],
+                    1,
+                    50,
+                    false,
+                    Value::Null,
+                ),
+            ),
+            (
+                "latency-5000",
+                episode_in("no", None, short(), 5000, 0, false, Value::Null),
+            ),
+            (
+                "latency-5001",
+                episode_in("no", None, short(), 5001, 0, false, Value::Null),
+            ),
+            (
+                "seconds-delay-10",
+                episode_in("no", None, short(), 1, 50, true, json!(10)),
+            ),
+            (
+                "seconds-delay-11",
+                episode_in("no", None, short(), 1, 50, true, json!(11)),
+            ),
         ],
     );
 }

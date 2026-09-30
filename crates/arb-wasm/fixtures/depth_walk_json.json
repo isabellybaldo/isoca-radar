@@ -1,0 +1,42 @@
+[
+  {
+    "name": "yes-two-legs",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.30\",\"s\":\"10\"},{\"p\":\"0.40\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.60\",\"s\":\"15\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"steps\":[{\"q_from\":\"0\",\"q_to\":\"10\",\"cost\":\"0.9\",\"payoff\":\"1\",\"profitable\":true},{\"q_from\":\"10\",\"q_to\":\"15\",\"cost\":\"1\",\"payoff\":\"1\",\"profitable\":false}],\"q_star\":\"10\",\"pi\":\"1\",\"pi_gross\":\"1\"}"
+  },
+  {
+    "name": "no-nested-three",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.60\",\"s\":\"10\"},{\"p\":\"0.62\",\"s\":\"20\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.65\",\"s\":\"15\"},{\"p\":\"0.70\",\"s\":\"30\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.70\",\"s\":\"5\"},{\"p\":\"0.72\",\"s\":\"40\"}]}],\"rule\":\"no\"}",
+    "output": "{\"steps\":[{\"q_from\":\"0\",\"q_to\":\"5\",\"cost\":\"1.95\",\"payoff\":\"2\",\"profitable\":true},{\"q_from\":\"5\",\"q_to\":\"10\",\"cost\":\"1.97\",\"payoff\":\"2\",\"profitable\":true},{\"q_from\":\"10\",\"q_to\":\"15\",\"cost\":\"1.99\",\"payoff\":\"2\",\"profitable\":true},{\"q_from\":\"15\",\"q_to\":\"30\",\"cost\":\"2.04\",\"payoff\":\"2\",\"profitable\":false},{\"q_from\":\"30\",\"q_to\":\"45\",\"cost\":\"1.42\",\"payoff\":\"1\",\"profitable\":false}],\"q_star\":\"15\",\"pi\":\"0.45\",\"pi_gross\":\"0.45\"}"
+  },
+  {
+    "name": "exactly-one",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.50\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.50\",\"s\":\"10\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"steps\":[{\"q_from\":\"0\",\"q_to\":\"10\",\"cost\":\"1\",\"payoff\":\"1\",\"profitable\":false}],\"q_star\":\"0\",\"pi\":\"0\",\"pi_gross\":\"0\"}"
+  },
+  {
+    "name": "fees-on",
+    "input": "{\"legs\":[{\"fee\":{\"exponent\":1,\"rate\":\"0.07\"},\"levels\":[{\"p\":\"0.30\",\"s\":\"10\"},{\"p\":\"0.40\",\"s\":\"10\"}]},{\"fee\":{\"exponent\":1,\"rate\":\"0.07\"},\"levels\":[{\"p\":\"0.60\",\"s\":\"15\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"steps\":[{\"q_from\":\"0\",\"q_to\":\"10\",\"cost\":\"0.9315\",\"payoff\":\"1\",\"profitable\":true},{\"q_from\":\"10\",\"q_to\":\"15\",\"cost\":\"1.0336\",\"payoff\":\"1\",\"profitable\":false}],\"q_star\":\"10\",\"pi\":\"0.685\",\"pi_gross\":\"1\"}"
+  },
+  {
+    "name": "zero-depth-leg",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[]},{\"fee\":null,\"levels\":[{\"p\":\"0.60\",\"s\":\"15\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"steps\":[],\"q_star\":\"0\",\"pi\":\"0\",\"pi_gross\":\"0\"}"
+  },
+  {
+    "name": "four-legs-three-levels",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.20\",\"s\":\"10\"},{\"p\":\"0.21\",\"s\":\"10\"},{\"p\":\"0.25\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.22\",\"s\":\"10\"},{\"p\":\"0.23\",\"s\":\"10\"},{\"p\":\"0.24\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.24\",\"s\":\"10\"},{\"p\":\"0.26\",\"s\":\"10\"},{\"p\":\"0.28\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.25\",\"s\":\"10\"},{\"p\":\"0.27\",\"s\":\"10\"},{\"p\":\"0.30\",\"s\":\"10\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"steps\":[{\"q_from\":\"0\",\"q_to\":\"10\",\"cost\":\"0.91\",\"payoff\":\"1\",\"profitable\":true},{\"q_from\":\"10\",\"q_to\":\"20\",\"cost\":\"0.97\",\"payoff\":\"1\",\"profitable\":true},{\"q_from\":\"20\",\"q_to\":\"30\",\"cost\":\"1.07\",\"payoff\":\"1\",\"profitable\":false}],\"q_star\":\"20\",\"pi\":\"1.2\",\"pi_gross\":\"1.2\"}"
+  },
+  {
+    "name": "bad-rule",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.30\",\"s\":\"10\"},{\"p\":\"0.40\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.60\",\"s\":\"15\"}]}],\"rule\":\"maybe\"}",
+    "output": "{\"error\":\"unknown rule \\\"maybe\\\"\"}"
+  },
+  {
+    "name": "seven-legs",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.10\",\"s\":\"1\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"error\":\"1 to at most 6 legs\"}"
+  }
+]

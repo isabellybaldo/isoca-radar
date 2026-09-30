@@ -19,4 +19,19 @@ mod bindings {
     pub fn payoff_json(input: &str) -> String {
         crate::api::payoff_json(input)
     }
+
+    #[wasm_bindgen]
+    pub fn classify_json(input: &str) -> String {
+        crate::api::classify_json(input)
+    }
+
+    #[wasm_bindgen]
+    pub fn depth_walk_json(input: &str) -> String {
+        crate::api::depth_walk_json(input)
+    }
+
+    #[wasm_bindgen]
+    pub fn episode_json(input: &str) -> String {
+        crate::api::episode_json(input)
+    }
 }

@@ -6,9 +6,15 @@ use arb_core::money::{Price, Shares};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+mod classify;
+mod depth_walk;
+mod episode;
 mod mirror;
 mod payoff;
 
+pub use classify::classify_json;
+pub use depth_walk::depth_walk_json;
+pub use episode::episode_json;
 pub use mirror::mirror_json;
 pub use payoff::payoff_json;
 

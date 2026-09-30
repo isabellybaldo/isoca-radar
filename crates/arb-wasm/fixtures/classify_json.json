@@ -1,0 +1,67 @@
+[
+  {
+    "name": "no-edge-3",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.41\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.40\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.36\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.35\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.31\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_positive\"],\"kind\":\"no_basket\",\"realization\":\"converter\",\"net\":\"0.5\",\"gross\":\"0.5\",\"q_star\":\"10\"}"
+  },
+  {
+    "name": "yes-incomplete-other",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[],\"bids\":[],\"fee\":null,\"status\":\"other\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_not_positive\",\"yes_basket_tried\",\"yes_basket_positive\",\"incomplete\"],\"kind\":\"yes_basket_incomplete\",\"realization\":\"not_arbitrage\",\"net\":\"4\",\"gross\":\"4\",\"q_star\":\"10\"}"
+  },
+  {
+    "name": "decided",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[],\"bids\":[],\"fee\":null,\"status\":\"closed_yes\"},{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"decided\"],\"kind\":null,\"realization\":null,\"net\":null,\"gross\":null,\"q_star\":null}"
+  },
+  {
+    "name": "missing-ask",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_not_positive\",\"yes_basket_tried\",\"yes_basket_missing_ask\"],\"kind\":null,\"realization\":null,\"net\":null,\"gross\":null,\"q_star\":null}"
+  },
+  {
+    "name": "crossed-leg",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.55\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.56\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.31\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_crossed\",\"yes_basket_tried\",\"yes_basket_crossed\"],\"kind\":null,\"realization\":null,\"net\":null,\"gross\":null,\"q_star\":null}"
+  },
+  {
+    "name": "nothing",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.52\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.40\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.52\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.40\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_not_positive\",\"yes_basket_tried\",\"yes_basket_not_positive\"],\"kind\":null,\"realization\":null,\"net\":null,\"gross\":null,\"q_star\":null}"
+  },
+  {
+    "name": "fees-on",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.41\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.40\",\"s\":\"10\"}],\"fee\":{\"exponent\":1,\"rate\":\"0.07\"},\"status\":\"live\"},{\"asks\":[{\"p\":\"0.36\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.35\",\"s\":\"10\"}],\"fee\":{\"exponent\":1,\"rate\":\"0.07\"},\"status\":\"live\"},{\"asks\":[{\"p\":\"0.31\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"fee\":{\"exponent\":1,\"rate\":\"0.07\"},\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_positive\"],\"kind\":\"no_basket\",\"realization\":\"converter\",\"net\":\"0.02575\",\"gross\":\"0.5\",\"q_star\":\"10\"}"
+  },
+  {
+    "name": "augmented-complete",
+    "input": "{\"augmented\":true,\"legs\":[{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_not_positive\",\"yes_basket_tried\",\"yes_basket_positive\",\"incomplete\"],\"kind\":\"yes_basket_incomplete\",\"realization\":\"not_arbitrage\",\"net\":\"1\",\"gross\":\"1\",\"q_star\":\"10\"}"
+  },
+  {
+    "name": "six-legs",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"path\":[\"no_basket_tried\",\"no_basket_not_positive\",\"yes_basket_tried\",\"yes_basket_positive\",\"complete\"],\"kind\":\"yes_basket\",\"realization\":\"settlement\",\"net\":\"2.8\",\"gross\":\"2.8\",\"q_star\":\"10\"}"
+  },
+  {
+    "name": "seven-legs",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"},{\"asks\":[{\"p\":\"0.12\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.10\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"error\":\"1 to at most 6 legs\"}"
+  },
+  {
+    "name": "zero-legs",
+    "input": "{\"augmented\":false,\"legs\":[]}",
+    "output": "{\"error\":\"1 to at most 6 legs\"}"
+  },
+  {
+    "name": "bad-status",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[],\"bids\":[],\"fee\":null,\"status\":\"won\"},{\"asks\":[{\"p\":\"0.30\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.20\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"error\":\"unknown leg status \\\"won\\\"\"}"
+  },
+  {
+    "name": "fee-rate-1",
+    "input": "{\"augmented\":false,\"legs\":[{\"asks\":[{\"p\":\"0.41\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.40\",\"s\":\"10\"}],\"fee\":{\"exponent\":1,\"rate\":\"1\"},\"status\":\"live\"},{\"asks\":[{\"p\":\"0.36\",\"s\":\"10\"}],\"bids\":[{\"p\":\"0.35\",\"s\":\"10\"}],\"fee\":null,\"status\":\"live\"}]}",
+    "output": "{\"error\":\"fee: fee rate must be < 1 (L8 monotonicity), got 1\"}"
+  }
+]
