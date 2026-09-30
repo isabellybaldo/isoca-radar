@@ -58,15 +58,29 @@ async fn real_main() -> anyhow::Result<()> {
             None
         }
     };
-    api::run(
-        api::AppState::new(store)
-            .with_reset(reset)
-            .with_scenarios(scenarios),
+    let state = api::AppState::new(store)
+        .with_reset(reset)
+        .with_scenarios(scenarios);
+    // Phase 7b §4: the public snapshot task, only with PUBLIC_DIR.
+    let writer = api::public::writer_plan(&cfg).map(|plan| {
+        eprintln!(
+            "api: public snapshot every {} s into {}",
+            plan.every.as_secs(),
+            plan.dir.display()
+        );
+        tokio::spawn(api::public::run_writer(state.clone(), plan))
+    });
+    let served = api::run(
+        state,
         &cfg.bind,
         std::time::Duration::from_secs(15),
         shutdown(),
     )
-    .await
+    .await;
+    if let Some(w) = writer {
+        w.abort();
+    }
+    served
 }
 
 /// SIGTERM (docker stop) or Ctrl-C.

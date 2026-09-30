@@ -4,8 +4,9 @@
 //! PUBLIC_EVERY_S seconds, by one task beside the server. Only typed, whitelisted fields ship: no
 //! account, market, token or episode id and no host name.
 use crate::dto::Dec;
-use crate::episodes::TodayDto;
-use crate::ladder::LadderDto;
+use crate::episodes::{TodayDto, load_today};
+use crate::ladder::{LadderDto, load_ladder};
+use crate::{AppState, now_ms};
 use cards::edge::LADDER;
 use cards::ladder::BreakEven;
 use serde::{Deserialize, Serialize};
@@ -259,6 +260,38 @@ pub fn writer_plan(cfg: &crate::config::Config) -> Option<WriterPlan> {
         first: Duration::from_secs(PUBLIC_FIRST_S),
         every: Duration::from_secs(u64::from(cfg.public_every_s)),
     })
+}
+
+/// One run: load the ladder and today exactly as the dashboard does, build, size-check, and write
+/// on a blocking thread (the api's tokio has no `fs` feature). Returns the bytes written, or the
+/// reason the old file was left alone.
+pub async fn run_once(st: &AppState, dir: &Path, written_ms: i64) -> Result<usize, String> {
+    let ladder = load_ladder(st)
+        .await
+        .map_err(|e| format!("ladder: {e:?}"))?;
+    let today = load_today(st).await.map_err(|e| format!("today: {e:?}"))?;
+    let bytes = to_bytes(&build(ladder, today, written_ms))?;
+    let n = bytes.len();
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || write_atomic(&dir, &bytes))
+        .await
+        .map_err(|e| format!("write task: {e}"))?
+        .map_err(|e| format!("write {PUBLIC_TMP}: {e}"))?;
+    Ok(n)
+}
+
+/// The task (§4): the first run after `plan.first`, then one every `plan.every`, one at a time. A
+/// failed run logs one line and keeps the old file; nothing here panics or stops the server.
+pub async fn run_writer(st: AppState, plan: WriterPlan) {
+    tokio::time::sleep(plan.first).await;
+    let mut tick = tokio::time::interval(plan.every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if let Err(reason) = run_once(&st, &plan.dir, now_ms()).await {
+            eprintln!("api: public snapshot skipped: {reason}");
+        }
+    }
 }
 
 #[cfg(test)]

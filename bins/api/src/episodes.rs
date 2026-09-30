@@ -392,7 +392,12 @@ pub async fn detail(
 }
 
 pub async fn today(State(st): State<AppState>) -> Result<Json<TodayDto>, ApiError> {
-    Ok(Json(st.store.today(now_ms()).await?.into()))
+    Ok(Json(load_today(&st).await?))
+}
+
+/// Today's counts as the handler serves them; the public snapshot builds from it too (7b §4).
+pub(crate) async fn load_today(st: &AppState) -> Result<TodayDto, ApiError> {
+    Ok(st.store.today(now_ms()).await?.into())
 }
 
 #[cfg(test)]
