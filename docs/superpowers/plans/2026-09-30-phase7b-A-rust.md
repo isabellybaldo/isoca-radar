@@ -6352,6 +6352,9 @@ Kind        = "yes_basket" | "yes_basket_incomplete" | "no_basket" | "implicatio
 Realization = "settlement" | "converter" | "not_arbitrage"
 ```
 
+
+> **Ruling (controller, 2026-09-30, Task 10 review):** `depth_walk_json`'s `levels` are the **asks of the outcome being bought** (NO asks for `rule: "no"`), **cheapest first**; they are NOT YES-book levels. Non-ascending levels return `{"error":"levels must be cheapest first"}` (fixture `descending-levels`). Episode boundary fixtures `tx-at-close` and `tx-at-update` pin t_x == close_ms → captured "0" and t_x == an update's t_ms → that update's net.
+
 **`depth_walk_json`**
 
 ```

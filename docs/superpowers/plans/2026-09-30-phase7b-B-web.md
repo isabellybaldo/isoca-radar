@@ -9,6 +9,8 @@
 
 > **Ruling (controller, 2026-09-30, from 7b-A preflight P9):** `depth_walk_json`'s `pi`/`pi_gross` are the authoritative totals (conservative fees, as `fill::walk`); `steps[].cost` is for drawing (exact fees) and may differ in the 5th decimal. Never assert Σ steps == `pi`.
 
+> **Ruling (controller, 2026-09-30, Task 10 review):** `depth_walk_json`'s `levels` are the **asks of the outcome being bought** (NO asks for `rule: "no"`), **cheapest first**; they are NOT YES-book levels. Non-ascending levels return `{"error":"levels must be cheapest first"}` (fixture `descending-levels`). Episode boundary fixtures `tx-at-close` and `tx-at-update` pin t_x == close_ms → captured "0" and t_x == an update's t_ms → that update's net.
+
 ## Contract used from 7b-A
 
 The contract is `docs/superpowers/plans/2026-09-30-phase7b-A-rust.md` § "Contract for 7b-B" (authoritative; its code was compiled and tested), and the fixture cases in its Tasks 9–11. `web/src/wasm/types.ts` and `web/src/math/snapshot.ts` copy it. What 7b-B reads or sends:
