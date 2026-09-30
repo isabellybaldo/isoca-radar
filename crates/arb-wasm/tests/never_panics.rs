@@ -1,4 +1,6 @@
 //! 09-27 spec §8: any input up to 16 KiB returns a model or {"error"}, never a panic.
+//! Every function gets both garbage and structurally valid input (random values around and across
+//! the limits), so the deep paths behind the serde layer are reached.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use arb_wasm::api::{
     basket_json, classify_json, depth_walk_json, episode_json, mirror_json, payoff_json,
@@ -14,42 +16,67 @@ const ALL: [fn(&str) -> String; 6] = [
     basket_json,
 ];
 
+/// Mostly on the 0.01 grid, now and then off it.
+fn price() -> impl Strategy<Value = String> {
+    prop_oneof![
+        18 => (1u32..=99).prop_map(|c| format!("0.{c:02}")),
+        1 => r#"(0\.[0-9]{1,3}|1\.00|0|-0\.5|abc|)"#,
+    ]
+}
+
+fn size() -> impl Strategy<Value = String> {
+    prop_oneof![
+        18 => (1u32..=2000).prop_map(|n| n.to_string()),
+        1 => r#"([0-9]{1,8}|0\.0000001|0|-1|1000000|1000001|x)"#,
+    ]
+}
+
 fn level() -> impl Strategy<Value = String> {
-    (
-        r#"(0\.[0-9]{1,3}|1\.00|0|-0\.5)"#,
-        r#"([0-9]{1,8}|0\.0000001|-1)"#,
-    )
-        .prop_map(|(p, s)| format!(r#"{{"p":"{p}","s":"{s}"}}"#))
+    (price(), size()).prop_map(|(p, s)| format!(r#"{{"p":"{p}","s":"{s}"}}"#))
+}
+
+/// Levels in random order (ascending AND descending); `max` may exceed the 8-level limit.
+fn levels(max: usize) -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec(level(), 0..=max)
+}
+
+fn fee() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => Just("null".to_string()),
+        2 => (prop_oneof![Just("0.07"), Just("0.04"), Just("0"), Just("-1"), Just("2")], 0u8..=3)
+            .prop_map(|(r, e)| format!(r#"{{"rate":"{r}","exponent":{e}}}"#)),
+    ]
 }
 
 fn book() -> impl Strategy<Value = String> {
-    (
-        prop::collection::vec(level(), 0..10),
-        prop::collection::vec(level(), 0..10),
-    )
+    (levels(9), levels(9))
         .prop_map(|(b, a)| format!(r#"{{"bids":[{}],"asks":[{}]}}"#, b.join(","), a.join(",")))
 }
 
 fn basket() -> impl Strategy<Value = String> {
     (
-        prop_oneof![Just("no"), Just("yes"), Just("x")],
-        prop::collection::vec((book(), book(), book(), any::<bool>()), 0..6),
-        r#"([0-9]{1,7}(\.[0-9]{1,7})?|-1)"#,
+        prop_oneof![4 => Just("no"), 4 => Just("yes"), 1 => Just("x")],
+        // mostly 2..=4 legs, the accepting range
+        prop_oneof![
+            6 => prop::collection::vec((book(), book(), book(), fee()), 2..=4),
+            1 => prop::collection::vec((book(), book(), book(), fee()), 0..=6),
+        ],
+        prop_oneof![
+            9 => (1u32..=5000).prop_map(|n| n.to_string()),
+            1 => r#"([0-9]{1,7}(\.[0-9]{1,7})?|-1)"#,
+        ],
         prop_oneof![
             Just(""),
             Just(r#","convert_fee_bips":"50""#),
-            Just(r#","min_order":"0""#)
+            Just(r#","convert_fee_bips":"10001""#),
+            Just(r#","min_order":"0""#),
+            Just(r#","min_order":"5""#)
         ],
     )
         .prop_map(|(kind, legs, q, extra)| {
             let legs: Vec<String> = legs
                 .into_iter()
                 .map(|(o, t, u, fee)| {
-                    let fee = if fee {
-                        r#"{"rate":"0.07","exponent":1}"#
-                    } else {
-                        "null"
-                    };
                     format!(r#"{{"open":{o},"t_x":{t},"unwind":{u},"fee":{fee}}}"#)
                 })
                 .collect();
@@ -60,25 +87,175 @@ fn basket() -> impl Strategy<Value = String> {
         })
 }
 
-fn json_ish() -> impl Strategy<Value = String> {
+fn payoff() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![Just("yes"), Just("no"), Just("implication"), Just("x")],
+        0usize..=8,
+        any::<bool>(),
+        prop_oneof![
+            Just(None),
+            prop::collection::vec((price(), price()), 0..=7).prop_map(Some)
+        ],
+    )
+        .prop_map(|(kind, s, other, prices)| {
+            let prices = match prices {
+                None => "null".to_string(),
+                Some(v) => format!(
+                    "[{}]",
+                    v.iter()
+                        .map(|(b, a)| format!(r#"{{"bid":"{b}","ask":"{a}"}}"#))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            };
+            format!(r#"{{"kind":"{kind}","s":{s},"other_listed":{other},"prices":{prices}}}"#)
+        })
+}
+
+fn leg_in() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![
+            4 => Just("live"),
+            1 => Just("placeholder"),
+            1 => Just("other"),
+            1 => Just("closed_no"),
+            1 => Just("closed_yes"),
+            1 => Just("halted"),
+            1 => Just("unknown")
+        ],
+        levels(9),
+        levels(9),
+        fee(),
+    )
+        .prop_map(|(st, b, a, fee)| {
+            format!(
+                r#"{{"status":"{st}","bids":[{}],"asks":[{}],"fee":{fee}}}"#,
+                b.join(","),
+                a.join(",")
+            )
+        })
+}
+
+fn legs_in(max: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(leg_in(), 0..=max).prop_map(|v| v.join(","))
+}
+
+fn classify() -> impl Strategy<Value = String> {
+    (any::<bool>(), legs_in(7))
+        .prop_map(|(aug, legs)| format!(r#"{{"augmented":{aug},"legs":[{legs}]}}"#))
+}
+
+fn depth_walk() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![Just("yes"), Just("no"), Just("x")],
+        prop::collection::vec((levels(9), fee()), 0..=7),
+    )
+        .prop_map(|(rule, legs)| {
+            let legs: Vec<String> = legs
+                .into_iter()
+                .map(|(l, f)| format!(r#"{{"levels":[{}],"fee":{f}}}"#, l.join(",")))
+                .collect();
+            format!(r#"{{"rule":"{rule}","legs":[{}]}}"#, legs.join(","))
+        })
+}
+
+fn ms() -> impl Strategy<Value = i64> {
     prop_oneof![
-        ".{0,300}",
-        r#"\{"(bids|asks|legs|kind|s|rule|updates|q_request)":\[?\{?"?[a-z0-9.\-]{0,8}"?\]?\}"#,
-        book(),
-        basket(),
+        3 => 0i64..=5000,
+        1 => Just(5001),
+        1 => Just(-1),
+        1 => any::<i64>(),
     ]
 }
 
+fn episode() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![Just("yes"), Just("no"), Just("x")],
+        prop_oneof![
+            Just(String::new()),
+            Just(r#""gap_ms":0,"#.to_string()),
+            Just(r#""gap_ms":1,"#.to_string()),
+            Just(r#""gap_ms":600000,"#.to_string()),
+            Just(r#""gap_ms":600001,"#.to_string()),
+            (-5i64..=700_000).prop_map(|g| format!(r#""gap_ms":{g},"#)),
+        ],
+        prop::collection::vec(
+            (
+                prop_oneof![0i64..=10, 599_990i64..=600_005, 0i64..=600_000, Just(-1)],
+                legs_in(5),
+            ),
+            0..=9,
+        ),
+        (ms(), ms(), ms(), any::<bool>()),
+        prop_oneof![
+            Just("null".to_string()),
+            (0i32..=11).prop_map(|n| n.to_string())
+        ],
+    )
+        .prop_map(|(kind, gap, ups, (p, n, m, honor), sd)| {
+            let ups: Vec<String> = ups
+                .into_iter()
+                .map(|(t, legs)| format!(r#"{{"t_ms":{t},"legs":[{legs}]}}"#))
+                .collect();
+            format!(
+                r#"{{"kind":"{kind}",{gap}"updates":[{}],"scenario":{{"proc_ms":{p},"net_ms":{n},"match_ms":{m},"honor_seconds_delay":{honor}}},"seconds_delay":{sd}}}"#,
+                ups.join(",")
+            )
+        })
+}
+
+fn json_ish() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => ".{0,300}",
+        2 => r#"\{"(bids|asks|legs|kind|s|rule|updates|q_request)":\[?\{?"?[a-z0-9.\-]{0,8}"?\]?\}"#,
+        3 => book(),
+        3 => basket(),
+        3 => payoff(),
+        3 => classify(),
+        3 => depth_walk(),
+        3 => episode(),
+    ]
+}
+
+fn assert_model_or_error(out: &str) -> Result<(), TestCaseError> {
+    let v: serde_json::Value = serde_json::from_str(out).unwrap();
+    prop_assert!(v.is_object());
+    if let Some(e) = v.get("error") {
+        prop_assert!(e.as_str().is_some_and(|m| !m.contains('\n')));
+    }
+    Ok(())
+}
+
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2048))]
     #[test]
     fn never_panics(s in json_ish()) {
         for f in ALL {
-            let out = f(&s);
-            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-            prop_assert!(v.is_object());
-            if let Some(e) = v.get("error") {
-                prop_assert!(e.as_str().is_some_and(|m| !m.contains('\n')));
-            }
+            assert_model_or_error(&f(&s))?;
         }
     }
+}
+
+/// `n` bytes: a valid book padded with trailing spaces.
+fn padded(n: usize) -> String {
+    let mut s = String::from(r#"{"bids":[{"p":"0.50","s":"10"}],"asks":[]}"#);
+    s.push_str(&" ".repeat(n - s.len()));
+    assert_eq!(s.len(), n);
+    s
+}
+
+#[test]
+fn the_size_limit_is_16_kib_exactly() {
+    let over = padded(16_385);
+    for f in ALL {
+        let v: serde_json::Value = serde_json::from_str(&f(&over)).unwrap();
+        assert_eq!(v["error"], "input is larger than 16 KiB");
+    }
+    let at = padded(16_384);
+    for f in ALL {
+        assert_model_or_error(&f(&at)).unwrap();
+    }
+    // mirror_json takes that book, so the limit itself is not what rejects it
+    let v: serde_json::Value = serde_json::from_str(&mirror_json(&at)).unwrap();
+    assert!(v.get("error").is_none(), "{v}");
 }
