@@ -15,6 +15,7 @@ pub mod integrity;
 pub mod ladder;
 pub mod paper;
 pub mod params;
+pub mod public;
 pub mod reset;
 pub mod stream;
 
