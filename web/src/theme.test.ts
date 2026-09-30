@@ -63,4 +63,13 @@ describe('theme', () => {
     expect(Number(/margin-right:\s*-(\d+)px/.exec(tab)?.[1])).toBe(gap); // flush with the panel's left border
     expect(rule('.explain-tab')).toMatch(/border-right:\s*0/);
   });
+
+  it("wraps the panel's axis labels between words, never inside one: `extras` stays whole, `in time` cells keep a gap", () => {
+    // The body's overflow-wrap: anywhere split `extras` into extra/s and let six `in time` labels touch (7a-B Chrome check).
+    for (const sel of ['.ll-axis li', '.cb-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
+    // 7 slots in a 360 px panel leave ~44 px each: `extras` (6 ch) fits at 12 px (43.2 px), not at 13 px.
+    expect(Number(/font-size:\s*(\d+)px/.exec(rule('.ll-axis'))?.[1])).toBeLessThanOrEqual(12);
+    // A gap narrower than `in time` forces the two words onto two lines instead of into the next cell.
+    expect(Number(/column-gap:\s*(\d+)px/.exec(rule('.cb-axis'))?.[1])).toBeGreaterThanOrEqual(6);
+  });
 });
