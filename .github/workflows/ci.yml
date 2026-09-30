@@ -33,6 +33,16 @@ jobs:
       - run: cargo test --workspace
       - run: cargo install cargo-deny --locked
       - run: cargo deny check bans advisories
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add wasm32-unknown-unknown
+      # 7b §2, §8: sim and arb-core stay buildable for the public playground (no time, fs, threads)
+      - run: cargo check -p sim -p arb-core -p arb-wasm --target wasm32-unknown-unknown
+      # 09-27 §4.3: the native side of the parity check, built alone (arb-wasm's own feature set)
+      - run: cargo test -p arb-wasm
   web:
     runs-on: ubuntu-latest
     defaults:
