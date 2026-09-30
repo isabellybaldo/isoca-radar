@@ -16,6 +16,11 @@ export function kindTag(kind: string, long = false): { text: string; tone: TagTo
   }
 }
 
+/** "P3-naive/sp-idle" → "P3": the policy tag of a paper account id. */
+export function accountPolicyTag(accountId: string): string {
+  return accountId.split('-')[0];
+}
+
 /** A long market id, short enough to tell rows apart: "0x5f2e…9a01" (the full id goes in a title). */
 export function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;

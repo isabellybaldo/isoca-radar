@@ -1,6 +1,6 @@
 import type {
-  CardsMeta, CardsResponse, EpisodeDetail, EpisodeSummary, EquitySeries, HealthEnvelope, HealthSeries,
-  Integrity, LedgerEntry, OpenEpisodes, Page, PaperAccount, Position, Today,
+  CardsMeta, CardsResponse, EpisodeDetail, EpisodeSummary, Epochs, EquitySeries, HealthEnvelope, HealthSeries,
+  Integrity, Ladder, LedgerEntry, OpenEpisodes, Page, PaperAccount, Position, ResetQueued, Today,
 } from './types';
 
 export class ApiError extends Error {
@@ -37,8 +37,21 @@ function markReauthReload(): boolean {
   }
 }
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, { signal, credentials: 'same-origin', headers: { Accept: 'application/json' } });
+interface RequestOpts {
+  signal?: AbortSignal;
+  method?: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+async function requestJson<T>(path: string, opts: RequestOpts = {}): Promise<T> {
+  const res = await fetch(path, {
+    method: opts.method ?? 'GET',
+    signal: opts.signal,
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json', ...opts.headers },
+    body: opts.body,
+  });
   if (res.status === 401) {
     if (markReauthReload()) {
       location.reload();
@@ -60,6 +73,14 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
+function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return requestJson<T>(path, { signal });
+}
+
+/** Spec 7a §5.1: a custom header forces a CORS preflight, which the api never answers. */
+export const RESET_INTENT_HEADER = 'X-CT-Intent';
+export const RESET_INTENT = 'reset-paper';
 
 function qs(params: Record<string, string | number | null | undefined>): string {
   const u = new URLSearchParams();
@@ -104,12 +125,22 @@ export const api = {
   integrity: (hours: number, signal?: AbortSignal) =>
     getJson<Integrity>(`/api/integrity/summary${qs({ hours })}`, signal),
   paperAccounts: (signal?: AbortSignal) => getJson<{ items: PaperAccount[] }>('/api/paper/accounts', signal),
-  paperEquity: (account: string, hours: number, signal?: AbortSignal) =>
-    getJson<EquitySeries>(`/api/paper/equity${qs({ account, hours })}`, signal),
+  /** `epoch` (0 or more) reads an earlier epoch; absent = the current one (spec 7a §6). */
+  paperEquity: (account: string, hours: number, signal?: AbortSignal, epoch?: number) =>
+    getJson<EquitySeries>(`/api/paper/equity${qs({ account, hours, epoch })}`, signal),
   paperPositions: (signal?: AbortSignal) => getJson<{ items: Position[] }>('/api/paper/positions', signal),
   /** `hideMarks` drops the minute `mark` rows server-side, before paging. */
   paperLedger: (account: string, cursor: string | null, hideMarks: boolean, signal?: AbortSignal) =>
     getJson<Page<LedgerEntry>>(`/api/paper/ledger${qs({ account, cursor, hide_marks: hideMarks ? 1 : null })}`, signal),
   cards: (win: string, signal?: AbortSignal) => getJson<CardsResponse>(`/api/cards${qs({ win })}`, signal),
   cardsMeta: (signal?: AbortSignal) => getJson<CardsMeta>('/api/cards/meta', signal),
+  paperEpochs: (signal?: AbortSignal) => getJson<Epochs>('/api/paper/epochs', signal),
+  paperLadder: (signal?: AbortSignal) => getJson<Ladder>('/api/paper/ladder', signal),
+  /** The api's one write (spec 7a §5): queues a reset request; the scanner applies it within ~30 s. */
+  paperReset: () =>
+    requestJson<ResetQueued>('/api/paper/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [RESET_INTENT_HEADER]: RESET_INTENT },
+      body: JSON.stringify({ confirm: 'reset' }),
+    }),
 };

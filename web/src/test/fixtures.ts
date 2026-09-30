@@ -1,6 +1,6 @@
 import type {
-  CardBody, CardsMeta, EpisodeDetail, EpisodeSummary, HealthNow, HealthPoint, LedgerEntry, PaperAccount,
-  Position, SweetRow, SweetSeries, Today,
+  CardBody, CardsMeta, EpisodeDetail, EpisodeSummary, Epochs, HealthNow, HealthPoint, Ladder, LadderRung, LedgerEntry,
+  PaperAccount, Position, SweetRow, SweetSeries, Today,
 } from '../api/types';
 
 export function healthFixture(o: Partial<HealthNow> = {}): HealthNow {
@@ -74,7 +74,7 @@ export function accountFixture(o: Partial<PaperAccount> = {}): PaperAccount {
 export function positionFixture(o: Partial<Position> = {}): Position {
   return {
     account_id: 'P3-naive/sp-idle', market_id: 'm1', outcome: 'yes', qty: '40', basis: '18', returned: false,
-    event_title: 'Fed decision in October?',
+    event_title: 'Fed decision in October?', end_date: '2026-10-31',
     ...o,
   };
 }
@@ -176,6 +176,85 @@ export function metaFixture(o: Partial<CardsMeta> = {}): CardsMeta {
       { item: 'Converter profits', why: "They come from on-chain conversions, which we don't observe." },
       { item: 'Same-condition findings of the WebSocket validation appendix (20 inconsistencies in 308,416,666 messages)', why: 'They need the on-chain side too.' },
     ],
+    ...o,
+  };
+}
+
+/** Epoch 1 started with deploy A (spec §17): the policies epoch. */
+export const EPOCH1_START = Date.UTC(2026, 8, 29, 19, 58, 12);
+
+/** A ladder rung (or extra) with every field filled; the four parts add up to `net` exactly. */
+export function ladderRung(o: Partial<LadderRung> = {}): LadderRung {
+  return {
+    account_id: 'P0-converter/sp-idle', scenario: 'sp-idle', latency_ms: 300, extra: false, n_exec: 40, n_leg_risk: 6,
+    n_missed: 5, gains: '3.8', leg_risk: '-66', settle: '1', unrealized: '0', net: '-61.2',
+    ...o,
+  };
+}
+
+const rung = (scenario: string, latency_ms: number, gains: string, leg_risk: string, settle: string, unrealized: string, net: string, extra = false) =>
+  ladderRung({ account_id: `P0-converter/${scenario}`, scenario, latency_ms, extra, gains, leg_risk, settle, unrealized, net });
+
+/** An answered ladder: every rung has 40 trades; the sign changes once, between colo-idle (+3.10) and
+ *  rung-100 (−4.40): 52 + 48 × 3.1 / 7.5 = 71.84 → 70 ms, loses beyond. */
+export function ladderFixture(o: Partial<Ladder> = {}): Ladder {
+  return {
+    epoch: 1,
+    start_ms: EPOCH1_START,
+    as_of_ms: Date.UTC(2026, 8, 30, 21, 14),
+    rungs: [
+      rung('rung-0', 0, '41.5', '-12', '1', '0', '30.5'),
+      rung('rung-25', 25, '30.25', '-19', '1', '0', '12.25'),
+      rung('colo-idle', 52, '22.1', '-20', '1.5', '-0.5', '3.1'),
+      rung('rung-100', 100, '15.6', '-21', '1', '0', '-4.4'),
+      rung('rung-200', 200, '8.25', '-30', '1', '0', '-20.75'),
+      rung('sp-idle', 300, '3.8', '-66', '1', '0', '-61.2'),
+      rung('sp-idle-nodelay', 300, '4', '-63', '1', '0', '-58', true),
+      rung('sp-burst', 450, '1.9', '-82', '0', '0', '-80.1', true),
+    ],
+    markets: [
+      sweetRow({ scenario: 'rung-0', latency_ms: 0, label: 'candidate', mean: '0.4', lo: '0.1', hi: '0.7', n_exec: 60, clusters: 41 }),
+      sweetRow({ scenario: 'sp-idle', latency_ms: 300, label: 'negative', mean: '-0.6', lo: '-0.9', hi: '-0.3', n_exec: 70, clusters: 50 }),
+      sweetRow({ dimension: 'category', bucket: 'crypto', scenario: 'rung-0', latency_ms: 0, label: 'thin', mean: '0.3', n_exec: 12, clusters: 9 }),
+      sweetRow({ dimension: 'category', bucket: 'crypto', scenario: 'sp-idle', latency_ms: 300, label: 'thin', mean: '-0.8', n_exec: 20, clusters: 11 }),
+    ],
+    measured: { latency_ms: 155, host: 'vps-kvm2' },
+    markets_status: 'live',
+    break_even: { kind: 'at', latency_ms: 70, direction: 'loses_beyond' },
+    ...o,
+  };
+}
+
+/** The live /api/paper/ladder of 2026-09-29, minutes into epoch 1 (spec §17; runbook 7a step 31): the six
+ *  LADDER rungs at 0, 25, 52, 100, 200, 300 ms, then the two extras; every figure "0", thin; SWEET warming. */
+export function ladderLiveFixture(): Ladder {
+  const fresh = (scenario: string, latency_ms: number, n_exec: number, extra = false) =>
+    ladderRung({
+      account_id: `P0-converter/${scenario}`, scenario, latency_ms, extra, n_exec, n_leg_risk: 0, n_missed: 0,
+      gains: '0', leg_risk: '0', settle: '0', unrealized: '0', net: '0',
+    });
+  return {
+    epoch: 1,
+    start_ms: EPOCH1_START,
+    as_of_ms: Date.UTC(2026, 8, 29, 20, 9),
+    rungs: [
+      fresh('rung-0', 0, 2), fresh('rung-25', 25, 2), fresh('colo-idle', 52, 1), fresh('rung-100', 100, 1),
+      fresh('rung-200', 200, 0), fresh('sp-idle', 300, 0), fresh('sp-idle-nodelay', 300, 0, true), fresh('sp-burst', 450, 0, true),
+    ],
+    markets: [],
+    measured: { latency_ms: 155, host: 'vps-kvm2' },
+    markets_status: 'warming',
+    break_even: { kind: 'thin' },
+  };
+}
+
+/** Epoch 1 only (cause policies), nothing pending, a reset allowed now. */
+export function epochsFixture(o: Partial<Epochs> = {}): Epochs {
+  return {
+    epochs: [{ epoch: 1, start_ms: EPOCH1_START, cause: 'policies' }],
+    current: 1,
+    pending_request: null,
+    next_allowed_ms: 0,
     ...o,
   };
 }

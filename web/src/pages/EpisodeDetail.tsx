@@ -1,7 +1,9 @@
+import { useEffect } from 'react';
 import { Link, useParams } from 'react-router';
 import { api } from '../api/client';
-import type { Episode, EpisodeDetail as Detail, Leg, Observation } from '../api/types';
+import type { Episode, EpisodeDetail as Detail, EpisodeSummary, Leg, Observation } from '../api/types';
 import { useApi } from '../api/useApi';
+import { useExplainPage, useExplainSelect } from '../explain/ExplainContext';
 import { Box } from '../components/Box';
 import { Loadable } from '../components/Loadable';
 import { Money } from '../components/Money';
@@ -180,9 +182,26 @@ function DetailView({ d }: { d: Detail }) {
   );
 }
 
+function summaryOf({ episode: e, legs }: Detail): EpisodeSummary {
+  return {
+    id: e.id, kind: e.kind, realization: e.realization, event_title: e.event_title, event_slug: e.event_slug,
+    n_legs: e.n_legs, s_legs: legs.filter((l) => l.in_s).length, opened_ms: e.opened_ms, closed_ms: e.closed_ms,
+    duration_ms: e.duration_ms, edge: e.edge, q_star: e.q_star, net: e.net, gross: e.gross, net_budget100: e.net_budget100,
+    suspect: e.suspect, stale: e.stale, censored: e.censor_left || e.censor_right || e.censor_gap,
+  };
+}
+
 export function EpisodeDetail() {
   const { id = '' } = useParams();
   const d = useApi((s) => api.episode(id, s), [id]);
+  useExplainPage('episode', { detail: d.data });
+  // D-12 (spec 7a §9.3): being on an episode's page selects it; leaving clears it (the provider clears on unmount).
+  const select = useExplainSelect();
+  const loaded = d.data;
+  useEffect(() => {
+    if (loaded) select({ kind: 'episode', episode: summaryOf(loaded) });
+    return () => select(null);
+  }, [loaded, select]);
   return (
     <>
       <p className="crumb">

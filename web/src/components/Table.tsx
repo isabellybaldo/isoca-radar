@@ -20,6 +20,7 @@ export function Table<T>({
   rowKey,
   rowClass,
   className,
+  onRowClick,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -27,6 +28,8 @@ export function Table<T>({
   rowClass?: (row: T) => string | undefined;
   /** Hook for a page's own layout of this table (e.g. Radar's phone cards). */
   className?: string;
+  /** Spec 7a §9.3: a row click sets the explain panel's selection; links inside still navigate. */
+  onRowClick?: (row: T) => void;
 }) {
   return (
     <div className="scroll">
@@ -42,7 +45,11 @@ export function Table<T>({
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={rowKey(r)} className={rowClass?.(r)}>
+            <tr
+              key={rowKey(r)}
+              className={[rowClass?.(r), onRowClick ? 'pick' : null].filter(Boolean).join(' ') || undefined}
+              onClick={onRowClick ? () => onRowClick(r) : undefined}
+            >
               {columns.map((c) => (
                 <td key={c.key} className={tdClass(c, r)}>
                   {c.render(r)}

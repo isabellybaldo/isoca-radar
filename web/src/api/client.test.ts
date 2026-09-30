@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { epochsFixture, ladderFixture } from '../test/fixtures';
 import { jsonResponse, mockApi } from '../test/mockApi';
 import { ApiError, SESSION_EXPIRED_TEXT, api } from './client';
 
@@ -57,5 +58,42 @@ describe('api client', () => {
     mockApi({ '/api/paper/accounts': { items: [{ equity: '1002.56' }] } });
     const r = await api.paperAccounts();
     expect(typeof r.items[0].equity).toBe('string');
+  });
+
+  it('asks for a reset with the intent header, a JSON body and same-origin credentials', async () => {
+    const f = mockApi({ '/api/paper/reset': () => jsonResponse(202, { request_id: 7, requested_ms: 1_790_000_000_000 }) });
+    await expect(api.paperReset()).resolves.toEqual({ request_id: 7, requested_ms: 1_790_000_000_000 });
+    const [url, init] = f.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/paper/reset');
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('same-origin');
+    expect(init.headers).toEqual({ Accept: 'application/json', 'Content-Type': 'application/json', 'X-CT-Intent': 'reset-paper' });
+    expect(init.body).toBe('{"confirm":"reset"}');
+  });
+
+  it('turns every reset refusal into an ApiError with its code', async () => {
+    for (const [status, code] of [[409, 'reset_pending'], [429, 'reset_daily_limit'], [503, 'reset_disabled'], [403, 'forbidden']] as const) {
+      mockApi({ '/api/paper/reset': () => jsonResponse(status, { error: code, detail: 'x' }) });
+      const err = await api.paperReset().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err).toMatchObject({ status, code });
+    }
+  });
+
+  it('sends ?epoch= for an earlier epoch, 0 included, and nothing otherwise', async () => {
+    const f = mockApi({ '/api/paper/equity': { account_id: 'a', from_ms: 0, to_ms: 1, points: [] } });
+    await api.paperEquity('P0-converter/rung-0', 6, undefined, 0);
+    await api.paperEquity('P0-converter/rung-0', 24);
+    expect(f.mock.calls.map((c) => String(c[0]))).toEqual([
+      '/api/paper/equity?account=P0-converter%2Frung-0&hours=6&epoch=0',
+      '/api/paper/equity?account=P0-converter%2Frung-0&hours=24',
+    ]);
+  });
+
+  it('reads the ladder and the epochs from their paths, body untouched', async () => {
+    const f = mockApi({ '/api/paper/ladder': ladderFixture(), '/api/paper/epochs': epochsFixture() });
+    expect(await api.paperLadder()).toEqual(ladderFixture());
+    expect(await api.paperEpochs()).toEqual(epochsFixture());
+    expect(f.mock.calls.map((c) => String(c[0]))).toEqual(['/api/paper/ladder', '/api/paper/epochs']);
   });
 });

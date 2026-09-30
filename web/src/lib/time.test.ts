@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtAge, fmtDuration, fmtUtcDateTime, fmtUtcDayMonth, fmtUtcHms, fmtUtcTime, isoDay, parseIsoDay } from './time';
+import { fmtAge, fmtDuration, fmtUtcDateTime, fmtUtcDayHm, fmtUtcDayMonth, fmtUtcHms, fmtUtcTime, isoDay, parseIsoDay } from './time';
 
 describe('time', () => {
   const t = Date.UTC(2026, 8, 25, 1, 12, 4, 210);
@@ -26,5 +26,9 @@ describe('time', () => {
     const t = Date.UTC(2026, 8, 27, 17, 32, 11, 450);
     expect(fmtUtcHms(t)).toBe('17:32:11');
     expect(fmtUtcDayMonth(t)).toBe('27 SEP');
+  });
+
+  it('writes a UTC day and minute for epoch starts', () => {
+    expect(fmtUtcDayHm(Date.UTC(2026, 8, 29, 19, 58, 12))).toBe('2026-09-29 19:58 UTC');
   });
 });

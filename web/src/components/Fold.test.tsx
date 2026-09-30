@@ -28,4 +28,11 @@ describe('Fold', () => {
     await userEvent.click(screen.getByText('all numbers'));
     expect(details().open).toBe(true);
   });
+
+  it('renders function children only while open (a lazy fold fetches nothing until opened)', async () => {
+    render(<Fold id="lazy" label="earlier epochs">{(open) => (open ? <p>fetched</p> : null)}</Fold>);
+    expect(screen.queryByText('fetched')).toBeNull();
+    await userEvent.click(screen.getByText('earlier epochs'));
+    expect(screen.getByText('fetched')).toBeInTheDocument();
+  });
 });

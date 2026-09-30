@@ -256,3 +256,131 @@ td.num, .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
   .arbtable .c-net::before { content: 'net '; color: var(--dim); }
   .arbtable .c-age::before { content: 'age '; color: var(--dim); }
 }
+/* Spec 7a §8: the Sweet spots grid. 88 + 6 × 36 = 304 px ≤ 328 (theme.test pins it). */
+.lgrid-wrap { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-start; margin: 8px 0; }
+.lgrid { width: auto; table-layout: fixed; border-collapse: collapse; }
+.lgrid th, .lgrid td { padding: 0; border: 0; text-align: center; }
+.lgrid .lg-row { width: 88px; text-align: left; font-family: var(--body); font-size: 13px; white-space: normal; color: var(--dim); padding-right: 4px; }
+.lgrid .lg-col { width: 36px; font-family: var(--body); font-size: 13px; color: var(--dim); }
+.lgrid .lg-cell { width: 36px; height: 32px; border: 1px solid var(--line2); background: var(--bg); font-family: var(--body); font-size: 18px; line-height: 1; cursor: pointer; }
+.lgrid .lg-cell[aria-pressed='true'] { outline: 2px solid var(--accent); outline-offset: -2px; }
+.lg-cell.g-candidate { color: var(--good); }
+.lg-cell.g-negative, .lg-cell.g-dead_on_paper { color: var(--bad); }
+.lg-cell.g-inconclusive, .lg-cell.g-thinUp, .lg-cell.g-thinDown, .lg-cell.g-none, .lg-cell.g-not_tested { color: var(--dim); }
+ul.plain.lg-legend { gap: 2px; font-size: 13px; color: var(--dim); }
+.lg-detail { flex-basis: 100%; min-height: 1.5em; }
+
+/* Spec 7a §7.2: the hero. Every SVG part has its own ll-* class (no shared .dot sizing); labels are HTML. */
+.ladder { display: grid; gap: 4px; margin: 0; }
+.ll-kicker { color: var(--dim); font-size: 13px; }
+.ll-big { font-family: var(--big); font-size: 40px; line-height: 1; }
+.ll-svg { display: block; width: 100%; height: 170px; background: var(--bg); border: 2px solid var(--line2); }
+.ll-svg .ll-gains { fill: var(--teal); }
+.ll-svg .ll-settle { fill: var(--mint); }
+.ll-svg .ll-leg_risk { fill: var(--salmon); }
+.ll-svg .ll-unrealized { stroke: var(--teal); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-hatch-line { fill: var(--teal); }
+.ll-svg .ll-net { fill: var(--fg); stroke: var(--fg); stroke-width: 9px; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-extra { stroke: var(--dim); stroke-width: 8px; stroke-linecap: square; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-missing { fill: none; stroke: var(--line2); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-us { fill: var(--rose); opacity: 0.35; }
+.ll-svg .ll-zero { stroke: var(--fg); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-be { stroke: var(--accent); stroke-width: 2px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ll-axis { list-style: none; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; font-size: 13px; line-height: 1.3; }
+.ll-axis li { display: grid; min-width: 0; }
+.ll-axis li.missing { color: var(--dim); }
+ul.plain.ll-legend { grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 2px 10px; font-size: 13px; }
+.ll-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+.ll-sw.gains { background: var(--teal); }
+.ll-sw.leg_risk { background: var(--salmon); }
+.ll-sw.settle { background: var(--mint); }
+.ll-sw.unrealized { background: repeating-linear-gradient(45deg, var(--teal) 0 2px, transparent 2px 5px); border: 1px solid var(--teal); }
+.ll-sw.net { background: var(--fg); border-radius: 50%; }
+.ll-sw.extra { background: var(--dim); }
+.ll-sw.us { background: var(--rose); opacity: 0.6; }
+ul.plain.ll-extras { gap: 2px; font-size: 13px; }
+
+/* Spec 7a §6: since when the paper accounts count. */
+.epochline { color: var(--dim); padding: 0 2px; }
+
+/* Spec 7a §5.3: the reset form. */
+.resetform { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.resetform label { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.resetform input { font: inherit; background: var(--chip); color: var(--fg); border: 2px solid var(--line); padding: 0 4px; width: 9ch; }
+.resetform button { font-family: var(--px); font-size: 7px; padding: 5px 8px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; }
+.resetform button:disabled { opacity: 0.4; cursor: default; }
+/* Spec 7a §9.1: the explain panel. Docked at ≥ 1,500 px (app + 360 px panel centred as a pair); below,
+   a drawer that stops 28 px short of the right edge so the tab stays visible. */
+.shell { display: flex; justify-content: center; align-items: flex-start; gap: 16px; }
+.shell > .app { flex: 0 1 1440px; min-width: 0; margin: 0; }
+.explain-tab { position: fixed; right: 0; top: 50%; transform: translateY(-50%); writing-mode: vertical-rl; font-family: var(--px); font-size: 8px; letter-spacing: 1px; padding: 10px 5px; border: 2px solid var(--line); border-right: 0; background: var(--chip); color: var(--fg); z-index: 11; cursor: pointer; }
+.explain-tab[aria-expanded='true'] { background: var(--accent); color: var(--accentfg); }
+.explain-tab:focus-visible, .explain-q:focus-visible, .explain-close:focus-visible, .explain-sel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* D-06: docked and open, the tab leaves the fixed right edge and joins the row, flush with the panel's
+   left border (margin-right cancels the .shell gap) like a folder tab: it never sits over the panel. */
+.explain-tab[data-dock] { position: sticky; top: 40px; transform: none; margin-top: 24px; margin-right: -16px; border-width: 3px 0 3px 3px; z-index: auto; }
+.explain { background: var(--card); border: 3px solid var(--line); padding: 0 12px 12px; display: grid; gap: 8px; align-content: start; overflow-y: auto; }
+.explain:focus { outline: none; }
+.explain[data-mode='dock'] { flex: 0 0 360px; position: sticky; top: 16px; max-height: calc(100vh - 32px); box-shadow: 6px 6px 0 var(--line); }
+.explain[data-mode='drawer'] { position: fixed; top: 0; right: 28px; bottom: 0; width: min(360px, calc(100vw - 28px)); z-index: 10; box-shadow: -6px 0 0 var(--line); }
+/* The head mirrors the app's top bar: a band across the panel, not a box inside it (D-15). */
+.explain-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 -12px; padding: 10px 12px; background: var(--bar); border-bottom: 3px solid var(--line); }
+.explain-head h2 { font-family: var(--px); font-size: 9px; }
+.explain-close, .explain-sel button { font: inherit; background: none; border: 0; color: var(--dim); text-decoration: underline; cursor: pointer; padding: 0; }
+.explain-sel { color: var(--dim); }
+/* D-15: questions are folds separated by dashed rules, never framed boxes. */
+.explain-qs { list-style: none; display: grid; }
+.explain-qs > li + li { border-top: 1px dashed var(--line2); }
+.explain-q { width: 100%; text-align: left; font-family: var(--body); font-weight: 600; font-size: 15px; color: var(--fg); border: 0; background: none; padding: 8px 0; cursor: pointer; }
+.explain-q::before { content: '▸ '; color: var(--accent); }
+.explain-q[aria-expanded='true']::before { content: '▾ '; }
+.explain-a { padding: 0 0 10px; display: grid; gap: 6px; min-width: 0; }
+/* D-15: the hero keeps its drawing and folds but drops their frames inside the panel's box. */
+.explain .ll-svg { border: 0; }
+.explain .fold { border: 0; border-top: 1px dashed var(--line2); }
+.explain .fold > summary { padding: 4px 0; }
+.explain .fold-body { padding: 4px 0 8px; }
+
+/* Spec 7a §9.3: rows that set the explain selection. */
+tr.pick { cursor: pointer; }
+tr.pick.nopick { cursor: default; }
+/* A cell that selects its row from the keyboard too (Paper positions): reads as the row's text, not a button. */
+.linklike { font: inherit; color: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; text-decoration: underline dotted var(--dim); text-underline-offset: 3px; }
+.linklike:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Spec 7a §9.2: payoff structure (b) and the episode duration bars. No borders of their own: they sit in the panel's box. */
+.payoff { margin: 0; }
+.payoff table { width: auto; }
+.payoff td { text-align: center; min-width: 2ch; font-family: var(--big); font-size: 20px; }
+.payoff td.nopay { color: var(--dim); }
+.payoff .broken { color: var(--salmon); }
+.payoff tr.basket th, .payoff tr.basket td { border-top: 2px solid var(--line2); }
+.explain .fig { font-family: var(--big); font-size: 20px; }
+.dbars { display: grid; gap: 6px; margin: 0; }
+.dbars .db-svg { display: block; width: 100%; height: 14px; background: var(--bg); }
+.dbars .db-bar { fill: var(--teal); }
+.dbars .db-bar.example { fill: var(--line2); }
+.dbars .db-bar.open { fill: var(--rose); }
+.dbars .db-tick { fill: var(--fg); }
+.db-label { margin: 2px 0 0; font-size: 13px; color: var(--dim); }
+/* Spec 7a §9.2: would we have caught it, and why money is locked (no box inside the panel). */
+.cbar { display: grid; gap: 4px; margin: 0; }
+.cbar .cb-svg { display: block; width: 100%; height: 36px; background: var(--bg); }
+.cbar .cb-dur { fill: var(--teal); }
+.cbar .cb-us { fill: var(--rose); opacity: 0.35; }
+.cbar .cb-rung.in { fill: var(--fg); }
+.cbar .cb-rung.late { fill: var(--bg); stroke: var(--salmon); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.cb-axis { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); text-align: center; font-size: 13px; line-height: 1.3; }
+.cb-axis li { display: grid; min-width: 0; }
+.cb-axis .num { font-family: var(--big); font-size: 18px; }
+.cb-axis li.late { color: var(--dim); }
+.cb-cap { display: grid; gap: 2px; font-size: 13px; }
+ul.plain.cb-legend { gap: 2px; }
+.cb-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+.cb-sw.us { background: var(--rose); opacity: 0.6; }
+.locked { display: grid; gap: 6px; margin: 0; }
+.locked .lk-row { display: flex; gap: 2px; height: 28px; }
+.locked .lk-block { flex: 1 1 0; min-width: 4px; background: var(--rose); }
+.locked .lk-block.sel { background: var(--salmon); }
+.lk-list { display: grid; gap: 2px; font-size: 13px; }
+.lk-list li.sel { font-weight: 600; }

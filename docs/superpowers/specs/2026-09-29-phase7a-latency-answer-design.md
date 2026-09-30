@@ -504,3 +504,20 @@ The hero uses **"basket gains"** and **"leg-risk cost"**, never "profit". It nev
 - **Both start cases** seed `last_recv_ms = start_ms`, and every trader entry point is clamped.
 - **`reset` contents:** `reserved`, `peak_equity`; `rate` is kept. Its consequences are stated.
 - **Leftovers:** poll timing wording; sp-burst's real latencies; `direction` and `markets_status` in the schema; 2 YES columns; test and order-of-work leftovers; rollback epoch wording.
+
+## 17. Notes for 7a-B from deploy A (2026-09-29)
+
+Deploy A went live at 19:58 UTC 2026-09-29: epoch 1, 19 accounts; cost gate +1.1 % wall, no RSS growth. What the live api returned, and what the web must do with it:
+
+- **Every LADDER rung is drawn, even when missing.** The api leaves a LADDER rung without an account out of `rungs` and only reports `break_even: thin`. The web keeps its own `LADDER` list (six scenario names and latencies, the same as `crates/cards` `LADDER`; a web test checks it against a fixture taken from the live response). A rung absent from `rungs` is drawn as an empty column labelled *no account*, so "too few trades" is never shown beside rungs that all have enough.
+- **`thin` shows the counts.** While `break_even.kind` is `thin`, the big number reads *"too few trades yet"* and each rung's label shows `n / 30` (the minimum), so the owner sees how far each rung is.
+- **`as_of_ms` is shown** as *"as of HH:MM UTC"* under the drawing; the sums stop at the latest common mark, not at "now".
+- **`markets_status`:**
+  - `warming` was observed live (not only `under_review`/`missing`). `live` and `warming` both draw the rows; thin cells are ◐/◑ as in §8.
+  - `under_review` shows *"recomputing after the ladder"*.
+  - `missing` shows *"no markets data"*.
+- **Two time frames, labelled.** The hero's bars are *since reset* (epoch). The `which markets` fold comes from Sweet spots, which is per trade attempt over the **last 30 days, across epochs**. The fold's caption says so, so the two never read as the same number.
+- **The us-band:** `measured.latency_ms` was 155 at deploy, so the band runs from measured + 50 to measured + 150 (205–305 ms). On the ordinal axis it is placed by interpolating between the neighbouring rung positions.
+- **The reset fold** always sends `Content-Type: application/json` and `X-CT-Intent: reset-paper`. It handles 202, 409, 429 and 503 as §5.3 says. A 503 (`reset_disabled`) shows *"reset is off on this server"*.
+- **P3-naive** lost $137.73 in epoch 1's first minutes, by the same amount at three latencies, as expected for the fee-blind control. Nothing in 7a-B depends on it. It is a note for the Paper page copy only: P3 is labelled *"control: ignores fees"*.
+- **Deploy B** recreates `web` only, at a quiet hour; the api is unchanged in B. Then the Chrome check at 1,440 px and ~360 px (§10).

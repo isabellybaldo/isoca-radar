@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { sweetFixture, sweetRow } from '../test/fixtures';
-import type { SweetSeries } from '../api/types';
-import { FEW_TRADES, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, feeLine, footnote, grid, interval, nothingPays, recomputingText, rowName, rowsFor } from './sweet';
+import type { SweetRow, SweetSeries } from '../api/types';
+import {
+  FEW_TRADES, GLYPHS, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, cellDetail, feeLine, footnote, glyphKey, grid,
+  gridNote, interval, ladderGrid, nothingPays, recomputingText, rowName, rowsFor,
+} from './sweet';
 
 const series = (rows = [sweetRow()], o: Partial<SweetSeries> = {}): SweetSeries => ({
   rows, m: rows.filter((r) => r.label !== 'thin' && r.label !== 'not_tested').length, z: '2.576',
@@ -79,5 +82,65 @@ describe('redesign helpers', () => {
     expect(recomputingText(Date.UTC(2026, 8, 27, 17, 14))).toBe(
       'Recomputing after a premise change. The last result was 17:14 UTC; new numbers appear when it finishes.',
     );
+  });
+});
+
+describe('ladder grid (spec 7a §8)', () => {
+  const rows = [
+    sweetRow({ scenario: 'sp-idle', latency_ms: 300, label: 'negative', mean: '-0.1' }),
+    sweetRow({ scenario: 'rung-0', latency_ms: 0, label: 'candidate', mean: '0.2' }),
+    sweetRow({ scenario: 'colo-idle', latency_ms: 52, label: 'thin', mean: '0.05' }),
+    sweetRow({ scenario: 'sp-idle', latency_ms: 300, fee_bips: 10, label: 'candidate' }),
+    sweetRow({ scenario: 'sp-burst', latency_ms: 450, label: 'candidate' }),
+    sweetRow({ scenario: 'sp-idle-nodelay', latency_ms: 300, label: 'candidate' }),
+    sweetRow({ dimension: 'category', bucket: 'weather', scenario: 'rung-0', latency_ms: 0, label: 'thin', mean: '-0.3' }),
+    sweetRow({ dimension: 'category', bucket: 'crypto', scenario: 'rung-0', latency_ms: 0, label: 'inconclusive' }),
+    sweetRow({ side: 'yes', scenario: 'sp-idle', latency_ms: 300, label: 'dead_on_paper' }),
+    sweetRow({ side: 'yes', scenario: 'sp-burst', latency_ms: 450, label: 'candidate' }),
+  ];
+
+  it('has six NO columns and two YES columns, sorted by latency', () => {
+    expect(ladderGrid(rows, 'no', 'all').columns.map((c) => c.scenario)).toEqual(['rung-0', 'rung-25', 'colo-idle', 'rung-100', 'rung-200', 'sp-idle']);
+    expect(ladderGrid(rows, 'yes', 'all').columns).toEqual([{ scenario: 'colo-idle', latency_ms: 52 }, { scenario: 'sp-idle', latency_ms: 300 }]);
+  });
+
+  it('never shows a fee variant or an extra: sp-idle is the fee-0 row', () => {
+    const g = ladderGrid(rows, 'no', 'all');
+    expect(g.cell({ dim: 'all', bucket: 'all' }, 'sp-idle')?.label).toBe('negative');
+    expect(g.columns.some((c) => c.scenario === 'sp-burst' || c.scenario === 'sp-idle-nodelay')).toBe(false);
+    expect(ladderGrid(rows, 'yes', 'all').cell({ dim: 'all', bucket: 'all' }, 'sp-idle')?.label).toBe('dead_on_paper');
+  });
+
+  it('puts the all row first, then the slice in its own order; `only` keeps the named buckets', () => {
+    expect(ladderGrid(rows, 'no', 'category').rows).toEqual([
+      { dim: 'all', bucket: 'all' }, { dim: 'category', bucket: 'weather' }, { dim: 'category', bucket: 'crypto' },
+    ]);
+    expect(ladderGrid(rows, 'no', 'category', ['crypto']).rows).toEqual([{ dim: 'all', bucket: 'all' }, { dim: 'category', bucket: 'crypto' }]);
+    expect(ladderGrid(rows, 'no', 'all').rows).toEqual([{ dim: 'all', bucket: 'all' }]);
+  });
+
+  it('gives one glyph per label and sign', () => {
+    const k = (o: Partial<SweetRow>) => GLYPHS[glyphKey(sweetRow(o))];
+    expect(k({ label: 'candidate' })).toBe('●');
+    expect(k({ label: 'negative' })).toBe('○');
+    expect(k({ label: 'inconclusive' })).toBe('◌');
+    expect(k({ label: 'thin', mean: '0.1' })).toBe('◐');
+    expect(k({ label: 'thin', mean: '-0.1' })).toBe('◑');
+    expect(k({ label: 'thin', mean: '0' })).toBe('◑');
+    expect(k({ label: 'thin', mean: null })).toBe('◑');
+    expect(k({ label: 'dead_on_paper' })).toBe('✗');
+    expect(k({ label: 'not_tested' })).toBe('–');
+    expect(GLYPHS[glyphKey(undefined)]).toBe('·');
+  });
+
+  it('writes the detail line with the capture at that latency, and the footnote', () => {
+    const r = sweetRow({
+      dimension: 'category', bucket: 'crypto', scenario: 'rung-25', latency_ms: 25, label: 'thin', mean: '0.3', lo: '-0.1', hi: '0.7', n_exec: 12, clusters: 9,
+    });
+    expect(cellDetail({ dim: 'category', bucket: 'crypto' }, { scenario: 'rung-25', latency_ms: 25 }, r)).toBe(
+      'crypto · rung-25 · n 12 · C 9 · captured at 25 ms, per $100: +$0.30 [−$0.10, +$0.70] · too few trades or events to say anything.',
+    );
+    expect(cellDetail({ dim: 'all', bucket: 'all' }, { scenario: 'rung-0', latency_ms: 0 }, undefined)).toBe('all · rung-0 · no attempts in this slice');
+    expect(gridNote({ m: 364, z: '3.62' })).toBe('z = 3.62 across 364 rows tested: the more rows, the wider each interval.');
   });
 });

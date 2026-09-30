@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import { useStream } from '../api/StreamContext';
 import type { EpisodeSummary, HealthNow, Today } from '../api/types';
 import { useApi } from '../api/useApi';
+import { useExplainPage, useExplainSelect } from '../explain/ExplainContext';
 import { Age } from '../components/Age';
 import { Box } from '../components/Box';
 import { EmptyState } from '../components/EmptyState';
@@ -137,7 +138,7 @@ function ColumnLegend() {
   );
 }
 
-function IncompleteSets({ rows, now }: { rows: EpisodeSummary[]; now: number }) {
+function IncompleteSets({ rows, now, onPick }: { rows: EpisodeSummary[]; now: number; onPick: (r: EpisodeSummary) => void }) {
   const [open, setOpen] = useState(false);
   const noun = rows.length === 1 ? 'incomplete set' : 'incomplete sets';
   return (
@@ -150,7 +151,7 @@ function IncompleteSets({ rows, now }: { rows: EpisodeSummary[]; now: number }) 
               {`${open ? 'hide' : 'show'} ${rows.length} ${noun}`}
             </button>
           </div>
-          {open && <Table className="arbtable" columns={episodeColumns(rows, now)} rows={rows} rowKey={(r) => r.id} rowClass={() => 'dim'} />}
+          {open && <Table className="arbtable" columns={episodeColumns(rows, now)} rows={rows} rowKey={(r) => r.id} rowClass={() => 'dim'} onRowClick={onPick} />}
         </>
       )}
     </Box>
@@ -162,6 +163,9 @@ export function Radar() {
   const slow = useTicker(30_000);
   const health = useApi((s) => api.healthNow(s), [], [healthTick, slow]);
   const open = useApi((s) => api.openEpisodes(s), [], [episodeTick, slow]);
+  useExplainPage('radar', { open: open.data?.items });
+  const select = useExplainSelect();
+  const pick = (r: EpisodeSummary) => select({ kind: 'episode', episode: r });
   const today = useApi((s) => api.today(s), [], [episodeTick, slow]);
   const edgeToday = useApi((s) => api.cards('today', s), [], [slow]);
   const edge = edgeToday.data?.cards.find((c) => c.card === 'EDGE');
@@ -200,14 +204,14 @@ export function Radar() {
               <EmptyState text={NO_ARB} />
             ) : (
               <>
-                <Table className="arbtable" columns={episodeColumns(arb, now)} rows={arb} rowKey={(r) => r.id} />
+                <Table className="arbtable" columns={episodeColumns(arb, now)} rows={arb} rowKey={(r) => r.id} onRowClick={pick} />
                 <ColumnLegend />
               </>
             )
           }
         </Loadable>
       </Box>
-      <IncompleteSets rows={rest} now={now} />
+      <IncompleteSets rows={rest} now={now} onPick={pick} />
     </>
   );
 }

@@ -3,6 +3,8 @@ import { useStream } from './api/StreamContext';
 import { EmptyState } from './components/EmptyState';
 import { FakeToggle } from './components/FakeToggle';
 import { LiveDot } from './components/LiveDot';
+import { Explain } from './explain/Explain';
+import { ExplainProvider } from './explain/ExplainContext';
 import { EpisodeDetail } from './pages/EpisodeDetail';
 import { Episodes } from './pages/Episodes';
 import { Health } from './pages/Health';
@@ -44,20 +46,25 @@ export function NotFound() {
 
 export function App() {
   return (
-    <div className="app">
-      <Header />
-      <main className="body">
-        <Routes>
-          <Route path="/" element={<Radar />} />
-          <Route path="/sweet" element={<Sweet />} />
-          <Route path="/episodes" element={<Episodes />} />
-          <Route path="/episodes/:id" element={<EpisodeDetail />} />
-          <Route path="/paper" element={<Paper />} />
-          <Route path="/papers" element={<Papers />} />
-          <Route path="/health" element={<Health />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </main>
-    </div>
+    <ExplainProvider>
+      <div className="shell">
+        <div className="app">
+          <Header />
+          <main className="body">
+            <Routes>
+              <Route path="/" element={<Radar />} />
+              <Route path="/sweet" element={<Sweet />} />
+              <Route path="/episodes" element={<Episodes />} />
+              <Route path="/episodes/:id" element={<EpisodeDetail />} />
+              <Route path="/paper" element={<Paper />} />
+              <Route path="/papers" element={<Papers />} />
+              <Route path="/health" element={<Health />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </main>
+        </div>
+        <Explain />
+      </div>
+    </ExplainProvider>
   );
 }

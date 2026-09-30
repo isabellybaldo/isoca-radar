@@ -6,8 +6,8 @@ import { Box } from '../components/Box';
 import { EmptyState } from '../components/EmptyState';
 import { Fold } from '../components/Fold';
 import { Help } from '../components/Help';
-import { IntervalChart } from '../components/IntervalChart';
 import { Loadable } from '../components/Loadable';
+import { SweetLadderGrid } from '../components/SweetLadderGrid';
 import { Tag } from '../components/Tag';
 import { Tiles } from '../components/Tiles';
 import { type Win, WindowSwitch } from '../components/WindowSwitch';
@@ -16,8 +16,8 @@ import { useNow, useTicker } from '../lib/hooks';
 import { formatMoney, formatPercent } from '../lib/money';
 import {
   COLO_TITLE, DIMS, FEW_TRADES, HEADLINE_SCENARIO, LABEL_TAG, LABEL_TEXT, NOTHING_PAYS, ONE_LINE_CAVEAT, SWEET_CAVEAT,
-  SWEET_EMPTY, type SweetDim, type SweetSide, bucketText, candidateCount, feeLine, footnote, grid, interval, nothingPays,
-  recomputingText, rowsFor,
+  SWEET_EMPTY, type SweetDim, type SweetSide, bucketText, candidateCount, feeLine, footnote, grid, gridNote, interval, nothingPays,
+  recomputingText,
 } from '../lib/sweet';
 import { fmtLocal, fmtUtcDateTime } from '../lib/time';
 
@@ -84,20 +84,17 @@ function SweetGrid({ s, side, dim }: { s: SweetSeries; side: SweetSide; dim: Swe
   );
 }
 
-/** M1: side/dim/scenario live in Sweet() so a window switch (which replaces this card by identity
- *  in Loadable's render) never resets the chips the owner just picked. */
-function SweetBody({ card, s, side, setSide, dimAsked, setDim, scenAsked, setScen }: {
+/** M1: side/dim live in Sweet() so a window switch (which replaces this card by identity in
+ *  Loadable's render) never resets the chips the owner just picked. Spec 7a §8: the grid replaces
+ *  the per-scenario chart and its chips; every scenario's numbers stay in "all numbers". */
+function SweetBody({ card, s, side, setSide, dimAsked, setDim }: {
   card: CardBody; s: SweetSeries;
   side: SweetSide; setSide: (v: SweetSide) => void;
   dimAsked: SweetDim; setDim: (v: SweetDim) => void;
-  scenAsked: string; setScen: (v: string) => void;
 }) {
   const nowMs = useNow(30_000);
   const dims = DIMS.filter(([d]) => d !== 'category' || s.category_available);
   const dim = dimAsked === 'category' && !s.category_available ? 'all' : dimAsked;
-  const scenarios = grid(s, side, dim).scenarios;
-  // Review focus 3: a scenario with no rows for this side/slice falls back to the first one that has some.
-  const scenario = scenarios.some((sc) => sc.name === scenAsked) ? scenAsked : (scenarios[0]?.name ?? HEADLINE_SCENARIO);
   const extraNotes = card.notes.filter((n) => n !== SWEET_CAVEAT && n !== footnote(s.m));
   return (
     <>
@@ -115,9 +112,9 @@ function SweetBody({ card, s, side, setSide, dimAsked, setDim, scenAsked, setSce
         <Chips label="side" options={[['no', 'NO'], ['yes', 'YES']]} value={side} onChange={setSide} />
         {side === 'no' ? <Help id="sweetNo" /> : <Help id="sweetYes" />}
         <Chips label="dimension" options={dims} value={dim} onChange={setDim} />
-        <Chips label="scenario" options={scenarios.map((sc) => [sc.name, scenarioTitle(sc.name).toUpperCase()] as [string, string])} value={scenario} onChange={setScen} />
       </div>
-      <IntervalChart rows={rowsFor(s, side, dim, scenario)} label={`${side.toUpperCase()} · ${dim.toUpperCase()} · ${scenario}`} />
+      <SweetLadderGrid rows={s.rows} side={side} dim={dim} label={`${side.toUpperCase()} · ${dim.toUpperCase()}`} />
+      <p className="dim">{gridNote(s)}</p>
       <Fold id="sweet:numbers" label="all numbers">
         <SweetGrid s={s} side={side} dim={dim} />
       </Fold>
@@ -148,7 +145,6 @@ export function Sweet() {
   const card = st.data?.cards.find((c) => c.card === 'SWEET');
   const [side, setSide] = useState<SweetSide>('no');
   const [dimAsked, setDim] = useState<SweetDim>('all');
-  const [scenAsked, setScen] = useState<string>(HEADLINE_SCENARIO);
   return (
     <Box
       title="SWEET SPOTS"
@@ -176,8 +172,6 @@ export function Sweet() {
               setSide={setSide}
               dimAsked={dimAsked}
               setDim={setDim}
-              scenAsked={scenAsked}
-              setScen={setScen}
             />
           );
         }}
