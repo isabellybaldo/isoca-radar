@@ -8,13 +8,13 @@ use crate::latency::{FrameRate, exec_delay_ms};
 use crate::policy::{Decision, Hold, OpenCtx, Planned, SkipReason, decide, outcome_for};
 use crate::rows::{AccountRow, ExecRow, FillRow, IntentRow, MarkoutRow, SimOut};
 use crate::types::{BookSide, LegKey, Outcome};
-use crate::venue::{FillLeg, OrderFill, basket_buy, fak_sell, outcome_levels, yes_level};
+use crate::venue::{FillLeg, basket_buy, outcome_levels, unwind_sell, yes_level};
 use arb_core::book::Book;
 use arb_core::detect::Kind;
 use arb_core::fee::FeeSchedule;
 use arb_core::fill::{BasketRule, BuyLeg, walk};
 use arb_core::money::{Price, Shares};
-use rust_decimal::{Decimal, RoundingStrategy};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -701,26 +701,24 @@ impl PaperTrader {
     }
 
     fn unwind(&mut self, u: Unwind, books: &impl Books, out: &mut Vec<SimOut>) {
+        // Capped at what we actually hold (unwind_sell rounds both): a stale unwind (e.g. a
+        // position already reduced by another event) can't sell shares we don't have. Below the
+        // venue minimum, or the book gone: no order goes out, but the held inventory still gets a
+        // zero-fill row (side "sell", filled 0) so it stays visible — a real bot would see the
+        // same held-not-sold leg risk, not silence.
         let held = self.accounts[u.acct]
             .positions
             .get(&u.leg)
-            .map_or(Decimal::ZERO, |p| p.qty)
-            .round_dp_with_strategy(2, RoundingStrategy::ToZero);
-        // Cap at what we actually hold: a stale unwind (e.g. a position already reduced by
-        // another event) can't sell shares we don't have.
-        let qty = u
-            .qty
-            .round_dp_with_strategy(2, RoundingStrategy::ToZero)
-            .min(held);
-        // Below the venue minimum, or the book gone: no order goes out, but the held inventory
-        // still gets a zero-fill row (side "sell", filled 0) so it stays visible — a real bot
-        // would see the same held-not-sold leg risk, not silence.
-        let f = match books.yes_book(&u.leg.yes_token) {
-            Some(book) if qty >= self.cfg.min_order_shares => {
-                fak_sell(book, &u.leg, u.fee, qty, &mut self.consumed[u.acct])
-            }
-            _ => OrderFill::default(),
-        };
+            .map_or(Decimal::ZERO, |p| p.qty);
+        let (qty, f) = unwind_sell(
+            books.yes_book(&u.leg.yes_token),
+            &u.leg,
+            u.fee,
+            u.qty,
+            held,
+            self.cfg.min_order_shares,
+            &mut self.consumed[u.acct],
+        );
         out.push(SimOut::Fill(FillRow {
             account: self.accounts[u.acct].id.clone(),
             episode_id: u.episode_id.clone(),

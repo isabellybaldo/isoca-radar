@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use rust_decimal::Decimal;
 use sim::consumed::ConsumedLiquidity;
 use sim::types::{LegKey, Outcome};
-use sim::venue::{FillLeg, basket_buy};
+use sim::venue::{FillLeg, OrderFill, basket_buy, unwind_sell};
 use std::collections::HashMap;
 
 fn key(i: usize, outcome: Outcome) -> LegKey {
@@ -160,5 +160,95 @@ proptest! {
             prop_assert!(f.filled <= Decimal::from(q));
         }
         prop_assert!(b.excess.iter().any(|x| x.is_zero()), "the smallest leg has no excess");
+    }
+}
+
+fn no_key() -> LegKey {
+    key(0, Outcome::No)
+}
+
+#[test]
+fn an_unwind_below_the_minimum_sends_nothing_but_keeps_the_request() {
+    let b = book(&[], &[("0.40", "100")]);
+    let mut c = ConsumedLiquidity::default();
+    let (req, f) = unwind_sell(
+        Some(&b),
+        &no_key(),
+        FeeSchedule::ZERO,
+        d("4.99"),
+        d("30"),
+        d("5"),
+        &mut c,
+    );
+    assert_eq!((req, f), (d("4.99"), OrderFill::default()));
+    assert!(c.is_empty(), "no order, nothing consumed");
+}
+
+#[test]
+fn an_unwind_with_no_book_sends_nothing() {
+    let mut c = ConsumedLiquidity::default();
+    let (req, f) = unwind_sell(
+        None,
+        &no_key(),
+        FeeSchedule::ZERO,
+        d("12"),
+        d("12"),
+        d("5"),
+        &mut c,
+    );
+    assert_eq!((req, f), (d("12"), OrderFill::default()));
+}
+
+#[test]
+fn held_and_qty_are_both_rounded_to_cents_toward_zero() {
+    // NO unwind sells into the mirrored YES asks: NO bid = 1 - 0.40 = 0.60
+    let b = book(&[], &[("0.40", "100")]);
+    let mut c = ConsumedLiquidity::default();
+    let (req, f) = unwind_sell(
+        Some(&b),
+        &no_key(),
+        FeeSchedule::ZERO,
+        d("9.999"),
+        d("7.4567"),
+        d("5"),
+        &mut c,
+    );
+    assert_eq!(
+        req,
+        d("7.45"),
+        "min(round2(9.999) = 9.99, round2(7.4567) = 7.45)"
+    );
+    assert_eq!((f.filled, f.notional), (d("7.45"), d("4.47")));
+    let (req, _) = unwind_sell(
+        Some(&b),
+        &no_key(),
+        FeeSchedule::ZERO,
+        d("6.019"),
+        d("50"),
+        d("5"),
+        &mut c,
+    );
+    assert_eq!(req, d("6.01"));
+}
+
+proptest! {
+    #[test]
+    fn an_unwind_never_sells_more_than_it_may(
+        bk in yes_book(),
+        no in any::<bool>(),
+        qty in 0u32..=100_000,
+        held in 0u32..=100_000,
+        min in 1u32..=10,
+    ) {
+        let leg = key(0, if no { Outcome::No } else { Outcome::Yes });
+        let (qty, held) = (Decimal::new(qty.into(), 3), Decimal::new(held.into(), 3));
+        let cap = qty.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero)
+            .min(held.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero));
+        let (req, f) = unwind_sell(Some(&bk), &leg, FeeSchedule::ZERO, qty, held, Decimal::from(min), &mut ConsumedLiquidity::default());
+        prop_assert_eq!(req, cap);
+        prop_assert!(f.filled <= cap);
+        if cap < Decimal::from(min) {
+            prop_assert_eq!(f, OrderFill::default());
+        }
     }
 }

@@ -194,3 +194,28 @@ pub fn basket_buy(
         excess,
     }
 }
+
+/// The leg-risk unwind (spec §5.6, 7b §3.2): rounds the queued `qty` and the `held` position
+/// (the raw quantity the account holds) to 2 dp toward zero and asks for the smaller, so a stale
+/// unwind never sells shares the account no longer has. Below `min_order`, or with no book, no
+/// order goes out: the fill is empty and the requested quantity is still returned (the sim's
+/// zero-fill row keeps the held leg risk visible).
+pub fn unwind_sell(
+    book: Option<&Book>,
+    leg: &LegKey,
+    fee: FeeSchedule,
+    qty: Decimal,
+    held: Decimal,
+    min_order: Decimal,
+    consumed: &mut ConsumedLiquidity,
+) -> (Decimal, OrderFill) {
+    let held = held.round_dp_with_strategy(2, RoundingStrategy::ToZero);
+    let requested = qty
+        .round_dp_with_strategy(2, RoundingStrategy::ToZero)
+        .min(held);
+    let fill = match book {
+        Some(b) if requested >= min_order => fak_sell(b, leg, fee, requested, consumed),
+        _ => OrderFill::default(),
+    };
+    (requested, fill)
+}
