@@ -8,7 +8,7 @@ use crate::latency::{FrameRate, exec_delay_ms};
 use crate::policy::{Decision, Hold, OpenCtx, Planned, SkipReason, decide, outcome_for};
 use crate::rows::{AccountRow, ExecRow, FillRow, IntentRow, MarkoutRow, SimOut};
 use crate::types::{BookSide, LegKey, Outcome};
-use crate::venue::{OrderFill, fak_buy, fak_sell, outcome_levels, yes_level};
+use crate::venue::{FillLeg, OrderFill, basket_buy, fak_sell, outcome_levels, yes_level};
 use arb_core::book::Book;
 use arb_core::detect::Kind;
 use arb_core::fee::FeeSchedule;
@@ -597,19 +597,20 @@ impl PaperTrader {
         self.accounts[a].reserved =
             (self.accounts[a].reserved - p.planned.reserve).max(Decimal::ZERO);
         let pnl_at_tx = self.pnl_now(&p, books);
-        let mut filled = Vec::with_capacity(p.planned.legs.len());
-        for leg in &p.planned.legs {
-            let f = match books.yes_book(&leg.key.yes_token) {
-                Some(b) => fak_buy(
-                    b,
-                    &leg.key,
-                    leg.fee,
-                    leg.limit,
-                    p.planned.q_target,
-                    &mut self.consumed[a],
-                ),
-                None => OrderFill::default(),
-            };
+        let fill_legs: Vec<FillLeg> = p
+            .planned
+            .legs
+            .iter()
+            .map(|l| FillLeg {
+                key: l.key.clone(),
+                fee: l.fee,
+                limit: l.limit,
+            })
+            .collect();
+        // Account::buy never touches consumed liquidity, so buying every leg first and then
+        // booking each leg's rows in order is the same as the old buy-then-book loop.
+        let buy = basket_buy(books, &fill_legs, p.planned.q_target, &mut self.consumed[a]);
+        for (leg, f) in p.planned.legs.iter().zip(&buy.per_leg) {
             out.push(SimOut::Fill(FillRow {
                 account: self.accounts[a].id.clone(),
                 episode_id: p.episode_id.clone(),
@@ -623,19 +624,13 @@ impl PaperTrader {
                 fees: f.fees,
                 levels_used: f.levels_used,
             }));
-            if let Some(e) = self.accounts[a].buy(p.t_exec, &p.episode_id, &leg.key, &f) {
+            if let Some(e) = self.accounts[a].buy(p.t_exec, &p.episode_id, &leg.key, f) {
                 out.push(SimOut::Ledger(e));
             }
-            filled.push(f);
         }
-        let q_eff = filled
-            .iter()
-            .map(|f| f.filled)
-            .min()
-            .unwrap_or(Decimal::ZERO);
+        let q_eff = buy.q_eff;
         let mut leg_risk = Decimal::ZERO;
-        for (leg, f) in p.planned.legs.iter().zip(&filled) {
-            let excess = f.filled - q_eff;
+        for ((leg, f), &excess) in p.planned.legs.iter().zip(&buy.per_leg).zip(&buy.excess) {
             if excess > Decimal::ZERO {
                 leg_risk += excess;
                 let due_ms = p.t_exec + self.delay(a, leg.seconds_delay);

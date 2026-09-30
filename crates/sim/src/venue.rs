@@ -147,3 +147,50 @@ pub fn order_size(limits: &[Price], q: Decimal, min: Decimal) -> Decimal {
     }
     Decimal::ZERO
 }
+
+/// One leg of a basket buy (7b §3.2): the token, its fee schedule and the policy's limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FillLeg {
+    pub key: LegKey,
+    pub fee: FeeSchedule,
+    pub limit: Price,
+}
+
+/// What a basket buy got: one fill per leg (in `legs` order), the full sets it made (`q_eff`,
+/// the smallest leg fill, 0 with no legs) and each leg's shares beyond them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BasketBuy {
+    pub per_leg: Vec<OrderFill>,
+    pub q_eff: Decimal,
+    /// `per_leg[i].filled − q_eff`: the leg-risk inventory the sim unwinds.
+    pub excess: Vec<Decimal>,
+}
+
+/// The paper sim's execution at t_x (spec §5.6, 7b §3.2): a FAK buy of `q_target` on every leg at
+/// its limit, against the books minus `consumed`, in leg order. A leg whose book is missing gets an
+/// empty fill.
+pub fn basket_buy(
+    books: &impl Books,
+    legs: &[FillLeg],
+    q_target: Decimal,
+    consumed: &mut ConsumedLiquidity,
+) -> BasketBuy {
+    let per_leg: Vec<OrderFill> = legs
+        .iter()
+        .map(|l| match books.yes_book(&l.key.yes_token) {
+            Some(b) => fak_buy(b, &l.key, l.fee, l.limit, q_target, consumed),
+            None => OrderFill::default(),
+        })
+        .collect();
+    let q_eff = per_leg
+        .iter()
+        .map(|f| f.filled)
+        .min()
+        .unwrap_or(Decimal::ZERO);
+    let excess = per_leg.iter().map(|f| f.filled - q_eff).collect();
+    BasketBuy {
+        per_leg,
+        q_eff,
+        excess,
+    }
+}
