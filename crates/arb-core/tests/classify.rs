@@ -186,3 +186,121 @@ proptest! {
         );
     }
 }
+
+/// The guards restated on the `Group` alone, without classify.rs's helpers.
+fn has_bid(l: &GroupLeg) -> bool {
+    l.status == LegStatus::Live && l.book.top().best_bid.is_some()
+}
+
+proptest! {
+    #[test]
+    fn the_negative_node_is_the_one_the_guards_name(g in group()) {
+        let c = classify(&g);
+        let has = |n: Node| c.path.contains(&n);
+        let decided = g.legs.iter().any(|l| l.status == LegStatus::ClosedYes);
+        prop_assert_eq!(c.path == vec![Node::Decided], decided, "{:?}", c.path);
+        if decided {
+            return Ok(());
+        }
+        prop_assert_eq!(c.path[0], Node::NoBasketTried);
+        let used: Vec<&GroupLeg> = g.legs.iter().filter(|l| has_bid(l)).collect();
+        prop_assert_eq!(has(Node::NoBasketFewLegs), used.len() < 2);
+        let no_crossed = used.len() >= 2 && used.iter().any(|l| l.book.is_crossed());
+        prop_assert_eq!(has(Node::NoBasketCrossed), no_crossed);
+        let no_not_positive = used.len() >= 2 && !no_crossed && detect_no_basket(&g).is_none();
+        prop_assert_eq!(has(Node::NoBasketNotPositive), no_not_positive);
+        prop_assert_eq!(
+            has(Node::NoBasketPositive),
+            used.len() >= 2 && !no_crossed && !no_not_positive
+        );
+        // D2a is reached iff D2b was not positive.
+        let reached = !has(Node::NoBasketPositive);
+        prop_assert_eq!(has(Node::YesBasketTried), reached);
+        if !reached {
+            return Ok(());
+        }
+        let live: Vec<&GroupLeg> = g.legs.iter().filter(|l| l.status == LegStatus::Live).collect();
+        let yes_crossed = live.iter().any(|l| l.book.is_crossed());
+        let missing = live.iter().any(|l| l.book.top().best_ask.is_none());
+        prop_assert_eq!(has(Node::YesBasketNoLive), live.is_empty());
+        prop_assert_eq!(has(Node::YesBasketCrossed), !live.is_empty() && yes_crossed);
+        prop_assert_eq!(
+            has(Node::YesBasketMissingAsk),
+            !live.is_empty() && !yes_crossed && missing
+        );
+        let walked = !live.is_empty() && !yes_crossed && !missing;
+        let yes_none = detect_yes_basket(&g).is_none();
+        prop_assert_eq!(has(Node::YesBasketNotPositive), walked && yes_none);
+        prop_assert_eq!(has(Node::YesBasketPositive), walked && !yes_none);
+        if walked && yes_none {
+            prop_assert_eq!(c.path.last(), Some(&Node::YesBasketNotPositive));
+        }
+    }
+}
+
+#[test]
+fn a_single_bid_leg_is_too_few_for_the_no_basket() {
+    let g = Group {
+        legs: vec![
+            live("0.20", "0.30"),
+            leg(LegStatus::Live, None, Some("0.30")),
+        ],
+        augmented: false,
+    };
+    assert_eq!(
+        classify(&g).path[..2],
+        [Node::NoBasketTried, Node::NoBasketFewLegs]
+    );
+}
+
+#[test]
+fn no_live_leg_ends_the_yes_basket_at_no_live() {
+    let g = Group {
+        legs: vec![
+            leg(LegStatus::Other, None, None),
+            leg(LegStatus::ClosedNo, None, None),
+        ],
+        augmented: false,
+    };
+    let c = classify(&g);
+    assert_eq!(
+        c.path,
+        vec![
+            Node::NoBasketTried,
+            Node::NoBasketFewLegs,
+            Node::YesBasketTried,
+            Node::YesBasketNoLive
+        ]
+    );
+    assert!(c.signal.is_none());
+}
+
+#[test]
+fn a_priced_up_event_is_not_positive_on_both_baskets() {
+    let g = Group {
+        legs: vec![live("0.49", "0.51"), live("0.49", "0.51")],
+        augmented: false,
+    };
+    let c = classify(&g);
+    assert_eq!(
+        c.path,
+        vec![
+            Node::NoBasketTried,
+            Node::NoBasketNotPositive,
+            Node::YesBasketTried,
+            Node::YesBasketNotPositive
+        ]
+    );
+    assert!(c.signal.is_none());
+}
+
+#[test]
+fn a_complete_yes_basket_is_named_complete() {
+    let g = Group {
+        legs: vec![live("0.20", "0.30"), live("0.20", "0.30")],
+        augmented: false,
+    };
+    let c = classify(&g);
+    assert_eq!(c.path.last(), Some(&Node::Complete));
+    assert_eq!(c.signal.unwrap().kind, Kind::YesBasket);
+}

@@ -54,7 +54,6 @@ fn any_crossed(g: &Group, legs: &[usize]) -> bool {
 }
 
 /// D2b first; when it is positive D2a is not tried (L7: they are never both positive).
-/// `post_end` is the scanner's (from event dates), never part of the kind.
 pub fn classify(g: &Group) -> Classification {
     let mut path = Vec::new();
     if decided(g) {
