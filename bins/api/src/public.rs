@@ -266,10 +266,8 @@ pub fn writer_plan(cfg: &crate::config::Config) -> Option<WriterPlan> {
 /// on a blocking thread (the api's tokio has no `fs` feature). Returns the bytes written, or the
 /// reason the old file was left alone.
 pub async fn run_once(st: &AppState, dir: &Path, written_ms: i64) -> Result<usize, String> {
-    let ladder = load_ladder(st)
-        .await
-        .map_err(|e| format!("ladder: {e:?}"))?;
-    let today = load_today(st).await.map_err(|e| format!("today: {e:?}"))?;
+    let ladder = load_ladder(st).await.map_err(|e| format!("ladder: {e}"))?;
+    let today = load_today(st).await.map_err(|e| format!("today: {e}"))?;
     let bytes = to_bytes(&build(ladder, today, written_ms))?;
     let n = bytes.len();
     let dir = dir.to_path_buf();
@@ -280,6 +278,24 @@ pub async fn run_once(st: &AppState, dir: &Path, written_ms: i64) -> Result<usiz
     Ok(n)
 }
 
+/// `run_once` with a panic in its async part turned into a skip reason, so the task lives on.
+async fn guard(
+    run: impl std::future::Future<Output = Result<usize, String>>,
+) -> Result<usize, String> {
+    use futures_util::FutureExt as _;
+    match std::panic::AssertUnwindSafe(run).catch_unwind().await {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown".to_string());
+            Err(format!("panic: {msg}"))
+        }
+    }
+}
+
 /// The task (§4): the first run after `plan.first`, then one every `plan.every`, one at a time. A
 /// failed run logs one line and keeps the old file; nothing here panics or stops the server.
 pub async fn run_writer(st: AppState, plan: WriterPlan) {
@@ -288,7 +304,7 @@ pub async fn run_writer(st: AppState, plan: WriterPlan) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        if let Err(reason) = run_once(&st, &plan.dir, now_ms()).await {
+        if let Err(reason) = guard(run_once(&st, &plan.dir, now_ms())).await {
             eprintln!("api: public snapshot skipped: {reason}");
         }
     }
@@ -297,6 +313,13 @@ pub async fn run_writer(st: AppState, plan: WriterPlan) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_panic_in_a_run_becomes_a_skip_reason() {
+        let r = guard(async { panic!("boom") }).await;
+        assert_eq!(r, Err("panic: boom".to_string()));
+        assert_eq!(guard(async { Ok(3) }).await, Ok(3));
+    }
     use crate::episodes::HourDto;
     use crate::ladder::{MeasuredDto, RungDto};
     use cards::ladder::Direction;

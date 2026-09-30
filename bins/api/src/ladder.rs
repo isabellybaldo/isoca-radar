@@ -124,7 +124,7 @@ pub async fn ladder(State(st): State<AppState>) -> Result<Json<LadderDto>, ApiEr
 
 /// The ladder as the handler serves it; the public snapshot (`public.rs`) builds from it too, so
 /// the two can't drift (7b §4). It needs nothing from the request.
-pub(crate) async fn load_ladder(st: &AppState) -> Result<LadderDto, ApiError> {
+pub(crate) async fn load_ladder(st: &AppState) -> Result<LadderDto, store::StoreError> {
     let now = now_ms();
     // before migrations 0004/0009 there are no paper tables: epoch 0, never a 500
     let epochs = if st.store.paper_ready().await? {

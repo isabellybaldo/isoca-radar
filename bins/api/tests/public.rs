@@ -24,11 +24,19 @@ async fn sql(owner: &Store, s: String) {
     owner.raw_exec(&s).await.unwrap();
 }
 
-fn dir(name: &str) -> PathBuf {
+/// A temp dir removed on drop, so a failed assertion leaves nothing behind.
+struct TmpDir(PathBuf);
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn dir(name: &str) -> TmpDir {
     let d = std::env::temp_dir().join(format!("ct_public_it_{}_{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TmpDir(d)
 }
 
 /// A ladder epoch with two rungs, a ledger naming a market, token and episode, a SWEET body whose
@@ -126,8 +134,9 @@ async fn the_snapshot_names_no_market_token_episode_account_or_host() {
     };
     seed(&owner).await;
     let (_app, st) = common::app_with_policies(&db).await;
-    let d = dir("content");
-    let n = run_once(&st, &d, 42).await.unwrap();
+    let t = dir("content");
+    let d = &t.0;
+    let n = run_once(&st, d, 42).await.unwrap();
     let text = std::fs::read_to_string(d.join(PUBLIC_FILE)).unwrap();
     assert_eq!(text.len(), n);
     for s in SECRETS {
@@ -153,7 +162,6 @@ async fn the_snapshot_names_no_market_token_episode_account_or_host() {
     assert_eq!(v["ladder"]["markets"].as_array().unwrap().len(), 2);
     assert_eq!(v["today"]["arb"], 1, "today counts the seeded episode");
     assert!(!d.join(PUBLIC_TMP).exists());
-    let _ = std::fs::remove_dir_all(&d);
     db.drop(owner).await;
 }
 
@@ -163,13 +171,16 @@ async fn a_failed_query_keeps_the_old_file() {
         return;
     };
     let (_app, st) = common::app_with_policies(&db).await;
-    let d = dir("query");
-    run_once(&st, &d, 1).await.unwrap();
+    let t = dir("query");
+    let d = &t.0;
+    run_once(&st, d, 1).await.unwrap();
     let before = std::fs::read(d.join(PUBLIC_FILE)).unwrap();
     owner.raw_exec("DROP TABLE episodes CASCADE").await.unwrap();
-    let e = run_once(&st, &d, 2).await.unwrap_err();
-    assert!(e.starts_with("today: "), "{e}");
+    let e = run_once(&st, d, 2).await.unwrap_err();
+    assert!(
+        e.starts_with("today: ") && e.contains("episodes"),
+        "the reason names the real cause: {e}"
+    );
     assert_eq!(std::fs::read(d.join(PUBLIC_FILE)).unwrap(), before);
-    let _ = std::fs::remove_dir_all(&d);
     db.drop(owner).await;
 }
