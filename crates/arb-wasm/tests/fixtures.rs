@@ -413,6 +413,16 @@ fn depth_walk() {
                     ],
                 ),
             ),
+            (
+                "descending-levels",
+                walk_in(
+                    "yes",
+                    vec![
+                        wleg(json!([lv("0.40", "10"), lv("0.30", "10")]), Value::Null),
+                        wleg(json!([lv("0.60", "15")]), Value::Null),
+                    ],
+                ),
+            ),
             ("bad-rule", walk_in("maybe", yes_two.clone())),
             (
                 "seven-legs",
@@ -581,6 +591,27 @@ fn episode() {
             (
                 "latency-5001",
                 episode_in("no", None, short(), 5001, 0, false, Value::Null),
+            ),
+            (
+                "tx-at-close",
+                episode_in("no", None, short(), 100, 100, false, Value::Null),
+            ),
+            (
+                "tx-at-update",
+                episode_in(
+                    "no",
+                    None,
+                    vec![
+                        (0, shut_no()),
+                        (1000, open_no()),
+                        (1100, two("0.70", "0.71", "0.50", "0.51")),
+                        (1500, shut_no()),
+                    ],
+                    50,
+                    50,
+                    false,
+                    Value::Null,
+                ),
             ),
             (
                 "seconds-delay-10",

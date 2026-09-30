@@ -30,6 +30,11 @@
     "output": "{\"steps\":[{\"q_from\":\"0\",\"q_to\":\"10\",\"cost\":\"0.91\",\"payoff\":\"1\",\"profitable\":true},{\"q_from\":\"10\",\"q_to\":\"20\",\"cost\":\"0.97\",\"payoff\":\"1\",\"profitable\":true},{\"q_from\":\"20\",\"q_to\":\"30\",\"cost\":\"1.07\",\"payoff\":\"1\",\"profitable\":false}],\"q_star\":\"20\",\"pi\":\"1.2\",\"pi_gross\":\"1.2\"}"
   },
   {
+    "name": "descending-levels",
+    "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.40\",\"s\":\"10\"},{\"p\":\"0.30\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.60\",\"s\":\"15\"}]}],\"rule\":\"yes\"}",
+    "output": "{\"error\":\"levels must be cheapest first\"}"
+  },
+  {
     "name": "bad-rule",
     "input": "{\"legs\":[{\"fee\":null,\"levels\":[{\"p\":\"0.30\",\"s\":\"10\"},{\"p\":\"0.40\",\"s\":\"10\"}]},{\"fee\":null,\"levels\":[{\"p\":\"0.60\",\"s\":\"15\"}]}],\"rule\":\"maybe\"}",
     "output": "{\"error\":\"unknown rule \\\"maybe\\\"\"}"

@@ -37,7 +37,8 @@ struct WalkOut {
     pi_gross: String,
 }
 
-/// The cost staircase, past Q*, and `walk`'s totals.
+/// The cost staircase, past Q*, and `walk`'s totals. Each leg's `levels` are the asks of the
+/// outcome being bought (NO asks for rule "no"), cheapest first; they are not YES-book levels.
 pub fn depth_walk_json(input: &str) -> String {
     run(input, |i: WalkIn| {
         if i.legs.is_empty() || i.legs.len() > MAX_LEGS {
@@ -54,8 +55,12 @@ pub fn depth_walk_json(input: &str) -> String {
             .legs
             .iter()
             .map(|l| {
+                let levels = levels(&l.levels)?;
+                if levels.windows(2).any(|w| w[0].0.get() >= w[1].0.get()) {
+                    return Err("levels must be cheapest first".to_string());
+                }
                 Ok(BuyLeg {
-                    levels: levels(&l.levels)?,
+                    levels,
                     fee: fee(&l.fee)?,
                 })
             })
