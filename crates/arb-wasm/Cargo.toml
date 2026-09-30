@@ -1,0 +1,30 @@
+[package]
+name = "arb-wasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Phase 7 (09-27 §4.1, 7b §3.4): the public playground's engine, a JSON facade over arb-core and
+# sim. Features are declared here explicitly so a lone wasm32 build and `cargo test --workspace`
+# parse and print identically.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arb-core = { path = "../arb-core" }
+sim = { path = "../sim" }
+rust_decimal = { workspace = true, features = ["serde-with-str"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+
+# The only exact pin in the workspace: the wasm-bindgen CLI (scripts/build-wasm.sh, plan 7b-B)
+# must be this same version.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
