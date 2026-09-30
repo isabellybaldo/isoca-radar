@@ -7,6 +7,19 @@ use arb_core::fee::FeeSchedule;
 use arb_core::money::{Price, Shares};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Read access to the engine's YES books. It lives here, not in `trader`, so the pure fill
+/// functions below never refer back to the trader (7b §3.2); `trader` re-exports it.
+pub trait Books {
+    fn yes_book(&self, yes_token: &str) -> Option<&Book>;
+}
+
+impl Books for HashMap<String, Book> {
+    fn yes_book(&self, yes_token: &str) -> Option<&Book> {
+        self.get(yes_token)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderFill {

@@ -437,3 +437,19 @@ fn multi_level_books_never_size_past_the_budget() {
         "case D: reserve should be 72.50103"
     );
 }
+
+#[test]
+fn settle_is_public_and_rounds_like_the_policy() {
+    use arb_core::money::{Price, Shares};
+    use sim::policy::{Settle, settle};
+    let lv: Vec<(Price, Shares)> = vec![(p("0.33"), Shares::parse("100").unwrap())];
+    let at = |q: Decimal| walk_cost(&lv, q, FeeSchedule::ZERO, false).map(|(c, w)| (c, vec![w]));
+    // 0.33 × size has ≤ 2 dp only for whole sizes: 7.5 settles to 7 at the same limit
+    assert_eq!(settle(&at, d("7.5"), d("5")), Ok((d("7"), vec![p("0.33")])));
+    assert_eq!(settle(&at, d("4.9"), d("5")), Err(Settle::TooSmall));
+    assert_eq!(
+        settle(&at, d("101"), d("5")),
+        Err(Settle::BadInput),
+        "past the book's depth"
+    );
+}

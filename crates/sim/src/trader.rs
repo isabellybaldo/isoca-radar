@@ -18,16 +18,9 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// Read access to the engine's YES books.
-pub trait Books {
-    fn yes_book(&self, yes_token: &str) -> Option<&Book>;
-}
-
-impl Books for HashMap<String, Book> {
-    fn yes_book(&self, yes_token: &str) -> Option<&Book> {
-        self.get(yes_token)
-    }
-}
+/// Read access to the engine's YES books: defined in `venue` (7b §3.2), re-exported here so
+/// `sim::trader::Books` keeps working for the scanner.
+pub use crate::venue::Books;
 
 #[derive(Debug, Clone)]
 struct Pending {
