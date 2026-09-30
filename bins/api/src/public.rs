@@ -10,11 +10,18 @@ use cards::edge::LADDER;
 use cards::ladder::BreakEven;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Category buckets kept in `ladder.markets`, most executed first (§5.1).
 pub const PUBLIC_MAX_CATEGORIES: usize = 20;
 /// A bigger file is never written: the run is skipped with a log line (§5.1).
 pub const PUBLIC_MAX_BYTES: usize = 64 * 1024;
+pub const PUBLIC_FILE: &str = "public.json";
+pub const PUBLIC_TMP: &str = "public.json.tmp";
+/// The first run waits this long after start (§4).
+pub const PUBLIC_FIRST_S: u64 = 30;
 
 #[derive(Debug, Serialize)]
 pub struct PublicSnapshot {
@@ -190,6 +197,55 @@ pub fn to_bytes(snap: &PublicSnapshot) -> Result<Vec<u8>, String> {
         return Err(format!("{} bytes, over 64 KiB", bytes.len()));
     }
     Ok(bytes)
+}
+
+/// Write `bytes` to `dir/public.json.tmp`, fsync it, call `before_rename` (tests inject a failure
+/// or look at the files there), rename it over `dir/public.json`, then fsync the directory (unix).
+/// Readers only ever see the old file or the new one; a failure before the rename leaves the old
+/// file as it was.
+pub fn write_atomic_with(
+    dir: &Path,
+    bytes: &[u8],
+    before_rename: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let tmp = dir.join(PUBLIC_TMP);
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o644); // nginx (another uid) reads it through a read-only mount (7b-B)
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    before_rename(&tmp)?;
+    std::fs::rename(&tmp, dir.join(PUBLIC_FILE))?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+pub fn write_atomic(dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with(dir, bytes, |_| Ok(()))
+}
+
+/// Where and how often the task writes; no PUBLIC_DIR means no task at all (§4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriterPlan {
+    pub dir: PathBuf,
+    pub first: Duration,
+    pub every: Duration,
+}
+
+pub fn writer_plan(cfg: &crate::config::Config) -> Option<WriterPlan> {
+    cfg.public_dir.as_ref().map(|d| WriterPlan {
+        dir: PathBuf::from(d),
+        first: Duration::from_secs(PUBLIC_FIRST_S),
+        every: Duration::from_secs(u64::from(cfg.public_every_s)),
+    })
 }
 
 #[cfg(test)]
@@ -458,5 +514,110 @@ mod tests {
         let m = build(ladder, today, 1).ladder.markets;
         assert_eq!(m.len(), 1, "only the good row: {m:?}");
         assert_eq!(m[0].dimension, "all");
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ct_public_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn bytes_go_to_the_tmp_file_and_the_visible_file_changes_only_by_the_rename() {
+        let d = tmp_dir("rename");
+        write_atomic(&d, b"old").unwrap();
+        write_atomic_with(&d, b"new", |tmp| {
+            assert_eq!(tmp, d.join(PUBLIC_TMP));
+            assert_eq!(std::fs::read(tmp).unwrap(), b"new");
+            assert_eq!(
+                std::fs::read(d.join(PUBLIC_FILE)).unwrap(),
+                b"old",
+                "not yet visible"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(d.join(PUBLIC_FILE)).unwrap(), b"new");
+        assert!(
+            !d.join(PUBLIC_TMP).exists(),
+            "the rename consumed the tmp file"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_leaves_the_old_file_byte_identical() {
+        let d = tmp_dir("fail");
+        write_atomic(&d, b"{\"v\":1,\"old\":true}").unwrap();
+        let before = std::fs::read(d.join(PUBLIC_FILE)).unwrap();
+        let r = write_atomic_with(&d, b"{\"v\":1,\"new\":true}", |_| {
+            Err(std::io::Error::other("injected"))
+        });
+        assert_eq!(r.unwrap_err().to_string(), "injected");
+        assert_eq!(std::fs::read(d.join(PUBLIC_FILE)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_missing_directory_is_an_error_not_a_panic() {
+        let d = std::env::temp_dir().join(format!("ct_public_{}_absent", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(write_atomic(&d, b"x").is_err());
+    }
+
+    #[test]
+    fn a_leftover_longer_tmp_is_truncated_not_reused() {
+        let d = tmp_dir("leftover");
+        let long = b"{\"v\":1,\"a much longer body from a run that failed\":true}";
+        let failed = write_atomic_with(&d, long, |_| Err(std::io::Error::other("injected")));
+        assert!(failed.is_err());
+        write_atomic(&d, b"{\"v\":1}").unwrap();
+        assert_eq!(std::fs::read(d.join(PUBLIC_FILE)).unwrap(), b"{\"v\":1}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_readable_by_nginx_s_uid() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp_dir("mode");
+        write_atomic(&d, b"{}").unwrap();
+        let mode = std::fs::metadata(d.join(PUBLIC_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn no_public_dir_means_no_writer() {
+        let cfg = |pairs: &[(&str, &str)]| {
+            let m: BTreeMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            crate::config::Config::from_lookup(|k| m.get(k).cloned()).unwrap()
+        };
+        let url = (
+            "DATABASE_URL",
+            "postgres://analyze_ro:pw@postgres/cute_trading",
+        );
+        assert_eq!(writer_plan(&cfg(&[url])), None);
+        assert_eq!(writer_plan(&cfg(&[url, ("PUBLIC_DIR", "")])), None);
+        assert_eq!(
+            writer_plan(&cfg(&[url, ("PUBLIC_DIR", "/var/lib/ct-public")])),
+            Some(WriterPlan {
+                dir: PathBuf::from("/var/lib/ct-public"),
+                first: Duration::from_secs(30),
+                every: Duration::from_secs(300),
+            })
+        );
     }
 }
