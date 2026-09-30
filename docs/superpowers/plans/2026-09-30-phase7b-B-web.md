@@ -11,6 +11,8 @@
 
 > **Ruling (controller, 2026-09-30, Task 10 review):** `depth_walk_json`'s `levels` are the **asks of the outcome being bought** (NO asks for `rule: "no"`), **cheapest first**; they are NOT YES-book levels. Non-ascending levels return `{"error":"levels must be cheapest first"}` (fixture `descending-levels`). Episode boundary fixtures `tx-at-close` and `tx-at-update` pin t_x == close_ms → captured "0" and t_x == an update's t_ms → that update's net.
 
+> **Contract note (controller, 2026-09-30, Task 11 review):** `basket_json`'s `cash.fees` = buy fees + unwind fees + the conversion fee (e.g. `no-convert-fee-50` → fees "0.5"; `no-convert-fee-10000` → fees "100", convert_back "0"). The facade plans exactly as `sim::policy::decide` for open books the page can produce; a crossed open book or an open leg without the side it buys is outside section f's controls.
+
 ## Contract used from 7b-A
 
 The contract is `docs/superpowers/plans/2026-09-30-phase7b-A-rust.md` § "Contract for 7b-B" (authoritative; its code was compiled and tested), and the fixture cases in its Tasks 9–11. `web/src/wasm/types.ts` and `web/src/math/snapshot.ts` copy it. What 7b-B reads or sends:

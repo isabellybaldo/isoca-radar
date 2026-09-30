@@ -6406,6 +6406,9 @@ out {"kind": "yes"|"no", "min_order": Dec, "q_open": Dec, "q_target": Dec,
 - Errors (exact sentences): `unknown kind "<k>"`; `a basket has 2 to 4 legs`; `q_request "<s>" must be above 0 and at most 1,000,000, with at most 6 decimals` (same for `min_order`); `convert_fee_bips "<s>" is not a decimal`; `convert_fee_bips must be 0 to 10,000`; `convert_fee_bips applies to a NO basket only`; `the basket has no edge at open after fees, so the policy would not trade`; `the book at open is too thin for <min_order> shares`; `q_request must be at least the minimum order of <min_order> shares`; `the book at open can't be quoted at that size`; plus the Level/Fee sentences: `price "<p>" must be 0.01 to 0.99 in steps of 0.01`, `size "<s>" must be above 0 and at most 1,000,000, with at most 6 decimals`, `two levels at the same price <p>`, `at most 8 levels per side`, `fee rate "<r>" is not a decimal`, `fee: <FeeError>`.
 - The default of section f (`no-all-fill` in the fixture): YES bids 0.40 / 0.35 / 0.30 × 100, asks a tick up, `t_x` and `unwind` books = open, `q_request "50"` → `net_cash "2.5"`. "The usual burst" (`no-one-leg-empty-burst`): leg 1's `t_x` book without bids, every unwind book's asks 5 ticks up → `q_eff "0"`, `net_cash "-6"`.
 
+
+> **Contract note (controller, 2026-09-30, Task 11 review):** `basket_json`'s `cash.fees` = buy fees + unwind fees + the conversion fee (e.g. `no-convert-fee-50` → fees "0.5"; `no-convert-fee-10000` → fees "100", convert_back "0"). The facade plans exactly as `sim::policy::decide` for open books the page can produce; a crossed open book or an open leg without the side it buys is outside section f's controls.
+
 **`/math-data/public.json`** (`PublicSnapshot`, written by the api every 300 s, at most 64 KiB):
 
 ```
