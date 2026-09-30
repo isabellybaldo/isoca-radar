@@ -1,5 +1,5 @@
 //! 7b §3.3, the replay identity check: replay one capture directory with a policies file through
-//! the engine and the paper trader, and write every paper fill, exec and ledger row, one per line,
+//! the engine and the paper trader, and write every paper row (intent, exec, fill, ledger, markout, account), one per line,
 //! in the order the trader emitted them. `scripts/replay-identity.sh` runs this same file at the
 //! base commit and at the branch and compares the two dumps' sha256.
 //!     cargo run -p scanner --example replay_dump -- <capture dir> <scanner.toml> <policies.toml> <out>
@@ -40,10 +40,12 @@ fn main() -> anyhow::Result<()> {
     let stats = replay_dir_paper_with(Path::new(dir), ctx, Some(trader), |o| {
         if let Out::Paper(s) = o {
             let line = match *s {
-                SimOut::Fill(f) => format!("fill {f:?}"),
+                SimOut::Intent(i) => format!("intent {i:?}"),
                 SimOut::Exec(e) => format!("exec {e:?}"),
+                SimOut::Fill(f) => format!("fill {f:?}"),
                 SimOut::Ledger(l) => format!("ledger {l:?}"),
-                _ => return,
+                SimOut::Markout(m) => format!("markout {m:?}"),
+                SimOut::Account(a) => format!("account {a:?}"),
             };
             let _ = writeln!(dump, "{line}");
             rows += 1;

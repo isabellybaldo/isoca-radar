@@ -2,7 +2,8 @@
 # 7b §3.3: the sim extraction changes no paper row. Replays one capture directory at BASE (default
 # main) and at the working tree with the same harness (bins/scanner/examples/replay_dump.rs, copied
 # into a temporary worktree of BASE) and the same scanner.toml and policies.toml, then compares the
-# dumps: in emission order and sorted. Prints IDENTICAL and exits 0, or DIFFERENT and exits 1.
+# dumps (every paper row: intent, exec, fill, ledger, markout, account) in emission order and sorted,
+# plus each side's frames/parse_errors/paper_rows line. Prints IDENTICAL and exits 0, or DIFFERENT and exits 1.
 #   scripts/replay-identity.sh <capture dir> [base ref]
 set -euo pipefail
 CAP="$(cd "$1" && pwd)"
@@ -21,9 +22,9 @@ cp "$ROOT/bins/scanner/examples/replay_dump.rs" "$WORK/base/bins/scanner/example
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 for side in base head; do
   if [ "$side" = base ]; then SRC="$WORK/base"; else SRC="$ROOT"; fi
-  echo "== $side: $(git -C "$SRC" log -1 --format='%h %s')"
+  echo "== $side: $(git -C "$SRC" log -1 --format='%H %s')"
   (cd "$SRC" && cargo run -q -p scanner --example replay_dump -- \
-    "$CAP" "$ROOT/config/scanner.toml" "$ROOT/config/policies.toml" "$WORK/$side.txt")
+    "$CAP" "$ROOT/config/scanner.toml" "$ROOT/config/policies.toml" "$WORK/$side.txt") | tee "$WORK/$side.stats"
 done
 ROWS="$(wc -l < "$WORK/head.txt" | tr -d ' ')"
 if [ "$ROWS" -eq 0 ]; then
@@ -34,9 +35,10 @@ for side in base head; do
   sort "$WORK/$side.txt" > "$WORK/$side.sorted"
   echo "$side rows $(wc -l < "$WORK/$side.txt" | tr -d ' ') order $(sha256sum < "$WORK/$side.txt" | cut -c1-16) sorted $(sha256sum < "$WORK/$side.sorted" | cut -c1-16)"
 done
-if cmp -s "$WORK/base.txt" "$WORK/head.txt" && cmp -s "$WORK/base.sorted" "$WORK/head.sorted"; then
+if cmp -s "$WORK/base.stats" "$WORK/head.stats" && cmp -s "$WORK/base.txt" "$WORK/head.txt" && cmp -s "$WORK/base.sorted" "$WORK/head.sorted"; then
   echo IDENTICAL
 else
+  diff "$WORK/base.stats" "$WORK/head.stats" || true
   diff "$WORK/base.txt" "$WORK/head.txt" | head -20 || true
   echo DIFFERENT
   exit 1
