@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod book;
+pub mod classify;
 pub mod detect;
 pub mod episode;
 pub mod fee;
