@@ -1,5 +1,7 @@
 # The /math page as a story, then a playground (design)
 
+Amended 2026-10-01 after the build: chapter 3's own drawing, the folded word list, and the wording fixes of the whole-branch review.
+
 Date: 2026-10-01. Status: design approved in conversation by the owner; this file is the written spec, amended after an independent review that ran every preset through the real engine.
 Builds on: `2026-09-30-phase7b-math-playground-design.md` (7b) and `2026-09-27` §5–§6. Web only: no change to the engine (`crates/arb-wasm`), the api, the snapshot, nginx, Traefik labels or compose.
 
@@ -32,7 +34,7 @@ Owner's choices in the brainstorm: story first and playground last; chapters sta
 header        h1  isoca-radar · math
 hook          four sentences (§5.0)
 STORY         chapters 1–7, each a `section.m-ch` (ids s1…s7), each with an h2
-PLAYGROUND    `section#play`: h2 "Try it yourself", one line, the word list (§6), then sections a–f (each an h3)
+PLAYGROUND    `section#play.m-play`: h2 "Try it yourself", one line, the word list (§6) in a closed fold, then sections a–f (each an h3)
 footer        unchanged
 ```
 
@@ -51,19 +53,19 @@ The live strip ("today (UTC) on the live scanner") moves from under the header i
 ```
 
 - The switch is the existing `Seg` control (two options, `aria-pressed`), 44 px high. The first option is selected on load.
-- The drawing is the same schematic the playground section uses, fed by `call(engine, export, preset[state])`. No sliders, no reset. A fold that is part of a schematic (the mirrored book's "every level", the ladder's folds) stays, closed.
+- The drawing is the same schematic the playground section uses, fed by `call(engine, export, preset[state])`, except in chapter 3, which has a drawing of its own (§5.1). No sliders, no reset. A fold that is part of a schematic (the mirrored book's "every level", the ladder's folds) stays, closed.
 - The takeaway is chosen from the engine's output for the state shown (§5). If the engine answers with an error, the chapter shows the engine's sentence (the existing `Out`) and no takeaway.
 - No chapter owns a timer or a request.
 
 ### 3.2 Engine and snapshot states
 
 - **Prose always.** Every chapter's heading and lead, the playground's heading, its line and the word list render at once, with or without the engine, so the story reads where WebAssembly fails.
-- **Engine loading:** the page's one loading line, once, above the story. Chapters 1–6 show no switch, drawing or takeaway. Sections a–f are not rendered.
-- **Engine failed:** the one `ENGINE_FAILED` sentence, once, above the story. Chapters 1–6 show prose only. Sections a–f are not rendered.
+- **Engine loading:** the page's one loading line, once, above the story. Chapters 1–6 show no switch, engine drawing or takeaway. Chapter 3 still shows the count line and the strip, and chapter 7 the ladder: they come from the snapshot, not the engine. Sections a–f are not rendered.
+- **Engine failed:** the one `ENGINE_FAILED` sentence, once, above the story. Chapters 1–6 show prose only, with chapter 3's count line and strip; chapter 7 shows the ladder. Sections a–f are not rendered.
 - **Snapshot loading:** chapter 3 shows no strip and chapter 7 no ladder; nothing else changes.
 - **Snapshot missing, or a live part threw:** the existing `live numbers unavailable` line stands in for the strip in chapter 3 and for the ladder in chapter 7, so it can appear twice. This is intended, and the tests that pinned "exactly once" change to "once in each of the two places".
 - **Snapshot stale:** unchanged (`the live writer is behind`).
-- **Cold link** (`/math#d`, `/math#play`): the page scrolls to the target once, after the engine is ready **and** the snapshot has settled (ok or missing), so the strip and the ladder arriving late do not push the target away. `#s1`–`#s7` are not link targets (no cold scroll for them).
+- **Cold link** (`/math#d`, `/math#play`): the page scrolls to the target once, after the engine is ready **and** the snapshot has settled (ok or missing), so the strip and the ladder arriving late do not push the target away. `#s1`–`#s7` are not cold-link targets (no cold scroll for them; they do carry `scroll-margin-top`, which is harmless).
 
 ## 4. Presets
 
@@ -98,11 +100,11 @@ Q* on this page is `q_star` (`depth_walk_json`, `classify_json`). `basket_json.q
 
 ## 5. Copy
 
-Drafts, checked by the review against the engine and the code. An implementer may change a sentence only to keep it true of the engine's output or to pass the honesty checks, and says so in the report. No exclamation marks; the page's dry tone.
+Drafts, checked by the review against the engine and the code. An implementer may change a sentence only to keep it true of the engine's output or to pass the honesty checks, and says so in the report. No exclamation marks; the page's dry tone. Typographic apostrophes (’) are the house style for the copy.
 
 ### 5.0 Hook (replaces the tagline; `math.html`'s meta description says the same in one sentence)
 
-> Sometimes the prices of every outcome of an event add up to less than the one dollar the winner pays. In theory, that gap is free money. This page shows how a scanner finds it, sizes it and times it, and what can go wrong between seeing it and holding it. Every drawing runs the scanner's own Rust code, compiled to WASM.
+> Sometimes the prices of every outcome of an event add up to less than the one dollar the winner pays. In theory, that gap is free money. This page shows how a scanner finds it, sizes it and times it, and what can go wrong between seeing it and holding it. Chapters 1 to 6 run the scanner’s own Rust code, compiled to WASM; chapter 7 shows its live paper accounts.
 
 ### 5.1 Chapters
 
@@ -117,7 +119,8 @@ Drafts, checked by the review against the engine and the code. An implementer ma
 
 3. **When is that free money?**
    Lead: "A complete basket always pays one dollar. When its prices add up to less, the difference, on every basket the books can fill, is the edge, written Π: money on the table before anyone has traded. Buying one NO share of each works too: all but one of them pay, whoever wins, and the edge is there when the YES bids add up to more than one dollar."
-   Takeaway, no signal: "At exactly one dollar there is nothing to take." Signal: "The scanner runs this check each time a price moves."
+   The drawing is the chapter's own (`PriceStack`): the preset's three best asks laid end to end against the one-dollar line, the gap up to the line as its own dashed shape with a mark above it. Its labels are the price strings and the words "one dollar"; no sum and no difference is shown as text. Under it, the engine's verdict line (`ClassifyTree` with `path={false}`: where classify ends, and the net "on the table" when there is a signal). The decision tree itself is in section c only.
+   Takeaway, no signal: "At exactly one dollar there is nothing to take." Signal: "The gap, on every basket the books can fill, is the edge. The scanner runs this check each time a price moves."
    Then, under the takeaway: "The scanner counts each stretch an edge stays open as one episode. Today's count:" followed by the live strip (or the unavailable line; nothing while the snapshot loads, in which case the sentence is not shown either).
 
 4. **How much of it is there?**
@@ -135,19 +138,19 @@ Drafts, checked by the review against the engine and the code. An implementer ma
 
 7. **So does it pay?**
    Lead: "The live scanner keeps six paper accounts that differ only in latency, from the fastest rung to the slowest, and settles every trade by the rules of chapter 6."
-   The live ladder (unchanged component: its own headline, drawing and folds), or the unavailable line, or nothing while the snapshot loads.
+   The live ladder (its own headline, drawing and folds), or the unavailable line, or nothing while the snapshot loads. At the start of an epoch, before any ladder account has a mark, the ladder says so: "no marks yet", "No ladder account has a mark in this epoch yet." (it does not say that a rung has no account: the six accounts exist).
    Under the ladder, only when the ladder is drawn, one dim line: "extras: one account whose matching is slower and slows further when the feed is busy, and one that ignores a market's own order delay." (Checked against `config/policies.toml`; "six" is `LADDER`'s length there, and the test reads it from the file.)
    Takeaway (fixed, true whatever the data): "Every figure here is on paper. No order was ever sent."
 
 ### 5.2 Playground
 
-Heading (h2) "Try it yourself". Line: "The same six drawings, with every control. Nothing you do here is recorded or sent anywhere."
+Heading (h2) "Try it yourself". Line: "The engine behind each chapter, with every control. Nothing you do here leaves your browser." (Chapter 3 and section c draw different things, and a fold's open state is kept in the browser's storage.) Then the word list (§6), in a closed fold.
 Section titles (now h3) become the chapter's subject, keeping the letter: `a · the book, twice`, `b · the basket's payoff`, `c · is this update an edge?`, `d · how much: the depth walk`, `e · how long: the episode`, `f · one leg misses`. Under each title, a dim back-reference as plain text, not a link: "chapter 1" … "chapter 6".
 Section e's caught line keeps saying "section f" (it is next to f there).
 
 ## 6. The word list
 
-A `<dl class="m-words">` at the top of the playground, one line each, in this order:
+A `<dl class="m-words">` inside a closed fold (`math:words`, labelled "the words used on this page") at the top of the playground, one line each, in this order:
 
 - **YES / NO share**: pays one dollar if the answer is yes / no.
 - **book, bid, ask**: the list of offers to buy (bids) and to sell (asks) one share type.
@@ -167,15 +170,17 @@ A `<dl class="m-words">` at the top of the playground, one line each, in this or
 New, under `web/src/math/story/`:
 - `Chapter.tsx`: the shell of §3.1 (number, question, lead, optional switch, children, takeaway).
 - `presets.ts`: §4's twelve inputs and chapter 3's two tick-built labels.
-- `Story.tsx`: the seven chapters, each a small component holding one `useState<0 | 1>`; takes `engine: Engine | null` and, for chapters 3 and 7, what `MathPage` knows about the snapshot.
+- `Story.tsx`: the seven chapters: one generic `Preset` component (holding one `useState<0 | 1>`) used six times, and chapter 7; takes `engine: Engine | null` and, for chapters 3 and 7, what `MathPage` knows about the snapshot.
+- `schematics/PriceStack.tsx` (chapter 3's drawing) and `stackSpans` in `schematics/geo.ts` (its geometry).
 - `Words.tsx`: §6.
 
 Changed:
 - `copy.ts`: hook, chapter copy, word list, section titles. `math.html`: the meta description.
 - `MathPage.tsx`: the order of §3; the strip and the ladder move into the story; the cold-link scroll of §3.2 (`#a`–`#f` and `#play`).
 - `sections/*.tsx`: export what the presets need (`crossed`, the builders); `episodeInput` takes the times; the episode's verdict, lines and two bar drawings become one exported `EpisodeView` used by section e and chapter 5; `LegMissSection` loses its `children` slot; `Section` renders an h3 and the back-reference.
-- `schematics/MirrorBooks.tsx`: one prop, default as today, that hides the `D1 long … short …` headline. No other schematic changes.
-- `math.css`: `.m-ch`, `.m-ch-n`, `.m-ch-lead`, `.m-ch-take`, `.m-words`, `#play`; every rule scoped to `.m-sec` that a chapter also needs (44 px `.seg` buttons and fold summaries, the frameless `.ll-svg` and folds, `scroll-margin-top`) covers `.m-ch` too; the live ladder's "the numbers" table keeps its first column on one line (`white-space: nowrap`: on the live page at 360 px the rung names broke mid-word).
+- `schematics/MirrorBooks.tsx`: `headline` (default as today; false hides the `D1 long … short …` line) and `foldId` (the story's copy remembers its fold apart from section a's). `schematics/ClassifyTree.tsx`: `path` (default as today; false leaves the list of tests out). No other schematic changes.
+- `lib/ladder.ts` (shared with the dashboard): a started epoch with no ladder rung marked has its own reason, `no_marks`; every other state is unchanged.
+- `math.css`: `.m-ch`, `.m-ch-n`, `.m-ch-lead`, `.m-ch-take`, `.m-words`, `.m-play`; every rule scoped to `.m-sec` that a chapter also needs (44 px `.seg` buttons and fold summaries, the frameless `.ll-svg` and folds, `scroll-margin-top`) covers `.m-ch` too; the live ladder's "the numbers" table keeps its first column on one line (`white-space: nowrap`: on the live page at 360 px the rung names broke mid-word).
 
 No new dependency. No change outside `web/` except this spec, the plan and a runbook.
 
