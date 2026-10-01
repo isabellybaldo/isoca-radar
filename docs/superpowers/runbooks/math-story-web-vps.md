@@ -40,7 +40,7 @@ if not: `OVER BUDGET` = `docker builder prune -f --keep-storage 5GB`, then run t
 ```bash
 cd /c/Users/Isabelly/PycharmProjects/cute-trading && export PATH="$HOME/.cargo/bin:$PATH" && ( set -o pipefail; sh scripts/build-wasm.sh 2>&1 | tail -5 ) && echo wasm-ok && cd web && npm ci --no-audit --no-fund >/dev/null && ( set -o pipefail; WASM_REQUIRED=1 npm test 2>&1 | grep -E '^ +(Test Files|Tests) ' ) && echo tests-ok && ( set -o pipefail; npm run build 2>&1 | grep -E 'B gzip|built in|^check-math-bundle|error' ) && echo build-ok
 ```
-→ expected: ``Finished `release` profile [optimized] target(s) in <t>``, the four package files (`arb_wasm.d.ts`, `arb_wasm.js`, `arb_wasm_bg.wasm`, `arb_wasm_bg.wasm.d.ts`), `wasm-ok`, `Test Files  <n> passed (<n>)`, `Tests  <n> passed | 1 skipped (<n>)` with no `failed` (the skipped one is the real-snapshot test, which runs only with `PUBLIC_JSON`; the counts grow with the suite: at least 76 files on 2026-10-01), `tests-ok`, `✓ built in <t>` twice (both typechecks are silent), three `<file>: <n> B gzip (<n> B raw)` lines (one `.wasm`, one `.js`, one `.css`), `math-assets total: <n> B gzip (limit 350000)` (any value up to 350000 passes; write it in Results), then `build-ok`.
+→ expected: ``Finished `release` profile [optimized] target(s) in <t>``, the four package files (`arb_wasm.d.ts`, `arb_wasm.js`, `arb_wasm_bg.wasm`, `arb_wasm_bg.wasm.d.ts`), `wasm-ok`, `Test Files  <n> passed (<n>)`, `Tests  <n> passed | 1 skipped (<n>)` with no `failed` (the skipped one is the real-snapshot test, which runs only with `PUBLIC_JSON`; the counts grow with the suite: at least 77 files on 2026-10-01), `tests-ok`, `✓ built in <t>` twice (both typechecks are silent), three `<file>: <n> B gzip (<n> B raw)` lines (one `.wasm`, one `.js`, one `.css`), `math-assets total: <n> B gzip (limit 350000)` (any value up to 350000 passes; write it in Results), then `build-ok`.
 if not: `build-wasm: the wasm-bindgen CLI is …` = the CLI is missing or another version: report (install only with the owner's OK, with the `cargo install` command that line prints), then this step again; `check-math-bundle: over the 350 KB gzip budget` or any other `check-math-bundle:` line = report the lines, do not build the image; a `failed` test, a tsc `error` line or a missing `tests-ok`/`build-ok` = fix on a branch, do not build the image.
 **STOP**
 
@@ -187,6 +187,6 @@ Note: only the `web:dev` tag moves back; `oauth2-proxy`, the api, the volume and
 - Gated paths (step 16): the twelve statuses:
 - Traversal probes (step 17): the eight statuses:
 - Chrome 1440 (step 18): the seven chapters and their switches, today's count in chapter 3, the ladder in chapter 7, `Try it yourself` and sections a–f, console, cold `#play`:
-- Chrome 360 (step 19): scroll check, switch labels, rung names in `the numbers`:
+- Chrome 360 (step 19): scroll check, switch labels, the price stack's labels in chapter 3, rung names in `the numbers`:
 - Dashboard `/` and `/paper` (step 20):
 - Rollback run (step 21): yes / no, and why:
