@@ -168,9 +168,16 @@ a–e as 09-27 §6.2, plus section e's caption: "caught is not filled: see f".
 
 | | Starts from | Controls | Draws |
 |---|---|---|---|
-| f · one leg misses | a 3-leg NO basket with a positive edge at open; the books at `t_x` equal the open ones and all legs are deep enough (the default result: all fill, a small positive `net_cash`) | per leg: drain the depth at `t_x` (slider to 0); move the unwind book against us by 0–20 ticks (for NO, the YES asks rise, which is the NO bids falling); `q_request`; fees on or off; "the usual burst" preset (one leg empty at `t_x`, the unwind book 5 ticks against us) | per leg: a bar for planned vs filled; `q_eff` as a line across the legs; each leg's excess as a block, split into sold (at the unwind price) and `held_unsold`; the big number `net_cash`: "caught, and lost $x" or "filled, $x on paper". Then the **live ladder** from the snapshot (`LatencyLadder`, read-only, with its own "which markets" fold holding the category grid), headed "on the live scanner, as of …" |
+| f · one leg misses | a 3-leg NO basket with a positive edge at open; the books at `t_x` equal the open ones and all legs are deep enough (the default result: all fill, a small positive `net_cash`) | per leg: drain the depth at `t_x` (slider to 0); move the unwind book against us by 0–20 ticks (for NO, the YES asks rise, which is the NO bids falling); `q_request`; fees on or off; "the usual burst" preset (one leg empty at `t_x`, the unwind book 5 ticks against us) | per leg: a bar for planned vs filled; `q_eff` as a line across the legs; each leg's excess as a block, split into sold (at the unwind price) and `held_unsold`; the big line built from `net_cash` and what happened (amended 2026-10-01, see below). Then the **live ladder** from the snapshot (`LatencyLadder`, read-only, with its own "which markets" fold holding the category grid), headed "on the live scanner, as of …" |
 
 - Every control change calls `basket_json` synchronously, once per animation frame while dragging (as 09-27).
+- **f's big line (amended 2026-10-01).** The first draft chose between "caught, and lost $x" and "filled, $x on paper" by the sign of `net_cash`. That is false whenever cash is out but shares are still held, such as a fully filled YES basket or an unsold excess. The line now has two halves, and the page does no arithmetic:
+  - **Word:** "caught" if any leg has excess; otherwise "nothing filled" if `q_eff` is 0; otherwise "filled".
+  - **Money phrase:**
+    - "and lost $x on paper" when the net is negative and nothing is held;
+    - "$x out on paper, shares still held" when the net is negative and shares or a resolution value remain;
+    - "+$x on paper" otherwise.
+- **f's unwind wording** tells the two zero-fill cases apart: "under the minimum, no order went out" and "no buyer in the book".
 - **f's caption** names `sim::policy::settle` and `sim::venue::basket_buy` / `unwind_sell` and says: "the same rules the paper accounts on the live scanner use; here the unwind happens at one instant, the live sim waits the account's delay".
 
 ### 6.3 The snapshot on the page
