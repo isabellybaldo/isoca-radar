@@ -1,7 +1,11 @@
 // Spec 7b §7, §5.3, §9 (09-27 §4.2–§5.3): the checked-in build and deploy files carry what the public page
 // needs. Plain text checks, read with node fs (as theme.test.ts reads theme.css); CRLF normalized.
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+// @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+// @ts-ignore: node:os, as above
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
 declare const process: { cwd(): string };
@@ -73,23 +77,62 @@ describe('web image (09-27 §4.2)', () => {
     expect(web).not.toMatch(/wasm-bindgen-cli[^\n]*\d+\.\d+\.\d+/);
   });
 
-  it('ships math.html and math-assets from dist, and creates the read-only mount point for the snapshot volume', () => {
+  it('ships math.html and math-assets from dist, exposes both server ports, and leaves the mount point to Docker', () => {
     const web = repo('docker/web.Dockerfile');
     expect(web).toContain('COPY --from=build /web/dist /usr/share/nginx/html');
-    expect(web).toContain('mkdir -p /srv/ct-public-root/math-data');
-    expect(web.trimEnd().split('\n').pop()).not.toBe('USER root');
-    expect(web).toMatch(/USER 101\nEXPOSE 8080/);
+    expect(web).not.toContain('mkdir');
+    expect(web).not.toContain('USER root');
+    expect(web).toMatch(/USER 101\n(?:#[^\n]*\n)?EXPOSE 8080 8081\n?$/);
+  });
+
+  it('the wasm-bindgen version script reads a CRLF Cargo.lock (a Windows checkout is the Docker build context)', () => {
+    const dir = mkdtempSync(`${tmpdir()}/wbg-`) as string;
+    mkdirSync(`${dir}/scripts`);
+    writeFileSync(`${dir}/scripts/wasm-bindgen-version.sh`, repo('scripts/wasm-bindgen-version.sh'));
+    const lock = '[[package]]\nname = "wasm-bindgen"\nversion = "9.8.7"\nsource = "registry"\n\n[[package]]\nname = "wasm-bindgen-macro"\nversion = "9.8.7"\n';
+    for (const eol of ['\n', '\r\n']) {
+      writeFileSync(`${dir}/Cargo.lock`, lock.replace(/\n/g, eol));
+      const out = execFileSync('sh', [`${dir}/scripts/wasm-bindgen-version.sh`], { encoding: 'utf8' }) as string;
+      expect(out, JSON.stringify(eol)).toBe('9.8.7\n');
+    }
   });
 });
 
 describe('nginx (09-27 §5.2, 7b §5.3)', () => {
-  it('serves /math, /math-assets/ from .gz files, and from the volume only the exact public.json', () => {
+  /** The body of each `server { … }` block, by listen port (the blocks have no nested braces beyond locations). */
+  const servers = (): Record<string, string> => {
     const n = repo('docker/web/nginx.conf');
-    expect(n).toMatch(/location = \/math \{[^}]*add_header Cache-Control "no-cache";[^}]*try_files \/math\.html =404;/);
-    expect(n).toMatch(/location \/math-assets\/ \{[^}]*immutable[^}]*gzip_static on;[^}]*try_files \$uri =404;/);
-    expect(n).toMatch(/location = \/math-data\/public\.json \{[^}]*root \/srv\/ct-public-root;[^}]*max-age=60[^}]*gzip on;[^}]*gzip_types application\/json;[^}]*try_files \$uri =404;/);
-    expect(n).not.toMatch(/location \/math-data/);
-    expect(n.indexOf('location = /math-data/public.json')).toBeLessThan(n.indexOf('location / {'));
+    const out: Record<string, string> = {};
+    for (const m of n.matchAll(/^server \{\n([\s\S]*?)\n\}$/gm)) {
+      const port = /listen (\d+);/.exec(m[1])?.[1] ?? '';
+      expect(out[port], `two servers on ${port}`).toBeUndefined();
+      out[port] = m[1];
+    }
+    return out;
+  };
+  const locations = (body: string): string[] => [...body.matchAll(/^ {4}location (.*) \{$/gm)].map((m) => m[1]);
+
+  it('the public server (8081) has exactly /math, /math-assets/, the exact public.json and a 404 catch-all', () => {
+    const s = servers();
+    expect(Object.keys(s).sort()).toEqual(['8080', '8081']);
+    const p = s['8081'];
+    expect(locations(p)).toEqual(['= /math', '/math-assets/', '= /math-data/public.json', '/']);
+    expect(p).toMatch(/location = \/math \{[^}]*root \/usr\/share\/nginx\/html;[^}]*add_header Cache-Control "no-cache";[^}]*try_files \/math\.html =404;/);
+    expect(p).toMatch(/location \/math-assets\/ \{[^}]*root \/usr\/share\/nginx\/html;[^}]*immutable[^}]*gzip_static on;[^}]*try_files \$uri =404;/);
+    expect(p).toMatch(/location = \/math-data\/public\.json \{[^}]*root \/srv\/ct-public-root;[^}]*disable_symlinks on;[^}]*max-age=60[^}]*gzip on;[^}]*gzip_types application\/json;[^}]*try_files \$uri =404;/);
+    expect(p).toMatch(/location \/ \{\n\s*return 404;\n\s*\}/);
+    expect(p).toContain('gzip_vary on;');
+    // no server-level root, no index, no other root than the two the locations need
+    const outside = p.replace(/ {4}location [\s\S]*?\n {4}\}/g, '').replace(/^\s*#.*$/gm, '');
+    expect(outside).not.toMatch(/\broot\b|\bindex\b|try_files/);
+    expect(p.match(/^\s*root /gm)).toHaveLength(3);
+    expect(repo('docker/web/nginx.conf').match(/root \/srv\/ct-public-root;/g)).toHaveLength(1);
+  });
+
+  it('the login-gated server (8080) has no math location and no volume root', () => {
+    const main = servers()['8080'];
+    expect(locations(main)).toEqual(['/assets/', '/']);
+    expect(main).not.toMatch(/math|ct-public-root/);
   });
 
   it('sets no security header itself (Traefik does), so the per-location add_header loses none', () => {
@@ -107,7 +150,7 @@ describe('compose.web.yml (7b §5.3)', () => {
 
   it('mounts the snapshot volume read-only into web and still read-write into the api', () => {
     const y = repo('compose.web.yml');
-    expect(web()).toContain('- public-data:/srv/ct-public-root/math-data:ro');
+    expect(web()).toContain('- public-data:/srv/ct-public-root/math-data:ro,nocopy');
     expect(y).toContain('      - public-data:/var/lib/ct-public\n');
     expect(y).toMatch(/^volumes:\n(?: {2}\S.*\n)*? {2}public-data:/m);
     // the runbook's grep -c public-data: 3 before this task (api comment, api mount, declaration), 4 with the web mount
@@ -120,7 +163,8 @@ describe('compose.web.yml (7b §5.3)', () => {
       'routers.ct-math.rule=Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))',
       'routers.ct-math.entrypoints=websecure',
       'routers.ct-math.tls.certresolver=letsencrypt',
-      'routers.ct-math.service=ct-web',
+      'routers.ct-math.service=ct-math',
+      'services.ct-math.loadbalancer.server.port=8081',
       'routers.ct-math.priority=1000',
       'routers.ct-math.middlewares=ct-math-rl@docker,ct-math-if@docker,ct-sec@docker,ct-math-csp@docker',
       'middlewares.ct-math-rl.ratelimit.average=5',
@@ -133,7 +177,8 @@ describe('compose.web.yml (7b §5.3)', () => {
     for (const l of lines) expect(w, l).toContain(`traefik.http.${l}`);
     expect(w).not.toMatch(/ct-math\.middlewares=[^\n]*ct-auth/);
     expect(w).toContain('traefik.http.routers.ct-web.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker');
-    expect(w.match(/ct-math/g)).toHaveLength(15);
+    expect(w).toContain('traefik.http.routers.ct-web.service=ct-web');
+    expect(w.match(/ct-math/g)).toHaveLength(17);
   });
 
   it('keeps login on every other router and the dashboard CSP unchanged', () => {
@@ -143,10 +188,27 @@ describe('compose.web.yml (7b §5.3)', () => {
     expect(mw('ct-web')).toBe('ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker');
     expect(mw('ct-oauth')).toBe('ct-rl@docker,ct-sec@docker,ct-csp@docker');
     expect(y).toContain("contentSecurityPolicy=default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com;");
-    expect(y).not.toContain('wasm-unsafe-eval; ');
-    // ct-math is the only router without ct-auth that is not oauth2-proxy's own, and ct-sec exists for it to name
+    expect(y).toContain(
+      `traefik.http.middlewares.ct-csp.headers.contentSecurityPolicy=default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"`,
+    );
+    // only ct-math's CSP allows wasm
+    expect(y.split('\n').filter((l) => l.includes('contentSecurityPolicy') && l.includes('wasm-unsafe-eval'))).toHaveLength(1);
     expect(y).toContain('traefik.http.middlewares.ct-sec.headers.stsSeconds=31536000');
-    const noAuth = [...y.matchAll(/routers\.([\w-]+)\.middlewares=(\S+)/g)].filter((m) => !m[2].includes('ct-auth')).map((m) => m[1]);
-    expect(noAuth.sort()).toEqual(['ct-http', 'ct-math', 'ct-oauth']);
+    // every router (by its rule label) is accounted for: only these carry no ct-auth, and none lacks a middlewares label
+    const routers = [...y.matchAll(/routers\.([\w-]+)\.rule=/g)].map((m) => m[1]).sort();
+    expect(routers).toEqual(['ct-api', 'ct-http', 'ct-math', 'ct-oauth', 'ct-web']);
+    const noAuth = routers.filter((r) => !mw(r).includes('ct-auth'));
+    expect(noAuth).toEqual(['ct-http', 'ct-math', 'ct-oauth']);
+    expect(mw('ct-math')).not.toBe('');
+  });
+
+  it('names its service on every router of the web container (it now has two)', () => {
+    const w = web();
+    expect(w).toContain('traefik.http.routers.ct-web.service=ct-web');
+    expect(w).toContain('traefik.http.routers.ct-math.service=ct-math');
+    expect(w).toContain('traefik.http.services.ct-web.loadbalancer.server.port=8080');
+    expect(w).toContain('traefik.http.services.ct-math.loadbalancer.server.port=8081');
+    expect([...w.matchAll(/routers\.([\w-]+)\.rule=/g)]).toHaveLength(2);
+    expect([...w.matchAll(/routers\.([\w-]+)\.service=/g)]).toHaveLength(2);
   });
 });

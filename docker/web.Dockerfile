@@ -32,12 +32,10 @@ COPY web/ ./
 COPY --from=wasm /src/web/src/wasm/pkg ./src/wasm/pkg
 RUN npm run build
 
-# Unprivileged nginx (uid 101, port 8080): runs with a read-only root filesystem plus a /tmp tmpfs.
+# Unprivileged nginx (uid 101, ports 8080 and 8081): runs with a read-only root filesystem plus a /tmp tmpfs.
 FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
 COPY docker/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /web/dist /usr/share/nginx/html
-# 7b §5.3: mount point of the api's snapshot volume (read-only here); a read-only root filesystem needs it in the image
-USER root
-RUN mkdir -p /srv/ct-public-root/math-data
 USER 101
-EXPOSE 8080
+# 8080: the dashboard (login); 8081: the public /math server (nginx.conf). Neither is published on the host.
+EXPOSE 8080 8081

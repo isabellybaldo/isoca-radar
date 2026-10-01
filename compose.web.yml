@@ -4,7 +4,8 @@
 # the api directly, or let another compose project claim the `ct-oauth2-proxy` alias and bypass the
 # login). Kept out of compose.yml so local `docker compose up` never needs it.
 #   docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api web oauth2-proxy
-# Every router except oauth2-proxy's own /oauth2/* pages goes through forward-auth (spec §3).
+# Every router except oauth2-proxy's own /oauth2/* pages and the public /math, /math-assets/ and
+# /math-data/public.json paths (ct-math: its own nginx server, port 8081) goes through forward-auth (spec §3).
 # No secrets here: RADAR_DOMAIN and OAUTH2_PROXY_* come from the VPS-only .env.
 
 x-logging: &logging
@@ -64,10 +65,12 @@ services:
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]                # nginx-unprivileged binds >1024 and never chowns at runtime; needs none
     tmpfs: [/tmp]
-    # Phase 7b §5.3: the api's snapshot volume, read-only (nginx serves only public.json from it). The api
-    # mounted it first (7b-A), so the volume root keeps the image's 65532 owner.
+    # Phase 7b §5.3: the api's snapshot volume, read-only (nginx serves only public.json from it). nocopy:
+    # Docker copies the image directory's owner onto an EMPTY named volume even for :ro, so without it a
+    # web container created before the api wrote would leave the volume root-owned. The mount point itself
+    # is created by Docker (the image has none).
     volumes:
-      - public-data:/srv/ct-public-root/math-data:ro
+      - public-data:/srv/ct-public-root/math-data:ro,nocopy
     cpus: "0.1"
     mem_limit: 32m
     logging: *logging
@@ -79,8 +82,11 @@ services:
       - traefik.http.routers.ct-web.entrypoints=websecure
       - traefik.http.routers.ct-web.tls.certresolver=letsencrypt
       - traefik.http.routers.ct-web.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker
+      - traefik.http.routers.ct-web.service=ct-web
       - traefik.http.services.ct-web.loadbalancer.server.port=8080
-      # Phase 7b (09-27 §5.3, 7b §5.3): the public playground. Static files only, no ct-auth, per-IP rate and
+      # Phase 7b (09-27 §5.3, 7b §5.3): the public playground. Its own nginx server (8081) and Traefik service:
+      # the shared dashboard server would let /math-assets/..%2findex.html (Traefik keeps %2F encoded) reach
+      # the dashboard's files without login. Static files only, no ct-auth, per-IP rate and
       # in-flight limits (depth=0: DNS is a plain A record, no CDN), its own CSP with 'wasm-unsafe-eval'.
       # Any path it does not match still falls to ct-web (login).
       # In-flight is 8, not 4: a cold load fetches the js and css together, then the wasm and public.json
@@ -89,7 +95,8 @@ services:
       - "traefik.http.routers.ct-math.rule=Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))"
       - traefik.http.routers.ct-math.entrypoints=websecure
       - traefik.http.routers.ct-math.tls.certresolver=letsencrypt
-      - traefik.http.routers.ct-math.service=ct-web
+      - traefik.http.routers.ct-math.service=ct-math
+      - traefik.http.services.ct-math.loadbalancer.server.port=8081
       - traefik.http.routers.ct-math.priority=1000
       - traefik.http.routers.ct-math.middlewares=ct-math-rl@docker,ct-math-if@docker,ct-sec@docker,ct-math-csp@docker
       - traefik.http.middlewares.ct-math-rl.ratelimit.average=5
@@ -137,7 +144,8 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=ct_radar
-      # oauth2-proxy's own pages: the only route that answers without a session
+      # oauth2-proxy's own pages: the only dashboard route that answers without a session (the public /math
+      # paths are the other, on web)
       - "traefik.http.routers.ct-oauth.rule=Host(`${RADAR_DOMAIN}`) && PathPrefix(`/oauth2/`)"
       - traefik.http.routers.ct-oauth.entrypoints=websecure
       - traefik.http.routers.ct-oauth.tls.certresolver=letsencrypt
