@@ -22,7 +22,7 @@
 .m-verdict.neg { color: var(--salmon); }
 .m-verdict-line, .m-times { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .m-live { display: grid; gap: 4px; min-width: 0; }
-.m-live-n, .m-live-h { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.m-live-k, .m-live-n, .m-live-h { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .m-live-h { font-size: 15px; }
 .m-live-spark { height: 24px; min-width: 0; }
 .m-live-spark .spark { width: 100%; height: 100%; }

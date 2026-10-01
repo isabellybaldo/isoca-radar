@@ -74,6 +74,10 @@ type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 /** A safe integer >= 0: every count, every `*_ms` and every latency in the file. */
 const isInt = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
+/** An epoch-ms stamp: Date is valid only to 8.64e15, past that toISOString throws while the page renders. */
+export const MAX_MS = 8.64e15;
+const isMs = (x: unknown): x is number => isInt(x) && x <= MAX_MS;
+const isMsOrNull = (x: unknown): x is number | null => x === null || isMs(x);
 const isIntOrNull = (x: unknown): x is number | null => x === null || isInt(x);
 /** Scenario and bucket names (cards::sweet categories, policies.toml scenarios): lower-case slugs. A key like
  *  "__proto__" or a 50,000-char string never gets past here (it would index BUCKET_TEXT or blow up the grid). */
@@ -158,7 +162,7 @@ function readLadder(l: unknown): PublicLadder | null {
   const markets = readRows(l.markets);
   const m = l.measured;
   const measured = m === null ? null : isObj(m) && isInt(m.latency_ms) ? { latency_ms: m.latency_ms } : undefined;
-  if (!isInt(l.epoch) || !isIntOrNull(l.start_ms) || !isIntOrNull(l.as_of_ms) || !oneOf(MARKETS_STATUS, l.markets_status)) return null;
+  if (!isInt(l.epoch) || !isMsOrNull(l.start_ms) || !isMsOrNull(l.as_of_ms) || !oneOf(MARKETS_STATUS, l.markets_status)) return null;
   if (rungs !== null && new Set(rungs.map((r) => r.scenario)).size !== rungs.length) return null;
   if (breakEven === null || rungs === null || markets === null || measured === undefined) return null;
   return {
@@ -176,13 +180,13 @@ function readLadder(l: unknown): PublicLadder | null {
 function readToday(t: unknown): PublicToday | null {
   if (!isObj(t)) return null;
   const hourly = Array.isArray(t.hourly) && t.hourly.length <= MAX_HOURS ? readAll(t.hourly, readHour) : null;
-  if (!isInt(t.day_start_ms) || !isInt(t.arb) || !isInt(t.no) || !isInt(t.yes) || !isDecOrNull(t.edge_budget100) || hourly === null) return null;
+  if (!isMs(t.day_start_ms) || !isInt(t.arb) || !isInt(t.no) || !isInt(t.yes) || !isDecOrNull(t.edge_budget100) || hourly === null) return null;
   return { day_start_ms: t.day_start_ms, arb: t.arb, no: t.no, yes: t.yes, edge_budget100: t.edge_budget100, hourly };
 }
 
 /** The snapshot, or null for anything the page cannot draw (§6.3 "missing"). */
 export function parseSnapshot(raw: unknown): PublicSnapshot | null {
-  if (!isObj(raw) || raw.v !== 1 || !isInt(raw.written_ms)) return null;
+  if (!isObj(raw) || raw.v !== 1 || !isMs(raw.written_ms)) return null;
   const ladder = readLadder(raw.ladder);
   const today = readToday(raw.today);
   return ladder === null || today === null ? null : { v: 1, written_ms: raw.written_ms, ladder, today };

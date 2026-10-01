@@ -25,7 +25,7 @@ describe('math.css', () => {
     expect(css).not.toMatch(/minmax\(\s*\d+px/);
   });
   it('wraps the live strip and the live ladder heading, so a long line never forces 360 px (R18)', () => {
-    expect(rule('.m-live-n, .m-live-h')).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule('.m-live-k, .m-live-n, .m-live-h')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule('.m-live {')).toMatch(/min-width:\s*0/);
   });
 });

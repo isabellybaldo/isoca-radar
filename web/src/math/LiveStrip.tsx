@@ -21,15 +21,16 @@ export function LiveUnavailable() {
 export function LiveStrip({ today, writtenMs, stale }: { today: PublicToday; writtenMs: number; stale: boolean }) {
   return (
     <section className="m-live" aria-label="today on the live scanner">
+      <p className="m-live-k dim">today on the live scanner</p>
       <p className="m-live-n">
-        <span className="m-big">{today.no}</span> NO · <span className="m-big">{today.yes}</span> YES <span className="dim">episodes today</span>
+        <span className="m-big">{today.no}</span> NO · <span className="m-big">{today.yes}</span> YES <span className="dim">arbitrage episodes</span>
       </p>
       <p className="m-live-n">
         {today.edge_budget100 === null ? (
           <span className="dim">edge on the table: not measured</span>
         ) : (
           <>
-            <span className="m-big"><Money value={today.edge_budget100} cents /></span> <span className="dim">edge on the table</span>
+            <span className="m-big"><Money value={today.edge_budget100} cents /></span> <span className="dim">edge on the table today, $100 per episode at most</span>
           </>
         )}
       </p>
