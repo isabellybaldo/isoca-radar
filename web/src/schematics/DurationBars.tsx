@@ -14,7 +14,7 @@ export function DurationBars({ rows }: { rows: DurationRow[] }) {
         <div key={`${r.kind}|${r.label}`} className="db-row">
           <svg className="db-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="presentation">
             <rect
-              className={['db-bar', r.kind === 'example' ? 'example' : null, r.open ? 'open' : null].filter(Boolean).join(' ')}
+              className={['db-bar', r.kind === 'example' ? 'example' : null, r.kind === 'order' ? 'order' : null, r.open ? 'open' : null].filter(Boolean).join(' ')}
               x={0}
               y={2}
               width={Math.max(1, sx(r.ms))}

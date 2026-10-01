@@ -13,7 +13,7 @@ const DASHBOARD = /^src\/(pages|api|explain)\/|^src\/help\.ts$/;
 const ENTRIES = [
   'src/schematics/LatencyLadder.tsx', 'src/schematics/DurationBars.tsx', 'src/schematics/PayoffGrid.tsx',
   'src/schematics/MirrorBooks.tsx', 'src/schematics/ClassifyTree.tsx',
-  'src/schematics/DepthStairs.tsx', 'src/schematics/BasketLegs.tsx',
+  'src/schematics/DepthStairs.tsx', 'src/schematics/BasketLegs.tsx', 'src/schematics/UpdateBars.tsx',
 ];
 /** `import x from '…'`, `import { type A, b } from '…'`, `export … from '…'`, `import '…'`; never `import type` / `export type`. */
 const IMPORT = /^\s*(?:import|export)\s+(?!type\b)[^'"]*?\s*from\s*'([^']+)'|^\s*import\s+'([^']+)'/gm;

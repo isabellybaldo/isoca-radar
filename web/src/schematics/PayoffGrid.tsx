@@ -3,6 +3,7 @@ import type { PayoffModel } from './models';
 /** Parent spec §5.7 (b) as an HTML table (no SVG, nothing to distort): 1 where a token pays $1, the
  *  basket row, and ✗ on a column where the basket pays less than it guarantees. */
 export function PayoffGrid({ model, label }: { model: PayoffModel; label: string }) {
+  const possible = (i: number) => model.possible?.[i] !== false;
   return (
     <figure className="payoff">
       <div className="scroll">
@@ -11,8 +12,8 @@ export function PayoffGrid({ model, label }: { model: PayoffModel; label: string
             <tr>
               <th scope="col">pays $ if →</th>
               {model.cols.map((c, i) => (
-                <th key={c} scope="col" className={model.broken[i] ? 'broken' : undefined}>
-                  {model.broken[i] ? `${c} ✗` : c}
+                <th key={c} scope="col" className={model.broken[i] ? 'broken' : possible(i) ? undefined : 'impossible'}>
+                  {model.broken[i] ? `${c} ✗` : possible(i) ? c : `${c} (impossible)`}
                 </th>
               ))}
             </tr>
@@ -22,8 +23,8 @@ export function PayoffGrid({ model, label }: { model: PayoffModel; label: string
               <tr key={r.name}>
                 <th scope="row">{r.name}</th>
                 {r.cells.map((v, i) => (
-                  <td key={model.cols[i]} className={v === 1 ? 'pay' : 'nopay'}>
-                    {v}
+                  <td key={model.cols[i]} className={v === null ? 'impossible' : v === 1 ? 'pay' : 'nopay'}>
+                    {v ?? '—'}
                   </td>
                 ))}
               </tr>
@@ -31,8 +32,8 @@ export function PayoffGrid({ model, label }: { model: PayoffModel; label: string
             <tr className="basket">
               <th scope="row">basket</th>
               {model.basket.map((b, i) => (
-                <td key={model.cols[i]} className={model.broken[i] ? 'broken' : 'pay'}>
-                  {b}
+                <td key={model.cols[i]} className={model.broken[i] ? 'broken' : b === null ? 'impossible' : 'pay'}>
+                  {b ?? '—'}
                 </td>
               ))}
             </tr>

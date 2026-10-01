@@ -445,3 +445,14 @@ ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .bl-sw.sold { background: var(--salmon); }
 .bl-sw.held { background: var(--rose); }
 .bl-sw.plan { border: 1px dashed var(--dim); }
+
+/* Spec 7b section 6.2: b's impossible column, e's order bar and its edge per update (ub-*). */
+.payoff .impossible { color: var(--dim); }
+.dbars .db-bar.order { fill: var(--salmon); }
+.ubars { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.ub-svg { display: block; width: 100%; height: 56px; background: var(--bg); }
+.ub-svg .ub-bar { fill: var(--teal); }
+.ub-svg .ub-bar.peak { fill: var(--mint); }
+.ub-svg .ub-zero { stroke: var(--line2); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.ub-axis { list-style: none; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; text-align: center; font-size: 13px; line-height: 1.3; }
+.ub-axis li { display: grid; min-width: 0; overflow-wrap: normal; }

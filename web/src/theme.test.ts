@@ -74,7 +74,7 @@ describe('theme', () => {
 
   it("wraps the panel's axis labels between words, never inside one: `extras` stays whole, `in time` cells keep a gap", () => {
     // The body's overflow-wrap: anywhere split `extras` into extra/s and let six `in time` labels touch (7a-B Chrome check).
-    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.bl-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
+    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.bl-axis li', '.ub-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
     // 7 slots in a 360 px panel leave ~44 px each: `extras` (6 ch) fits at 12 px (43.2 px), not at 13 px.
     expect(Number(/font-size:\s*(\d+)px/.exec(rule('.ll-axis'))?.[1])).toBeLessThanOrEqual(12);
     // A gap narrower than `in time` forces the two words onto two lines instead of into the next cell.
