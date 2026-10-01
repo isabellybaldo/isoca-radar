@@ -39,7 +39,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: rustup target add wasm32-unknown-unknown
-      # 7b §2, §8: sim and arb-core stay buildable for the public playground (no time, fs, threads)
+      # 7b §2, §8: sim, arb-core and arb-wasm build for wasm32 (the public playground). This proves
+      # the build only, not that they use no time, fs or threads: std compiles there and such a
+      # call fails when it runs. The dependency rule is bins/scanner/tests/arch.rs.
       - run: cargo check -p sim -p arb-core -p arb-wasm --target wasm32-unknown-unknown
       # 09-27 §4.3: the native side of the parity check, built alone (arb-wasm's own feature set)
       - run: cargo test -p arb-wasm
