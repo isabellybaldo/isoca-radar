@@ -33,8 +33,8 @@ export interface LadderIn {
   as_of_ms: number | null;
   rungs: Rung[];
   markets: GridRow[];
-  /** The api's Ladder carries the host; the snapshot's publicToLadder passes "" (never drawn: usText reads latency_ms only). */
-  measured: { latency_ms: number; host?: string } | null;
+  /** Only latency_ms is read; the api's Ladder also carries a host and still assigns here structurally. */
+  measured: { latency_ms: number } | null;
   markets_status: MarketsStatus;
   break_even: BreakEven;
 }
