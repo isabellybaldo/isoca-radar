@@ -1,5 +1,6 @@
 import { useId } from 'react';
 import { Empty } from './Empty';
+import { geo } from './geo';
 import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
@@ -31,12 +32,6 @@ const LEGEND: [string, string][] = [
   ['extra', 'an extra, net on paper'],
 ];
 const HEADS = ['RUNG', 'N', 'LEG RISK', 'MISSED', 'BASKET GAINS', 'LEG-RISK COST', 'SETTLED', 'UNREALIZED', 'NET'];
-
-/** A money string as geometry only; a malformed value draws at zero instead of NaN. */
-const geo = (v: string) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-};
 
 function Markets({ model }: { model: LadderModel }) {
   const { status, rows } = model.markets;

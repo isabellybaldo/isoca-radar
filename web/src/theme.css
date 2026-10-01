@@ -384,3 +384,26 @@ ul.plain.cb-legend { gap: 2px; }
 .locked .lk-block.sel { background: var(--salmon); }
 .lk-list { display: grid; gap: 2px; font-size: 13px; }
 .lk-list li.sel { font-weight: 600; }
+
+/* Spec 7b §6: the public schematics a and c. Every SVG part has its own mb-* class; labels are HTML; the drawings
+   carry no border of their own (they sit in a section's box: no box inside a box). */
+.mirror, .ctree { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.mb-big { font-family: var(--big); font-size: 32px; line-height: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.mb-alert { color: var(--salmon); font-weight: 600; }
+.mb-row { display: grid; grid-template-columns: 4ch minmax(0, 1fr); gap: 6px; }
+ul.plain.mb-lab { display: grid; grid-template-rows: 1fr 1fr; gap: 0; align-items: center; font-family: var(--px); font-size: 7px; }
+.mb-svg { display: block; width: 100%; height: 96px; background: var(--bg); }
+.mb-svg .mb-bid { fill: var(--teal); }
+.mb-svg .mb-ask { fill: var(--salmon); }
+.mb-svg .mb-link { stroke: var(--line2); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.mb-svg .mb-mid { stroke: var(--dim); stroke-width: 1px; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+.mb-axis { list-style: none; display: flex; justify-content: space-between; margin-left: calc(4ch + 6px); font-size: 13px; color: var(--dim); }
+.mb-axis li { overflow-wrap: normal; }
+ul.plain.mb-refl { gap: 2px; }
+.mb-note { font-size: 13px; }
+.cl-path { list-style: none; display: grid; font-size: 13px; }
+.cl-node { display: flex; gap: 8px; align-items: center; color: var(--dim); padding: 1px 0; }
+.cl-node .cl-dot { flex: none; width: 10px; height: 10px; border: 2px solid var(--line2); }
+.cl-node.lit { color: var(--fg); font-weight: 600; }
+.cl-node.lit .cl-dot { background: var(--accent); border-color: var(--accent); }
+.cl-end { font-family: var(--big); font-size: 32px; line-height: 1; }
