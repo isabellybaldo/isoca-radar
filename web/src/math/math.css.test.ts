@@ -17,6 +17,14 @@ describe('math.css', () => {
       expect(rule(sel), sel).toMatch(/min-height:\s*44px/);
     }
   });
+  it("keeps the section titles' pixel look now that they are h3s (theme.css styles only .box h2), and the chapter line tight under them", () => {
+    const h = rule('.m-sec > h3 {');
+    expect(h).toMatch(/font-family:\s*var\(--px\)/);
+    expect(h).toMatch(/font-size:\s*9px/);
+    expect(h).toMatch(/margin:\s*0 0 8px/);
+    expect(h).toMatch(/line-height:\s*1\.5/);
+    expect(rule('.m-back {')).toMatch(/margin:\s*0;\s*font-size:\s*13px/);
+  });
   it('draws no box inside the section box', () => {
     expect(rule('.m-level, .m-leg')).toMatch(/border:\s*0/);
   });

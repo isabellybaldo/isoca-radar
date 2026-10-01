@@ -1,6 +1,8 @@
 /* The public /math page's own layout (the schematics' CSS lives in theme.css). Controls are touch-sized and
    never force the page wider than 360 px. No inline styles anywhere (the page's CSP forbids them). */
 .m-sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.m-sec > h3 { font-family: var(--px); font-size: 9px; margin: 0 0 8px; line-height: 1.5; }
+.m-back { margin: 0; font-size: 13px; }
 .m-controls { display: grid; gap: 8px; min-width: 0; }
 .m-btn { font-family: var(--px); font-size: 8px; padding: 10px 12px; min-height: 44px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; justify-self: start; }
 .m-sec .seg button { min-height: 44px; padding: 8px 10px; }

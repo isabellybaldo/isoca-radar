@@ -81,10 +81,10 @@ async function landed(f: { mock: { calls: unknown[] } }, expectation: () => unkn
 const stripShown = () => screen.getByRole('region', STRIP);
 const unavailableShown = () => expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
 const behindShown = (n: number) => () => expect(screen.getAllByText(new RegExp(`: ${BEHIND}$`))).toHaveLength(n);
-/** The six playground sections' own h3s (the live ladder's h3 sits inside f, not directly under a section). */
+/** The six sections' own h3s, and the live ladder's heading (h3.m-live-h, inside f). */
 const h3s = () => screen.queryAllByRole('heading', { level: 3 });
 const sectionHeads = () => h3s().filter((h) => h.parentElement?.classList.contains('m-sec'));
-const ladderHeads = () => h3s().filter((h) => !h.parentElement?.classList.contains('m-sec'));
+const ladderHeads = () => h3s().filter((h) => h.classList.contains('m-live-h'));
 const sectionsShown = () => expect(sectionHeads()).toHaveLength(6);
 const ladderShown = () => expect(ladderHeads()).toHaveLength(1);
 /** Nothing went wrong on screen: no alert (the engine did not load) and no engine sentence in place of a drawing
