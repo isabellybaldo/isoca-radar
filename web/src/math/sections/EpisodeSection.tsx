@@ -28,11 +28,12 @@ const KNOBS: [keyof Lat, string][] = [['proc_ms', 'proc ms'], ['net_ms', 'net ms
 
 const leg = (bid: number): LegIn => ({ status: 'live', bids: [{ p: fromTick(bid), s: '100' }], asks: [{ p: fromTick(bid + 1), s: '100' }], fee: null });
 
-/** episode_json's input: no basket (the engine has none to fill, 7b §6.2 e) and no gap_ms (it changes nothing). */
-export function episodeInput(st: EpisodeState): EpisodeIn {
+/** episode_json's input: no basket (the engine has none to fill, 7b §6.2 e) and no gap_ms (it changes nothing).
+ *  `times` are the updates' clock (the story's second state uses a shorter one). */
+export function episodeInput(st: EpisodeState, times: number[] = EPISODE_T): EpisodeIn {
   return {
     kind: 'no',
-    updates: EPISODE_T.slice(0, st.upto).map((t, i) => ({ t_ms: t, legs: EPISODE_BIDS[i].map(leg) })),
+    updates: times.slice(0, st.upto).map((t, i) => ({ t_ms: t, legs: EPISODE_BIDS[i].map(leg) })),
     scenario: { ...st.sc, honor_seconds_delay: true },
     seconds_delay: st.delay ? 1 : null,
   };

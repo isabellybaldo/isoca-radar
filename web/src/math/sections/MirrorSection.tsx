@@ -14,7 +14,7 @@ const START = MIRROR_START;
 const SIDE = { bids: 'bid', asks: 'ask' } as const;
 
 /** Best bid one tick above the best ask; the other bids at or above it go (no two levels at one price). */
-function crossed(b: MirrorIn): MirrorIn {
+export function crossed(b: MirrorIn): MirrorIn {
   const p = fromTick(toTick(b.asks[0]?.p ?? '0.50') + 1);
   return { asks: b.asks, bids: [{ p, s: b.bids[0]?.s ?? '100' }, ...b.bids.slice(1).filter((l) => toTick(l.p) < toTick(p))] };
 }
