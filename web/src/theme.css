@@ -409,3 +409,36 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 .cl-node.lit .cl-dot { background: var(--accent); border-color: var(--accent); }
 .cl-ran { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .cl-end { font-family: var(--big); font-size: 32px; line-height: 1; }
+
+/* Spec 7b §6: schematics d (ds-*) and f (bl-*). Every SVG part has its own class; labels are HTML. */
+.dstairs, .blegs { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.ds-big, .bl-big { font-family: var(--big); font-size: 32px; line-height: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.bl-big.pos { color: var(--good); }
+.bl-big.neg { color: var(--bad); }
+.ds-svg, .bl-svg { display: block; width: 100%; height: 140px; background: var(--bg); }
+.ds-svg .ds-pi { fill: var(--teal); opacity: 0.7; }
+.ds-svg .ds-loss { fill: var(--salmon); opacity: 0.7; }
+.ds-svg .ds-cost { stroke: var(--fg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.ds-svg .ds-pay { stroke: var(--mint); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ds-svg .ds-qstar { stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.ds-axis { list-style: none; display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); }
+.ds-axis li { overflow-wrap: normal; }
+ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
+.ds-sw, .bl-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+.ds-sw.pi { background: var(--teal); }
+.ds-sw.loss { background: var(--salmon); }
+.ds-sw.pay { border-top: 2px dashed var(--mint); height: 0; }
+.bl-svg .bl-plan { fill: none; stroke: var(--line2); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.bl-svg .bl-fill { fill: var(--teal); }
+.bl-svg .bl-sold { fill: var(--salmon); }
+.bl-svg .bl-held { fill: var(--rose); }
+.bl-svg .bl-qeff { stroke: var(--fg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.bl-axis { list-style: none; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; text-align: center; font-size: 13px; line-height: 1.3; }
+.bl-axis li { display: grid; min-width: 0; overflow-wrap: normal; }
+.bl-cash { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.bl-cash dt { color: var(--dim); font-size: 13px; }
+.bl-cash dd { font-family: var(--big); font-size: 22px; }
+.bl-sw.fill { background: var(--teal); }
+.bl-sw.sold { background: var(--salmon); }
+.bl-sw.held { background: var(--rose); }
+.bl-sw.plan { border: 1px dashed var(--line2); }
