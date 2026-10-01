@@ -66,6 +66,11 @@ describe('DepthStairs (parent §5.7 d)', () => {
     for (const { name, model } of okCases()) {
       const { container, unmount } = render(<DepthStairs model={model} />);
       const d = costDomain(model.steps.flatMap((s) => [s.cost, s.payoff]));
+      if (model.steps.length === 0) {
+        expect(container.querySelector('.ds-yaxis'), name).toBeNull(); // nothing drawn: no axis ends beside an empty plot
+        unmount();
+        continue;
+      }
       expect(yLabels(container), name).toEqual([tickText(d.hi), tickText(d.lo)]); // top first
       expect(container.querySelector('.ds-yaxis'), name).toHaveAttribute('aria-hidden', 'true');
       for (const y of lineYs(container)) {
@@ -113,6 +118,9 @@ describe('DepthStairs (parent §5.7 d)', () => {
     const { container } = render(<DepthStairs model={walk('zero-depth-leg')} />);
     expect(container.innerHTML).not.toContain('NaN');
     expect(container.querySelectorAll('rect.ds-pi, rect.ds-loss')).toHaveLength(0);
+    expect(container.querySelector('.ds-yaxis')).toBeNull();
+    expect(container.querySelector('.ds-plot svg.ds-svg')).not.toBeNull(); // the empty plot and its shares axis stay
+    expect(container.querySelector('.ds-plot .ds-axis')).not.toBeNull();
     expect(screen.getByText('Q* 0')).toBeInTheDocument();
   });
 });

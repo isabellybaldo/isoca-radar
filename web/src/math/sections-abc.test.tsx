@@ -92,6 +92,32 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     expect(container.querySelectorAll('g.mb-yes rect')).toHaveLength(8);
   });
 
+  it('a: "cross the book" shows the crossing bid beside the ask at its price, in both rows (Task 16 review 1)', async () => {
+    const { sent, engine: spy } = spied();
+    const { container } = render(<MirrorSection engine={spy} />);
+    fireEvent.click(screen.getByRole('button', { name: 'cross the book' }));
+    expect(await screen.findByText(CROSSED)).toBeInTheDocument();
+    const book = lastBook(sent);
+    const shared = ticks(book.bids).filter((t) => ticks(book.asks).includes(t));
+    expect(shared).toHaveLength(1); // the best bid sits one tick above the best ask: on the second ask
+    for (const row of ['g.mb-yes', 'g.mb-no']) {
+      const rects = [...container.querySelectorAll(`${row} rect`)]
+        .map((r) => ({ cls: r.getAttribute('class'), x0: Number(r.getAttribute('x')), x1: Number(r.getAttribute('x')) + Number(r.getAttribute('width')) }))
+        .sort((a, b) => a.x0 - b.x0);
+      expect(rects, row).toHaveLength(book.bids.length + book.asks.length);
+      for (const [i, r] of rects.entries()) {
+        expect(r.x1 - r.x0, row).toBeGreaterThan(0);
+        if (i > 0) expect(r.x0, `${row} ${i}`).toBeGreaterThanOrEqual(rects[i - 1].x1 - 1e-9); // no bar under another
+      }
+      // the shared slot: a bid on the left half and an ask on the right half, touching
+      const pair = rects.findIndex((r, i) => i > 0 && Math.abs(r.x0 - rects[i - 1].x1) < 1e-9);
+      expect(pair, row).toBeGreaterThan(0);
+      expect([rects[pair - 1].cls, rects[pair].cls], row).toEqual(['mb-bid', 'mb-ask']);
+    }
+    // every join line still lands on the middle of a slot: p and 1 − p stay mirror images
+    for (const l of container.querySelectorAll('line.mb-link')) expect(Number(l.getAttribute('x1')) + Number(l.getAttribute('x2'))).toBeCloseTo(300);
+  });
+
   it('a and c: a slider under a legend does not repeat it; the full name stays the accessible one (Task 16 V5)', () => {
     const shown = (name: string) => {
       const el = screen.getByLabelText(name);

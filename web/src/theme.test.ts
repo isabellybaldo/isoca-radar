@@ -115,7 +115,9 @@ describe('theme', () => {
     expect(rule('.ds-sw.cost')).toMatch(/background:\s*var\(--fg\)/);
     expect(rule('.ds-sw.pay')).toMatch(/repeating-linear-gradient\(90deg, var\(--mint\) 0 4px, transparent 4px 7px\)/);
     // the ladder: a rung with no account is a dashed box in the legend as in the drawing; its words stay for screen readers
-    expect(rule('.ll-sw.missing')).toMatch(/border:\s*1px dashed/);
+    expect(rule('.ll-sw.missing')).toMatch(/border:\s*1px dashed var\(--dim\)/); // --line2 was too faint to see
+    expect(rule('.ll-svg .ll-missing')).toMatch(/stroke:\s*var\(--dim\)/); // the box and its swatch change together
+    expect(rule('.ds-plot .ds-svg')).toMatch(/grid-column:\s*2/); // the plot keeps its column when the cost axis is hidden
     expect(rule('.cl-ran, .ll-sr')).toMatch(/clip:\s*rect\(0, 0, 0, 0\)/);
     // e: every update column reserves the line where one of them says "peak", so the five columns align
     expect(rule('.ub-axis li .ub-mark')).toMatch(/min-height:\s*1\.3em/);

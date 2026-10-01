@@ -30,10 +30,12 @@ export function DepthStairs({ model }: { model: WalkModel }) {
         on the table, if every level stayed put · <span className="ds-gross">before fees <Money value={model.pi_gross} signed cents /></span>
       </figcaption>
       <div className="ds-plot">
-        <ol className="ds-yaxis" aria-hidden="true">
-          <li>{tickText(d.hi)}</li>
-          <li>{tickText(d.lo)}</li>
-        </ol>
+        {model.steps.length > 0 && (
+          <ol className="ds-yaxis" aria-hidden="true">
+            <li>{tickText(d.hi)}</li>
+            <li>{tickText(d.lo)}</li>
+          </ol>
+        )}
         <svg className="ds-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="the cost staircase">
           {model.steps.map((s, i) => {
             const c = sy(s.cost);

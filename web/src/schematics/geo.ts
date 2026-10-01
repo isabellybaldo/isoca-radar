@@ -26,8 +26,19 @@ export interface TickDomain {
 /** Whole ticks as a decimal string (109 -> "1.09"): integer math only, for axis labels. */
 export const tickText = (t: number): string => `${Math.floor(t / 100)}.${String(t % 100).padStart(2, '0')}`;
 
-/** A decimal string in ticks, with the float noise of the multiplication removed (0.94 * 100 is not 94). */
-const inTicks = (v: string): number => Math.round(geoPos(v) * 1e8) / 1e6;
+/** A decimal string in ticks, with the float noise of the multiplication removed (0.94 * 100 is not 94); a
+ *  negative value is 0. Null when the string is not a number, or too large to place on an axis. */
+const ticksOf = (v: string): number | null => {
+  if (v.trim() === '') return null;
+  const t = Math.round(Math.max(0, Number(v)) * 1e8) / 1e6;
+  return Number.isFinite(t) ? t : null;
+};
+
+/** As `ticksOf`, for drawing: what cannot be placed draws at zero instead of NaN. */
+const inTicks = (v: string): number => ticksOf(v) ?? 0;
+
+/** The values a domain is built from: what cannot be placed is left out, so it cannot un-zoom the axis. */
+const placed = (values: string[]): number[] => values.flatMap((v) => ticksOf(v) ?? []);
 
 /** Where a value in ticks falls in a domain, from 0 at `lo` to 1 at `hi`. */
 export const along = (d: TickDomain, v: string): number => (inTicks(v) - d.lo) / (d.hi - d.lo);
@@ -38,7 +49,7 @@ const MIRROR_MIN_HALF = 5;
 /** Drawing a's price axis: symmetric around 0.50 (p and 1 − p are mirror images, the 0.50 line stays in the
  *  middle), two ticks wider than the farthest price drawn, never narrower than ten ticks, never outside 0 to 1. */
 export function mirrorDomain(prices: string[]): TickDomain {
-  const far = Math.max(0, ...prices.map((p) => Math.abs(inTicks(p) - 50)));
+  const far = Math.max(0, ...placed(prices).map((t) => Math.abs(t - 50)));
   const half = Math.min(50, Math.max(MIRROR_MIN_HALF, Math.ceil(far) + MIRROR_PAD));
   return { lo: 50 - half, hi: 50 + half };
 }
@@ -49,8 +60,8 @@ const COST_MIN_SPAN = 4;
 /** Drawing d's cost axis: from the lowest to the highest value drawn (step costs and what a basket pays),
  *  padded by a tick or 8% of the range, at least four ticks tall, never below zero. Nothing to draw: 0 to 1. */
 export function costDomain(values: string[]): TickDomain {
-  if (values.length === 0) return { lo: 0, hi: 100 };
-  const t = values.map(inTicks);
+  const t = placed(values);
+  if (t.length === 0) return { lo: 0, hi: 100 };
   const min = Math.floor(Math.min(...t));
   const max = Math.ceil(Math.max(...t));
   const pad = Math.max(1, Math.ceil((max - min) * COST_PAD));

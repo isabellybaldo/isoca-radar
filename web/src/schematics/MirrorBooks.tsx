@@ -14,6 +14,12 @@ const NO_TOP = BAR + GAP;
 /** A bar's share of one tick of the axis: neighbours a tick apart never touch, at any width. */
 const BAR_SHARE = 0.7;
 
+/** The ticks where a row holds both a bid and an ask (a crossed book): the two share the slot there. */
+const sharedTicks = (a: Level[], b: Level[]): Set<number> => {
+  const mine = new Set(a.map((l) => tick(l.p)));
+  return new Set(b.map((l) => tick(l.p)).filter((t) => mine.has(t)));
+};
+
 /** The mirrored row of a YES price: the NO level whose price is 1 − p. Paired by price, never by input index. */
 const mirrorOf = (rows: Level[], p: string): Level | undefined => rows.find((r) => tick(r.p) + tick(p) === 100);
 
@@ -30,8 +36,15 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
   const d = mirrorDomain([...bids, ...asks, ...model.no_bids, ...model.no_asks].map((l) => l.p));
   const bw = (W / (d.hi - d.lo)) * BAR_SHARE;
   const cx = (p: string) => Math.min(W - bw / 2, Math.max(bw / 2, along(d, p) * W));
-  const up = (l: Level, cls: string, key: string) => <rect key={key} className={cls} x={cx(l.p) - bw / 2} y={BAR - h(l)} width={bw} height={h(l)} />;
-  const down = (l: Level, cls: string, key: string) => <rect key={key} className={cls} x={cx(l.p) - bw / 2} y={NO_TOP} width={bw} height={h(l)} />;
+  const yesShared = sharedTicks(bids, asks);
+  const noShared = sharedTicks(model.no_bids, model.no_asks);
+  // A bid and an ask at one price would cover each other: there the bid takes the left half of the slot and the
+  // ask the right half. The join lines stay on the slot's middle.
+  const bar = (l: Level, side: 'bid' | 'ask', row: 'yes' | 'no', key: string) => {
+    const half = (row === 'yes' ? yesShared : noShared).has(tick(l.p));
+    const x = half && side === 'ask' ? cx(l.p) : cx(l.p) - bw / 2;
+    return <rect key={key} className={`mb-${side}`} x={x} y={row === 'yes' ? BAR - h(l) : NO_TOP} width={half ? bw / 2 : bw} height={h(l)} />;
+  };
   const links = [
     ...bids.map((l) => [l, mirrorOf(model.no_asks, l.p)] as const),
     ...asks.map((l) => [l, mirrorOf(model.no_bids, l.p)] as const),
@@ -57,12 +70,12 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
         <svg className="mb-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="the YES book above, its NO mirror below">
           <line className="mb-mid" x1={W / 2} x2={W / 2} y1={0} y2={H} />
           <g className="mb-yes">
-            {bids.map((l, i) => up(l, 'mb-bid', `yb${i}`))}
-            {asks.map((l, i) => up(l, 'mb-ask', `ya${i}`))}
+            {bids.map((l, i) => bar(l, 'bid', 'yes', `yb${i}`))}
+            {asks.map((l, i) => bar(l, 'ask', 'yes', `ya${i}`))}
           </g>
           <g className="mb-no">
-            {model.no_bids.map((l, i) => down(l, 'mb-bid', `nb${i}`))}
-            {model.no_asks.map((l, i) => down(l, 'mb-ask', `na${i}`))}
+            {model.no_bids.map((l, i) => bar(l, 'bid', 'no', `nb${i}`))}
+            {model.no_asks.map((l, i) => bar(l, 'ask', 'no', `na${i}`))}
           </g>
           {links.map(([y, n], i) =>
             n === undefined ? null : <line key={`k${i}`} className="mb-link" x1={cx(y.p)} y1={BAR} x2={cx(n.p)} y2={NO_TOP} />,

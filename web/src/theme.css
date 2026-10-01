@@ -282,7 +282,7 @@ ul.plain.lg-legend { gap: 2px; font-size: 13px; color: var(--dim); }
 .ll-svg .ll-hatch-line { fill: var(--teal); }
 .ll-svg .ll-net { fill: var(--fg); stroke: var(--fg); stroke-width: 9px; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-extra { stroke: var(--dim); stroke-width: 8px; stroke-linecap: square; vector-effect: non-scaling-stroke; }
-.ll-svg .ll-missing { fill: none; stroke: var(--line2); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-missing { fill: none; stroke: var(--dim); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-us { fill: var(--rose); opacity: 0.35; }
 .ll-svg .ll-zero { stroke: var(--fg); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-be { stroke: var(--accent); stroke-width: 2px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
@@ -298,7 +298,7 @@ ul.plain.ll-legend { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15
 .ll-sw.net { background: var(--fg); border-radius: 50%; }
 .ll-sw.extra { background: var(--dim); }
 .ll-sw.us { background: var(--rose); opacity: 0.6; }
-.ll-sw.missing { border: 1px dashed var(--line2); }
+.ll-sw.missing { border: 1px dashed var(--dim); }
 ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 
 /* Spec 7a §6: since when the paper accounts count. */
@@ -426,6 +426,7 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 .ds-plot { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 6px; min-width: 0; }
 .ds-yaxis { list-style: none; display: flex; flex-direction: column; justify-content: space-between; text-align: right; font-size: 13px; line-height: 1; color: var(--dim); }
 .ds-yaxis li { overflow-wrap: normal; white-space: nowrap; }
+.ds-plot .ds-svg { grid-column: 2; } /* with nothing drawn the cost axis is left out: the plot keeps its column */
 .ds-axis { list-style: none; display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); grid-column: 2; }
 .ds-axis li { overflow-wrap: normal; }
 ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }

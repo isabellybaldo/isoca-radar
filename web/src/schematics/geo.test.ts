@@ -2,7 +2,7 @@
 // the helpers; the engine's own figures for the page's inputs are checked where the drawings are rendered.
 import { describe, expect, it } from 'vitest';
 import { FED_ASKS, FED_BIDS, fromTick, toTick } from '../math/defaults';
-import { type TickDomain, costDomain, mirrorDomain, tickText } from './geo';
+import { type TickDomain, along, costDomain, mirrorDomain, tickText } from './geo';
 
 /** The prices section a draws for a YES book: its own levels and their NO mirrors (1 − p). */
 const drawn = (yes: string[]) => [...yes, ...yes.map((p) => fromTick(100 - toTick(p)))];
@@ -72,9 +72,9 @@ describe('costDomain (drawing d)', () => {
   const inside = (d: TickDomain, vs: string[]) => vs.every((v) => Number(v) * 100 > d.lo && Number(v) * 100 < d.hi);
 
   it('zooms onto the values: both ends are whole ticks strictly outside the lowest and the highest', () => {
-    const vs = ['0.94', '0.96', '1.01', '1.08', '1'];
+    const vs = ['0.40', '0.47', '0.52', '0.6'];
     const d = costDomain(vs);
-    expect(d).toEqual({ lo: 92, hi: 110 });
+    expect(d).toEqual({ lo: 38, hi: 62 });
     expect(inside(d, vs)).toBe(true);
   });
 
@@ -83,12 +83,12 @@ describe('costDomain (drawing d)', () => {
   });
 
   it('one step only: its cost and its payoff, with room either side', () => {
-    const d = costDomain(['0.94', '1']);
-    expect(d).toEqual({ lo: 93, hi: 101 });
+    const d = costDomain(['0.70', '0.75']);
+    expect(d).toEqual({ lo: 69, hi: 76 });
   });
 
   it('costs off the grid (taker fees) are inside, the ends stay whole ticks', () => {
-    const vs = ['0.9547', '1.0931', '1'];
+    const vs = ['0.4123', '0.5871', '0.5'];
     const d = costDomain(vs);
     expect(Number.isInteger(d.lo) && Number.isInteger(d.hi)).toBe(true);
     expect(inside(d, vs)).toBe(true);
@@ -97,6 +97,23 @@ describe('costDomain (drawing d)', () => {
   it('pads a wide range in proportion (the nested NO rule pays 1 and 2)', () => {
     const d = costDomain(['1', '2', '1.90']);
     expect(d).toEqual({ lo: 92, hi: 208 });
+  });
+
+  it('a malformed or overflowing string is skipped, it does not un-zoom the axis; a real 0 still counts (review 1, minors 1 and 2)', () => {
+    const zoomed = costDomain(['0.70', '0.75']);
+    for (const bad of ['', ' ', 'abc', 'NaN', 'Infinity', '1e305', '1e999']) {
+      const d = costDomain(['0.70', bad, '0.75']);
+      expect(d, JSON.stringify(bad)).toEqual(zoomed);
+      expect(Number.isFinite(along(d, bad)), JSON.stringify(bad)).toBe(true);
+    }
+    expect(costDomain(['abc', '1e305'])).toEqual({ lo: 0, hi: 100 }); // nothing left to draw
+    expect(costDomain(['0', '0.75']).lo).toBe(0);
+    expect(costDomain(['0.00', '0.75']).hi).toBeGreaterThan(75);
+    expect(mirrorDomain(['0.54', 'abc', '1e305', '0.46'])).toEqual(mirrorDomain(['0.54', '0.46']));
+    for (const d of [costDomain(['1e305']), mirrorDomain(['1e305'])]) {
+      expect(Number.isInteger(d.lo) && Number.isInteger(d.hi)).toBe(true);
+      expect(`${tickText(d.lo)} ${tickText(d.hi)}`).not.toMatch(/NaN|Infinity/);
+    }
   });
 
   it('never goes below zero, and nothing to draw gives 0 to 1', () => {
