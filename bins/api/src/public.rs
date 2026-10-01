@@ -200,36 +200,46 @@ pub fn to_bytes(snap: &PublicSnapshot) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// `bytes` into the tmp file (created, or truncated if a crashed run left one), mode 0644, fsynced
+/// and closed.
+fn write_tmp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o644); // nginx (another uid) reads it through a read-only mount (7b-B)
+    }
+    let mut f = opts.open(tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // mode() above is masked by umask and only applies on create; fchmod is not.
+        f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    }
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 /// Write `bytes` to `dir/public.json.tmp`, fsync it, call `before_rename` (tests inject a failure
 /// or look at the files there), rename it over `dir/public.json`, then fsync the directory (unix).
 /// Readers only ever see the old file or the new one; a failure before the rename leaves the old
-/// file as it was.
+/// file as it was and removes the tmp file (best effort), so a failed run leaves nothing behind.
 pub fn write_atomic_with(
     dir: &Path,
     bytes: &[u8],
     before_rename: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let tmp = dir.join(PUBLIC_TMP);
-    {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o644); // nginx (another uid) reads it through a read-only mount (7b-B)
-        }
-        let mut f = opts.open(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // mode() above is masked by umask and only applies on create; fchmod is not.
-            f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
-        }
-        f.write_all(bytes)?;
-        f.sync_all()?;
+    let renamed = write_tmp(&tmp, bytes)
+        .and_then(|()| before_rename(&tmp))
+        .and_then(|()| std::fs::rename(&tmp, dir.join(PUBLIC_FILE)));
+    if let Err(e) = renamed {
+        // The run's own error is the one reported; a tmp that can't be removed is truncated by
+        // the next run.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    before_rename(&tmp)?;
-    std::fs::rename(&tmp, dir.join(PUBLIC_FILE))?;
     #[cfg(unix)]
     std::fs::File::open(dir)
         .and_then(|d| d.sync_all())
@@ -584,6 +594,97 @@ mod tests {
         assert_eq!(m.len(), 1, "only the good row: {m:?}");
         assert_eq!(m[0].dimension, "all");
     }
+
+    /// The row the analyzer really writes: `cards::sweet::SweetRow` itself, serialized as SWEET's
+    /// body carries it. A change of one of its field types that `PublicSweetRow` can't read fails
+    /// here, instead of silently emptying the public grid (every row "did not parse; left out").
+    #[test]
+    fn a_real_cards_sweet_row_arrives_in_the_snapshot() {
+        use cards::sweet::{Label, SweetRow};
+        let s = |x: &str| x.to_string();
+        let row = SweetRow {
+            side: s("no"),
+            scenario: s("colo-idle"),
+            fee_bips: 0,
+            latency_ms: Some(52),
+            dimension: s("category"),
+            bucket: s("crypto"),
+            label: Label::Candidate,
+            few_trades: false,
+            n_exec: 41,
+            n_filled: 40,
+            n_missed: 3,
+            clusters: 17,
+            n_attempts: 44,
+            skipped: BTreeMap::from([(s("consumed"), 3)]),
+            episodes: 50,
+            flagged: 1,
+            on_table: s("12.5"),
+            on_table_eligible: s("11.5"),
+            captured: s("4.2"),
+            captured_leftover0: s("3.9"),
+            mean_leftover0: Some(s("0.095")),
+            mean: Some(s("0.1024")),
+            lo: Some(s("0.031")),
+            hi: Some(s("0.17")),
+            eff_n: Some(s("15.5")),
+            cost: s("230"),
+            annualized: Some(s("1.9")),
+            annualized_lo: Some(s("0.4")),
+            annualized_upper: None,
+            leftover_unpriced: 0,
+            pooled: 0,
+        };
+        let no_trades = SweetRow {
+            dimension: s("all"),
+            bucket: s("all"),
+            label: Label::NotTested,
+            latency_ms: None,
+            n_exec: 0,
+            mean: None,
+            lo: None,
+            hi: None,
+            ..row.clone()
+        };
+        let (ladder, today) = full(vec![
+            serde_json::to_value(&row).unwrap(),
+            serde_json::to_value(&no_trades).unwrap(),
+        ]);
+        let m = build(ladder, today, 1).ladder.markets;
+        assert_eq!(
+            m,
+            vec![
+                PublicSweetRow {
+                    side: s("no"),
+                    scenario: s("colo-idle"),
+                    fee_bips: 0,
+                    latency_ms: Some(52),
+                    dimension: s("category"),
+                    bucket: s("crypto"),
+                    label: s("candidate"),
+                    n_exec: 41,
+                    clusters: 17,
+                    mean: Some(s("0.1024")),
+                    lo: Some(s("0.031")),
+                    hi: Some(s("0.17")),
+                },
+                PublicSweetRow {
+                    side: s("no"),
+                    scenario: s("colo-idle"),
+                    fee_bips: 0,
+                    latency_ms: None,
+                    dimension: s("all"),
+                    bucket: s("all"),
+                    label: s("not_tested"),
+                    n_exec: 0,
+                    clusters: 17,
+                    mean: None,
+                    lo: None,
+                    hi: None,
+                },
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +731,31 @@ mod write_tests {
         });
         assert_eq!(r.unwrap_err().to_string(), "injected");
         assert_eq!(std::fs::read(d.join(PUBLIC_FILE)).unwrap(), before);
+        assert!(
+            !d.join(PUBLIC_TMP).exists(),
+            "the failed run removed its tmp file"
+        );
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            [PUBLIC_FILE],
+            "the old file is alone in the directory"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_first_run_leaves_an_empty_directory() {
+        let d = tmp_dir("fail_first");
+        let r = write_atomic_with(&d, b"{\"v\":1}", |tmp| {
+            assert!(tmp.exists(), "the tmp file is there until the failure");
+            Err(std::io::Error::other("injected"))
+        });
+        assert_eq!(r.unwrap_err().to_string(), "injected");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -643,11 +769,13 @@ mod write_tests {
     #[test]
     fn a_leftover_longer_tmp_is_truncated_not_reused() {
         let d = tmp_dir("leftover");
-        let long = b"{\"v\":1,\"a much longer body from a run that failed\":true}";
-        let failed = write_atomic_with(&d, long, |_| Err(std::io::Error::other("injected")));
-        assert!(failed.is_err());
+        // A failed run removes its tmp file, so only a crash (or a failed removal) leaves one:
+        // made by hand here.
+        let long = b"{\"v\":1,\"a much longer body from a run that crashed\":true}";
+        std::fs::write(d.join(PUBLIC_TMP), long).unwrap();
         write_atomic(&d, b"{\"v\":1}").unwrap();
         assert_eq!(std::fs::read(d.join(PUBLIC_FILE)).unwrap(), b"{\"v\":1}");
+        assert!(!d.join(PUBLIC_TMP).exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
