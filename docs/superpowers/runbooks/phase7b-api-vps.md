@@ -140,7 +140,7 @@ if not: a truncated tar = bundle and ship again (steps 13–14), then this step;
 docker pull -q alpine && docker image inspect -f '{{.Id}}' alpine
 ```
 → expected: `docker.io/library/alpine:latest`, then one `sha256:…` ID.
-if not: no download = install nothing; in steps 18, 22, 27 and 29 replace `docker run --rm -v cute-trading_public-data:/v:ro alpine cat /v/public.json` by `cat /var/lib/docker/volumes/cute-trading_public-data/_data/public.json`, and the alpine `stat` lines by `stat -c '%u %a %s' /var/lib/docker/volumes/cute-trading_public-data/_data /var/lib/docker/volumes/cute-trading_public-data/_data/public.json`.
+if not: no download = install nothing, and read the volume from its host path as root: step 22's whole block becomes `sleep 30; P=/var/lib/docker/volumes/cute-trading_public-data/_data; stat -c %u "$P"; stat -c '/v/public.json %u %a %s' "$P/public.json"; ls -A "$P"; head -c 100 "$P/public.json"; echo; W=$(grep -o '"written_ms":[0-9]*' "$P/public.json" | cut -d: -f2) && echo "$W" > /root/7b_written_1 && echo "first write $(( W - $(cat /root/7b_api_ms) )) ms after the api start"` (the same lines in the same format as step 22 expects); in steps 27 and 29 replace `docker run --rm -v cute-trading_public-data:/v:ro alpine cat /v/public.json` by `cat /var/lib/docker/volumes/cute-trading_public-data/_data/public.json`; in step 18's if-not replace the `docker run … alpine stat -c %u /v` by `stat -c %u /var/lib/docker/volumes/cute-trading_public-data/_data`.
 
 18. Compose parses, the api has its directory and volume, and the volume doesn't exist yet.
 ```bash
@@ -164,12 +164,13 @@ cd /home/isoca/projects/cute-trading && docker compose --profile core stop --tim
 ```
 → expected: analyze and compact `Stopped`, then `/cute-trading-analyze-1 exited`, `/cute-trading-compact-1 exited`, `/cute-trading-scanner-1 running`.
 if not: analyze or compact still `running` = run this step again; the scanner not `running` = `docker compose --profile core logs --tail 50 scanner` and report, do not go on.
+**STOP**
 
 21. Recreate the api on the new image, with the new volume, while the scanner still runs on the old image (the web is not touched).
 ```bash
 cd /home/isoca/projects/cute-trading && date +%s%3N > /root/7b_api_ms && docker compose -f compose.yml -f compose.web.yml --profile web up -d --no-build --no-deps api && sleep 10 && docker compose -f compose.yml -f compose.web.yml --profile web logs --since 20s api 2>&1 | grep -E 'api:'
 ```
-→ expected: a `Volume … cute-trading_public-data … Created` line, `Container cute-trading-api-1 … Recreated` then `Started`, then `api: public snapshot every 300 s into /var/lib/ct-public` and `api: listening on 0.0.0.0:8081 (read-only except paper reset requests, paper only)`, and no `refusing`, `api: reset pool:` or `RESET_DATABASE_URL is not set` line.
+→ expected: a `Volume … cute-trading_public-data … Created` line, `Container cute-trading-api-1 … Recreated` then `Started` (on step 22's redo, which removed the container: `Created`, not `Recreated`), then `api: public snapshot every 300 s into /var/lib/ct-public` and `api: listening on 0.0.0.0:8081 (read-only except paper reset requests, paper only)`, and no `refusing`, `api: reset pool:` or `RESET_DATABASE_URL is not set` line.
 if not: no `public snapshot every` line, a `refusing to start` line or no `listening` line = roll back with step 30 (the scanner is still capturing on the old image, and step 30 leaves it running), then report.
 **STOP**
 
@@ -177,8 +178,8 @@ if not: no `public snapshot every` line, a `refusing to start` line or no `liste
 ```bash
 sleep 30; docker run --rm -v cute-trading_public-data:/v:ro alpine sh -c 'stat -c %u /v; stat -c "%n %u %a %s" /v/public.json; ls -A /v; head -c 100 /v/public.json; echo' && W=$(docker run --rm -v cute-trading_public-data:/v:ro alpine cat /v/public.json | grep -o '"written_ms":[0-9]*' | cut -d: -f2) && echo "$W" > /root/7b_written_1 && echo "first write $(( W - $(cat /root/7b_api_ms) )) ms after the api start"
 ```
-→ expected: `65532`, `/v/public.json 65532 644 <bytes below 65536>`, `public.json` alone (no `public.json.tmp`), `{"v":1,"written_ms":…,"ladder":{"epoch":…`, then `first write <n> ms after the api start` with n between 30000 and 60000.
-if not: `No such file` = no run yet or a failed one: `docker compose -f compose.yml -f compose.web.yml --profile web logs api 2>&1 | grep 'public snapshot'` names the reason (`skipped: …`): report; owner `0` = the volume was not created from the 7b image: `docker compose -f compose.yml -f compose.web.yml --profile web rm -sf api && docker volume rm cute-trading_public-data`, then redo steps 21 and 22 (the scanner keeps capturing); n above 300000 = this step ran after the second write: write it in Results.
+→ expected: `65532`, `/v/public.json 65532 644 <bytes below 65536>`, `public.json` alone (no `public.json.tmp`), `{"v":1,"written_ms":…,"ladder":{"epoch":…`, then `first write <n> ms after the api start` with n between 30000 and 60000 (the same on the redo below, where step 21 printed `Container cute-trading-api-1 … Created`, not `Recreated`).
+if not: `Unable to find image 'alpine` or a pull error = no alpine image: run step 17's host-path block instead (same expected lines); `No such file` = no run yet or a failed one: `docker compose -f compose.yml -f compose.web.yml --profile web logs api 2>&1 | grep 'public snapshot'` names the reason (`skipped: …`): report; owner `0` = the volume was not created from the 7b image: `docker compose -f compose.yml -f compose.web.yml --profile web rm -sf api && docker volume rm cute-trading_public-data`, then redo steps 21 and 22 (the scanner keeps capturing; step 21 then prints `Created` for the container, not `Recreated`); n above 300000 = this step ran after the second write: write it in Results.
 **STOP**
 
 23. The reconnects since the api recreate (recorded, not a gate), then the scanner alone recreated on the new image in one command; its start time is the start of sim premise 3.
