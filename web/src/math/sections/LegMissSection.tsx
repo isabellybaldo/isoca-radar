@@ -9,9 +9,6 @@ import { F_BOOKS, F_BURST, F_START, LEGS } from '../defaults';
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section } from './Section';
 
-/** The deadpan line follows the engine's own verdict word, so it never claims a miss the output does not show. */
-const QUIP = { caught: F_QUIPS.caught, 'nothing filled': F_QUIPS.nothing, filled: F_QUIPS.filled } as const;
-
 /** 7b §6.2 f: per leg the depth left at t_x and the unwind book against us; shares; fees; "the usual burst".
  *  `children` is the slot for the live part (the ladder from the snapshot, Task 11), drawn after the caption;
  *  this section fetches nothing. */
@@ -25,7 +22,7 @@ export function LegMissSection({ engine, children }: { engine: Engine; children?
     <Section
       id="f"
       {...SECTIONS.f}
-      quip={isError(out) ? F_QUIPS.filled : QUIP[basketWord(out)]}
+      quip={isError(out) ? null : F_QUIPS[basketWord(out)]}
       onReset={() => setSt(F_START)}
       after={children}
       controls={

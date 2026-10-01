@@ -5,7 +5,7 @@ import { call } from '../../wasm/call';
 import type { DepthWalkIn, Engine, Level, WalkModel } from '../../wasm/types';
 import { CRYPTO_FEE } from '../basket';
 import { SECTIONS } from '../copy';
-import { LEGS, NEW_WALK_LEG, WALK_LEGS, exactlyOne, toTick } from '../defaults';
+import { LEGS, NEW_WALK_LEG, WALK_LEGS, bestSum, exactlyOne, toTick } from '../defaults';
 import { drag, room } from '../ladderDrag';
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section } from './Section';
@@ -29,6 +29,8 @@ export function DepthSection({ engine }: { engine: Engine }) {
   const [st, setSt] = useState<DepthState>(START);
   const input = useFrameThrottle(st);
   const out = useMemo(() => call<WalkModel>(engine, 'depth_walk_json', depthInput(input)), [engine, input]);
+  const reach = bestSum(exactlyOne(st.legs));
+  const reachable = reach === '1.00';
   const setP = (li: number, i: number, t: number) =>
     setSt((s) => ({ ...s, legs: s.legs.map((l, k) => (k === li ? drag(l, 'asks', i, t) : l)) }));
   return (
@@ -38,7 +40,8 @@ export function DepthSection({ engine }: { engine: Engine }) {
       onReset={() => setSt(START)}
       controls={
         <>
-          <button type="button" className="m-btn" onClick={() => setSt((s) => ({ ...s, legs: exactlyOne(s.legs) }))}>exactly 1.00</button>
+          <button type="button" className="m-btn" disabled={!reachable} onClick={() => setSt((s) => ({ ...s, legs: exactlyOne(s.legs) }))}>exactly 1.00</button>
+          {!reachable && <p className="dim m-note">{`exactly 1.00 is out of reach: leg A's best ask would have to leave 0.01 to 0.97, so the nearest the grid allows is Σ ${reach}`}</p>}
           <button type="button" className="m-btn" disabled={st.legs.length >= 4} onClick={() => setSt((s) => ({ ...s, legs: [...s.legs, NEW_WALK_LEG] }))}>add a leg</button>
           <button type="button" className="m-btn" disabled={st.legs.length <= 2} onClick={() => setSt((s) => ({ ...s, legs: s.legs.slice(0, -1) }))}>remove a leg</button>
           <Check label="taker fees on (crypto: rate 0.07, exponent 1)" checked={st.fees} onChange={(fees) => setSt((s) => ({ ...s, fees }))} />

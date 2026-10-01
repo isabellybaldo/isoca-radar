@@ -61,6 +61,12 @@ export function exactlyOne(legs: Level[][]): Level[][] {
   });
 }
 
+/** Σ of every leg's best ask, as a decimal string built from integer ticks (no float). */
+export function bestSum(legs: Level[][]): string {
+  const n = legs.reduce((a, l) => a + (l[0] ? toTick(l[0].p) : 0), 0);
+  return `${Math.floor(n / 100)}.${String(n % 100).padStart(2, '0')}`;
+}
+
 /** Parent §5.7 (e): five updates of a 3-leg NO basket, YES bids in ticks (asks one tick above, 100 deep):
  *  u1 Σ 0.99, u2 1.02 (open), u3 1.06 (peak), u4 1.02, u5 0.99 (close). */
 export const EPISODE_T = [0, 400, 900, 1400, 1900];

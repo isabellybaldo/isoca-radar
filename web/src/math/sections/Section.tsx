@@ -7,7 +7,7 @@ import '../math.css';
 export function Section({ id, title, quip, caption, controls, onReset, children, after }: {
   id: string;
   title: string;
-  quip: string;
+  quip: string | null;
   caption: string;
   controls: ReactNode;
   onReset: () => void;
@@ -22,7 +22,7 @@ export function Section({ id, title, quip, caption, controls, onReset, children,
         {controls}
         <button type="button" className="m-btn" onClick={onReset}>reset</button>
       </div>
-      <p className="quip">{quip}</p>
+      {quip !== null && <p className="quip">{quip}</p>}
       <p className="dim m-cap">{caption}</p>
       {after}
     </section>

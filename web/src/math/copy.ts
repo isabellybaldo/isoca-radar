@@ -1,3 +1,4 @@
+import type { BasketWord } from '../schematics/BasketLegs';
 // The public page's own copy (09-27 §5.1: no help.ts). Honest money words only: on paper, on the table,
 // captured at N ms (Task 12 scans the rendered page). Every caption names a function that exists in the
 // Rust code (ruling R7).
@@ -16,13 +17,12 @@ export const B_QUIPS = {
   implication: 'If A happens B must too, so one column cannot happen, and the basket holds in every other.',
 } as const;
 
-/** Section f's deadpan line per outcome: it follows the engine's verdict word (basketWord), so it never says a leg
- *  missed when every leg filled. */
-export const F_QUIPS = {
-  filled: 'Every leg filled. Drain one at t_x to see what a miss does.',
+/** Section f's deadpan line per engine verdict word (BasketWord), so it never claims a miss the output does not show. */
+export const F_QUIPS: Record<BasketWord, string> = {
+  filled: 'Every leg filled the same amount, so nothing is left over. Drain one at t_x to see what a miss does.',
   caught: 'Some legs filled more than others. The extra shares are now a bet, and the exit is the bid.',
-  nothing: 'Nothing filled, so there is nothing to sell back.',
-} as const;
+  'nothing filled': 'Nothing filled, so there is nothing to sell back.',
+};
 
 export const SECTIONS = {
   a: {

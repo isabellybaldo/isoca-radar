@@ -2,13 +2,13 @@
 // stated rules; none is retyped (R13). No fixed sleeps: every wait is a waitFor/findBy on an exact expectation.
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { formatMoneyCents, signOf } from '../lib/money';
+import { formatAvg, formatDecimal, formatMoneyCents, signOf } from '../lib/money';
 import { basketVerdict } from '../schematics/BasketLegs';
 import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine, skipReason } from '../wasm/testEngine';
 import type { BasketIn, BasketModel, DepthWalkIn, Engine, EpisodeIn, EpisodeModel, WalkModel } from '../wasm/types';
 import { basketInput } from './basket';
 import { F_QUIPS, SECTIONS } from './copy';
-import { F_BOOKS, F_BURST, F_START, PRESETS, toTick } from './defaults';
+import { F_BOOKS, F_BURST, F_START, PRESETS, exactlyOne, toTick } from './defaults';
 import { DEPTH_START, DepthSection, depthInput } from './sections/DepthSection';
 import { EPISODE_START, EpisodeSection, episodeInput } from './sections/EpisodeSection';
 import { LegMissSection } from './sections/LegMissSection';
@@ -17,6 +17,9 @@ if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('sections d–f'));
 
 const legItems = () => within(screen.getByRole('list', { name: 'legs' })).getAllByRole('listitem');
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+/** What BasketLegs prints for leg i from the engine's own model (same formatters), never a retyped figure. */
+const bought = (m: BasketModel, i: number, name: string) => `leg ${name}${formatDecimal(m.legs[i].buy.filled)} of ${formatDecimal(m.legs[i].buy.requested)}`;
+const sold = (m: BasketModel, i: number) => `sold ${formatDecimal(m.legs[i].unwind.filled)} at ${formatAvg(m.legs[i].unwind.vwap)}`;
 const ascending = (levels: { p: string }[]) => levels.every((x, k) => k === 0 || toTick(x.p) > toTick(levels[k - 1].p));
 
 describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine (7b §8)', () => {
@@ -49,7 +52,9 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       expect(container.querySelectorAll('rect.ds-pi').length).toBe(m.steps.filter((s) => s.profitable && s.cost !== s.payoff).length);
       expect(screen.getByText(SECTIONS.d.caption)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'exactly 1.00' }));
-      expect(await screen.findByText('Q* 0')).toBeInTheDocument();
+      const none = walk(depthInput({ ...DEPTH_START, legs: exactlyOne(DEPTH_START.legs) }));
+      expect(await screen.findByText(`Q* ${none.q_star}`)).toBeInTheDocument();
+      expect(signOf(none.q_star)).toBe(0);
     });
 
     it('"exactly 1.00" sends best asks summing to 1.00, every leg ascending, and the engine accepts it', async () => {
@@ -76,6 +81,15 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       for (const i of allSent<DepthWalkIn>(sent)) for (const l of i.legs) expect(ascending(l.levels), JSON.stringify(l)).toBe(true);
     });
 
+    it('"exactly 1.00" is off, with the reason, when the other legs already leave no room for it', async () => {
+      render(<DepthSection engine={engine} />);
+      expect(screen.getByRole('button', { name: 'exactly 1.00' })).toBeEnabled();
+      change('leg B level 1 price', '97');
+      change('leg C level 1 price', '97');
+      await waitFor(() => expect(screen.getByRole('button', { name: 'exactly 1.00' })).toBeDisabled());
+      expect(screen.getByText(/out of reach.*nearest the grid allows is Σ 1\.95/)).toBeInTheDocument();
+    });
+
     it('every level slider has room to move', () => {
       render(<DepthSection engine={engine} />);
       for (const leg of ['A', 'B', 'C']) {
@@ -96,6 +110,10 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       await waitFor(() => expect(last().legs).toHaveLength(4));
       expect(screen.getByRole('button', { name: 'add a leg' })).toBeDisabled();
       expect(screen.getByLabelText('leg D level 1 price')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'remove a leg' }));
+      fireEvent.click(screen.getByRole('button', { name: 'remove a leg' }));
+      await waitFor(() => expect(last().legs).toHaveLength(2));
+      expect(screen.getByRole('button', { name: 'remove a leg' })).toBeDisabled();
       expect(screen.queryByRole('alert')).toBeNull();
       expect(last().legs.every((l) => ascending(l.levels))).toBe(true);
     });
@@ -118,8 +136,8 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       expect(m.caught).toBe(true);
       const { container } = render(<EpisodeSection engine={engine} />);
       expect(screen.getByText('caught')).toHaveClass('m-verdict');
-      expect(screen.getByText(/^captured at 300 ms:/)).toBeInTheDocument();
-      const line = screen.getByText(/^captured at 300 ms:/);
+      const after = `captured ${(m.t_x as number) - (m.open_ms as number)} ms after it opened:`;
+      const line = screen.getByText((_, el) => el?.tagName === 'P' && (el.textContent ?? '').startsWith(after));
       expect(within(line).getByText(formatMoneyCents(m.captured, { signed: true }))).toBeInTheDocument();
       expect(line).toHaveClass("m-verdict-line");
       expect(line).toHaveTextContent("on the table");
@@ -176,19 +194,20 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
         </LegMissSection>,
       );
       expect(screen.getByText(basketVerdict(JSON.parse(all.output) as BasketModel).big)).toHaveClass('bl-big');
-      expect(screen.getByText('filled, +$2.50 on paper')).toBeInTheDocument();
       expect(screen.getByText('live part')).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'the usual burst' }));
-      expect(await screen.findByText('caught, and lost $6.00 on paper')).toBeInTheDocument();
-      expect(legItems()[1]).toHaveTextContent(/^leg B0 of 50/);
-      expect(legItems()[0]).toHaveTextContent('sold 50 at 0.54');
-      expect(legItems()[2]).toHaveTextContent('sold 50 at 0.64');
+      const b = JSON.parse(burst.output) as BasketModel;
+      expect(await screen.findByText(basketVerdict(b).big)).toHaveClass('bl-big');
+      expect(legItems()[1]).toHaveTextContent(bought(b, 1, 'B'));
+      expect(legItems()[0]).toHaveTextContent(sold(b, 0));
+      expect(legItems()[2]).toHaveTextContent(sold(b, 2));
     });
 
     it('leg C at 20 % at t_x (fixture no-one-leg-partial) fills 20 of 50', async () => {
       render(<LegMissSection engine={engine} />);
+      const part = JSON.parse(fixtureCase('basket_json', 'no-one-leg-partial').output) as BasketModel;
       change('leg C depth left at t_x', '20');
-      await waitFor(() => expect(legItems()[2]).toHaveTextContent(/^leg C20 of 50/));
+      await waitFor(() => expect(legItems()[2]).toHaveTextContent(bought(part, 2, 'C')));
     });
 
     it('its line says only what the engine says: all filled, a leg caught short, nothing filled', async () => {
@@ -198,8 +217,9 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       expect(await screen.findByText(F_QUIPS.caught)).toBeInTheDocument();
       expect(screen.queryByText(F_QUIPS.filled)).toBeNull();
       for (const l of ['A', 'B', 'C']) change(`leg ${l} depth left at t_x`, '0');
-      expect(await screen.findByText(F_QUIPS.nothing)).toBeInTheDocument();
-      expect(screen.getByText('nothing filled, $0.00 on paper')).toBeInTheDocument();
+      expect(await screen.findByText(F_QUIPS['nothing filled'])).toBeInTheDocument();
+      const zero = JSON.parse(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, { ...F_BURST, depth: [0, 0, 0] })))) as BasketModel;
+      expect(screen.getByText(basketVerdict(zero).big)).toBeInTheDocument();
     });
 
     it('sends the drained depth, the unwind book moved against us, the share count and the fee', async () => {
@@ -220,11 +240,19 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       expect(Object.keys(last()).sort()).toEqual(['kind', 'legs', 'q_request']);
     });
 
+    it('an engine error shows its one sentence and no deadpan line', async () => {
+      const broken = { ...engine, basket_json: () => JSON.stringify({ error: 'no books today' }) } as Engine;
+      const { container } = render(<LegMissSection engine={broken} />);
+      expect(await screen.findByRole('alert')).toHaveTextContent('no books today');
+      expect(container.querySelector('p.quip')).toBeNull();
+    });
+
     it('the largest unwind move and a drained book are accepted by the engine', async () => {
       render(<LegMissSection engine={engine} />);
       for (const l of ['A', 'B', 'C']) change(`leg ${l} unwind book against us`, '20');
       change('leg A depth left at t_x', '0');
-      await waitFor(() => expect(legItems()[0]).toHaveTextContent(/^leg A0 of 50/));
+      const m = JSON.parse(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, { ...F_START, depth: [0, 100, 100], against: [20, 20, 20] })))) as BasketModel;
+      await waitFor(() => expect(legItems()[0]).toHaveTextContent(bought(m, 0, 'A')));
       expect(screen.queryByRole('alert')).toBeNull();
     });
   });

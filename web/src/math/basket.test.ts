@@ -27,6 +27,18 @@ describe('section f input (spec 7b §6.2 f, 7b-A basket_json)', () => {
     expect(b.asks).toEqual([{ p: '0.99', s: '10' }]);
   });
 
+  it('keeps a two-level side valid when the cap would pile both on 0.99', () => {
+    const two = { bids: [], asks: [{ p: '0.98', s: '10' }, { p: '0.99', s: '20' }] };
+    expect(against(two, 5).asks).toEqual([{ p: '0.99', s: '10' }]);
+    expect(against(two, 1).asks).toEqual([{ p: '0.99', s: '10' }]);
+    expect(against(two, 0).asks).toEqual(two.asks);
+  });
+
+  it('drains in integer maths only, and leaves a size that is not a plain integer alone', () => {
+    expect(drain([{ p: '0.40', s: '99999999999999999999' }], 50)).toEqual([{ p: '0.40', s: '49999999999999999999' }]);
+    expect(drain([{ p: '0.40', s: '12.5' }], 50)).toEqual([{ p: '0.40', s: '12.5' }]);
+  });
+
   it('sends a fee on every leg, and no min_order or convert_fee_bips (the engine defaults "5" and "0")', () => {
     const start = basketInput(F_BOOKS, F_START);
     expect(Object.keys(start).sort()).toEqual(['kind', 'legs', 'q_request']);

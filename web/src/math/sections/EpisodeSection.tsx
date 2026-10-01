@@ -86,7 +86,7 @@ export function EpisodeSection({ engine }: { engine: Engine }) {
               <p className={m.open_ms === null ? 'm-verdict' : m.caught ? 'm-verdict pos' : 'm-verdict neg'}>{word}</p>
               {m.caught && m.captured !== null && lat !== null && (
                 <p className="m-verdict-line">
-                  {`captured at ${lat} ms: `}
+                  {`captured ${lat} ms after it opened: `}
                   <Money value={m.captured} signed cents /> on the table at t_x, in this teaching model
                 </p>
               )}
