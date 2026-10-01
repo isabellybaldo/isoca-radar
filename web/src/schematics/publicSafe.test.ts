@@ -54,6 +54,9 @@ function reach(entries: string[]): string[] {
   return [...seen].sort();
 }
 
+/** A JSX `style` prop becomes a style attribute, which the math CSP (style-src without 'unsafe-inline') blocks. */
+const STYLE_PROP = /\bstyle=\{/;
+
 describe('public-safe schematics (spec 7b §7.2)', () => {
   it('the reused schematics reach no dashboard module by a value import (review focus 5)', () => {
     expect(reach(ENTRIES).filter((f) => DASHBOARD.test(f))).toEqual([]);
@@ -62,5 +65,17 @@ describe('public-safe schematics (spec 7b §7.2)', () => {
   it('the walker follows value imports, so the check can fail', () => {
     expect(reach(['src/components/EmptyState.tsx'])).toContain('src/api/client.ts');
     expect(reach(['src/schematics/LockedBlocks.tsx'])).toContain('src/explain/models.ts');
+  });
+
+  it('no file reachable from the math entry sets a style attribute (the math CSP)', () => {
+    const files = reach(['src/math/main.tsx']).filter((f) => /\.tsx?$/.test(f));
+    expect(files).toContain('src/schematics/LatencyLadder.tsx'); // the walk really leaves src/math
+    expect(files.filter((f) => STYLE_PROP.test(readFileSync(ROOT + f, 'utf8')))).toEqual([]);
+  });
+
+  it('the style matcher catches a style prop, and only that', () => {
+    expect(STYLE_PROP.test('<div style={{ width: 1 }} />')).toBe(true);
+    expect(STYLE_PROP.test('<div style={s} />')).toBe(true);
+    expect(STYLE_PROP.test('<Bar fontStyle={x} className="style" />')).toBe(false);
   });
 });

@@ -118,6 +118,7 @@ describe('theme', () => {
     expect(mathHtml).not.toMatch(/\sstyle=|<style|\son\w+=/);
     expect(mathHtml).not.toContain('/api/');
     expect(mathHtml).not.toContain('/src/main.tsx');
-    expect(mathHtml).toContain('<div id="root"></div>');
+    // without JavaScript, or when the module does not load, the page still says one thing (React replaces it on mount)
+    expect(mathHtml).toContain('<div id="root"><p>This page draws with WebAssembly and needs JavaScript.</p></div>');
   });
 });

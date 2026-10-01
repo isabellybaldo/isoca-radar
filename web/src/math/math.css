@@ -32,8 +32,10 @@
 .app.math { max-width: 960px; }
 .m-top h1 { font-family: var(--px); font-size: 11px; line-height: 1.5; font-weight: 400; }
 .m-body { gap: 14px; grid-template-columns: minmax(0, 1fr); }
-.m-tag, .m-sec > .quip, .m-cap, .m-foot { max-width: 78ch; }
-.m-foot { color: var(--dim); }
+.m-tag, .m-sec > .quip, .m-cap, .m-foot p { max-width: 78ch; }
+/* The closing line is the page's footer, after main: it lines up with the column above (main's padding). */
+.m-foot { color: var(--dim); padding: 0 14px 14px; }
+@media (max-width: 600px) { .m-foot { padding: 0 8px 8px; } }
 /* Sliders and checkboxes in the palette, not the browser's blue. (The slider's value column above is 8ch: the
    longest value is "20 ticks", and at 5ch it ran over the section's border.) */
 .m-range input[type='range'], .m-check input { accent-color: var(--teal); }

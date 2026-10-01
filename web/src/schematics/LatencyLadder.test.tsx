@@ -151,7 +151,7 @@ describe('LatencyLadder', () => {
     expect(screen.getByText(MARKETS_MISSING)).toBeInTheDocument();
   });
 
-  it('names the unwind rule and keeps the numbers in a closed fold, labelled paper', () => {
+  it('names the unwind rule and keeps the numbers in a closed fold, labelled on paper', () => {
     draw();
     expect(screen.getByText(LADDER_CAPTION)).toBeInTheDocument();
     const nums = screen.getByText('the numbers').closest('details') as HTMLDetailsElement;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Engine } from '../wasm/types';
 import { ENGINE_FAILED, FOOTER, LOADING, TAGLINE, TITLE } from './copy';
 import { LiveBoundary } from './LiveBoundary';
@@ -36,6 +36,19 @@ function useEngine(engine: Promise<Engine>): EngineLoad {
   return st;
 }
 
+/** The sections exist only once the engine has loaded, so the browser's own jump to /math#d finds nothing on a
+ *  cold load. When they first mount, go to the one the address names: once, with the browser's default
+ *  behaviour (no smooth scrolling of our own, so reduced motion stays the visitor's setting). */
+function useSectionLink(ready: boolean): void {
+  const done = useRef(false);
+  useEffect(() => {
+    if (!ready || done.current) return;
+    done.current = true;
+    const m = /^#([a-f])$/.exec(window.location.hash);
+    if (m !== null) document.getElementById(m[1])?.scrollIntoView();
+  }, [ready]);
+}
+
 /**
  * 09-27 §6.1 + 7b §6.1: one column: the header, the live strip, sections a to f, and a line saying the
  * dashboard is private. No router, no api client, no help.ts, no link out. The snapshot and the engine are
@@ -49,6 +62,7 @@ function useEngine(engine: Promise<Engine>): EngineLoad {
  */
 export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () => number }) {
   const eng = useEngine(engine);
+  useSectionLink(eng.kind === 'ok');
   const load = useSnapshot(now);
   /** written_ms of the snapshot a live part threw on; a newer snapshot gets a fresh try (the boundaries are keyed by it). */
   const [brokeOn, setBrokeOn] = useState<number | null>(null);
@@ -86,8 +100,10 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
             </LegMissSection>
           </>
         )}
-        <p className="m-foot">{FOOTER}</p>
       </main>
+      <footer className="m-foot">
+        <p>{FOOTER}</p>
+      </footer>
     </div>
   );
 }

@@ -50,7 +50,15 @@ describe('math.css', () => {
   it('lays the page out as one column in the dashboard frame, with a link target per section', () => {
     expect(rule('.app.math {')).toMatch(/max-width:\s*960px/);
     expect(rule('.m-sec[id] {')).toMatch(/scroll-margin-top/);
-    expect(css).not.toMatch(/var\(--px\)[^}]*\}[^{]*\.m-(tag|foot|cap)/); // sentences stay in the body font
+    expect(rule('.m-foot {')).toMatch(/padding:/);
+  });
+  it('keeps sentences in the body font: no rule for the tagline, the captions or the footer sets a font', () => {
+    const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
+    for (const cls of ['.m-tag', '.m-foot', '.m-cap']) {
+      const mine = rules.filter((r) => r.sel.split(',').some((s) => new RegExp(`\\${cls}(?![\\w-])`).test(s)));
+      expect(mine.length, `no rule for ${cls}`).toBeGreaterThan(0);
+      for (const r of mine) expect(r.body, `${r.sel}`).not.toMatch(/font-family|--px|--big/);
+    }
     expect(rule('.m-top h1 {')).toMatch(/font-family:\s*var\(--px\)/);
   });
 });
