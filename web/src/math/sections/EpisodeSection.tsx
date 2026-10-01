@@ -54,6 +54,28 @@ function closing(out: EpisodeModel | EngineError): string | null {
   return out.caught ? E_QUIPS.caught : E_QUIPS.missed;
 }
 
+/** The answer section e draws: the verdict word, what was captured, the exact times, then the two drawings.
+ *  The story's chapter 5 draws the same. */
+export function EpisodeView({ m }: { m: EpisodeModel }) {
+  const lat = m.t_x !== null && m.open_ms !== null ? m.t_x - m.open_ms : null;
+  const word = m.open_ms === null ? 'no episode yet' : m.caught ? 'caught' : 'missed';
+  const times = timesLine(m);
+  return (
+    <>
+      <p className={m.open_ms === null ? 'm-verdict' : m.caught ? 'm-verdict pos' : 'm-verdict neg'}>{word}</p>
+      {m.caught && m.captured !== null && lat !== null && (
+        <p className="m-verdict-line">
+          {`captured ${lat} ms after it opened: `}
+          <Money value={m.captured} signed cents /> on the table at t_x, in this teaching model
+        </p>
+      )}
+      {times !== null && <p className="dim m-times">{times}</p>}
+      <UpdateBars updates={m.updates} peakMs={m.peak_ms} />
+      <DurationBars rows={episodeRows(m)} />
+    </>
+  );
+}
+
 /** 09-27 §6.2 e: scrub updates, proc/net/match sliders with the LADDER presets, secondsDelay. */
 export function EpisodeSection({ engine }: { engine: Engine }) {
   const [st, setSt] = useState<EpisodeState>(START);
@@ -85,27 +107,7 @@ export function EpisodeSection({ engine }: { engine: Engine }) {
         </>
       }
     >
-      <Out out={out}>
-        {(m) => {
-          const lat = m.t_x !== null && m.open_ms !== null ? m.t_x - m.open_ms : null;
-          const word = m.open_ms === null ? 'no episode yet' : m.caught ? 'caught' : 'missed';
-          const times = timesLine(m);
-          return (
-            <>
-              <p className={m.open_ms === null ? 'm-verdict' : m.caught ? 'm-verdict pos' : 'm-verdict neg'}>{word}</p>
-              {m.caught && m.captured !== null && lat !== null && (
-                <p className="m-verdict-line">
-                  {`captured ${lat} ms after it opened: `}
-                  <Money value={m.captured} signed cents /> on the table at t_x, in this teaching model
-                </p>
-              )}
-              {times !== null && <p className="dim m-times">{times}</p>}
-              <UpdateBars updates={m.updates} peakMs={m.peak_ms} />
-              <DurationBars rows={episodeRows(m)} />
-            </>
-          );
-        }}
-      </Out>
+      <Out out={out}>{(m) => <EpisodeView m={m} />}</Out>
     </Section>
   );
 }

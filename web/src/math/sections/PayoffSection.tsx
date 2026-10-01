@@ -53,6 +53,22 @@ function edgeNote(m: PayoffMatrix): string {
   return `per basket at the top of the book, ${sense}${m.broken.some(Boolean) ? ' · not risk-free: see ✗' : ''}`;
 }
 
+/** The answer section b draws: the payoff grid, and the engine's top-of-book edge when prices were sent.
+ *  The story's chapter 2 draws the same. */
+export function PayoffView({ m, kind }: { m: PayoffMatrix; kind: PayoffKind }) {
+  return (
+    <>
+      <PayoffGrid model={matrixToPayoff(m, kind)} label={kind === 'implication' ? 'payoff of the implication' : `payoff of the ${kind.toUpperCase()} basket`} />
+      {m.top_edge_gross !== null && (
+        <p className="m-formula">
+          <span>{`${FORMULA[kind]} =`}</span> <span className="m-big">{formatDecimal(m.top_edge_gross)}</span>{' '}
+          <span className="dim">{edgeNote(m)}</span>
+        </p>
+      )}
+    </>
+  );
+}
+
 /** 09-27 §6.2 b: YES / NO / implication, S 2–6, "Other listed", optional prices per leg. */
 export function PayoffSection({ engine }: { engine: Engine }) {
   const [st, setSt] = useState<PayoffState>(START);
@@ -60,7 +76,6 @@ export function PayoffSection({ engine }: { engine: Engine }) {
   const out = useMemo(() => call<PayoffMatrix>(engine, 'payoff_json', payoffInput(input)), [engine, input]);
   const set = (p: Partial<PayoffState>) => setSt((s) => ({ ...s, ...p }));
   const side = st.kind === 'no' ? 'bid' : 'ask';
-  const formula = FORMULA[input.kind];
   const sliders = () => {
     if (!st.priced) return null;
     if (st.kind === 'implication') {
@@ -107,19 +122,7 @@ export function PayoffSection({ engine }: { engine: Engine }) {
         </>
       }
     >
-      <Out out={out}>
-        {(m) => (
-          <>
-            <PayoffGrid model={matrixToPayoff(m, input.kind)} label={input.kind === 'implication' ? 'payoff of the implication' : `payoff of the ${input.kind.toUpperCase()} basket`} />
-            {m.top_edge_gross !== null && (
-              <p className="m-formula">
-                <span>{`${formula} =`}</span> <span className="m-big">{formatDecimal(m.top_edge_gross)}</span>{' '}
-                <span className="dim">{edgeNote(m)}</span>
-              </p>
-            )}
-          </>
-        )}
-      </Out>
+      <Out out={out}>{(m) => <PayoffView m={m} kind={input.kind} />}</Out>
     </Section>
   );
 }

@@ -29,8 +29,9 @@ const mirrorOf = (rows: Level[], p: string): Level | undefined => rows.find((r) 
  * bar's height the square root of its size; a thin line joins each YES price p to its NO price 1 − p across the
  * band between the rows. Every number is HTML beside the SVG (preserveAspectRatio="none").
  * The best levels come from the engine's best_bid / best_ask, so a reordered input cannot mislabel them.
+ * `headline={false}` leaves the D1 line out (the story's chapter 1: that line is the playground's).
  */
-export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[]; model: MirrorModel }) {
+export function MirrorBooks({ bids, asks, model, headline = true }: { bids: Level[]; asks: Level[]; model: MirrorModel; headline?: boolean }) {
   const max = Math.max(1, ...[...bids, ...asks, ...model.no_bids, ...model.no_asks].map((l) => geoPos(l.s)));
   const h = (l: Level) => Math.sqrt(geoPos(l.s) / max) * BAR;
   const d = mirrorDomain([...bids, ...asks, ...model.no_bids, ...model.no_asks].map((l) => l.p));
@@ -57,10 +58,12 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
   const noBid = model.best_ask && mirrorOf(model.no_bids, model.best_ask.p);
   return (
     <figure className="mirror" aria-label="one book, shown twice">
-      <p className="mb-big">
-        <span>{`D1 long ${model.d1_long ?? '—'}`}</span>
-        <span>{`short ${model.d1_short ?? '—'}`}</span>
-      </p>
+      {headline && (
+        <p className="mb-big">
+          <span>{`D1 long ${model.d1_long ?? '—'}`}</span>
+          <span>{`short ${model.d1_short ?? '—'}`}</span>
+        </p>
+      )}
       {model.crossed && <p className="mb-alert">{CROSSED}</p>}
       <div className="mb-row">
         <ul className="plain mb-lab" aria-hidden="true">
