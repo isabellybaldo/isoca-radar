@@ -98,7 +98,8 @@ services:
       - traefik.http.routers.ct-math.service=ct-math
       - traefik.http.services.ct-math.loadbalancer.server.port=8081
       - traefik.http.routers.ct-math.priority=1000
-      - traefik.http.routers.ct-math.middlewares=ct-math-rl@docker,ct-math-if@docker,ct-sec@docker,ct-math-csp@docker
+      # security headers and the CSP first, the limits after them: Traefik's own 429 answers carry the headers too
+      - traefik.http.routers.ct-math.middlewares=ct-sec@docker,ct-math-csp@docker,ct-math-rl@docker,ct-math-if@docker
       - traefik.http.middlewares.ct-math-rl.ratelimit.average=5
       - traefik.http.middlewares.ct-math-rl.ratelimit.burst=20
       - traefik.http.middlewares.ct-math-rl.ratelimit.sourcecriterion.ipstrategy.depth=0

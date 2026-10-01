@@ -125,10 +125,14 @@ describe('nginx (09-27 §5.2, 7b §5.3)', () => {
     expect(p).toMatch(/location \/math-assets\/ \{[^}]*root \/usr\/share\/nginx\/html;[^}]*immutable[^}]*gzip_static on;[^}]*try_files \$uri =404;/);
     expect(p).toMatch(/location = \/math-data\/public\.json \{[^}]*root \/srv\/ct-public-root;[^}]*disable_symlinks on;[^}]*max-age=60[^}]*gzip on;[^}]*gzip_types application\/json;[^}]*try_files \$uri =404;/);
     expect(p).toMatch(/location \/ \{\n\s*return 404;\n\s*\}/);
-    expect(p).toContain('gzip_vary on;');
     // no server-level root, no index, no other root than the two the locations need
     const outside = p.replace(/ {4}location [\s\S]*?\n {4}\}/g, '').replace(/^\s*#.*$/gm, '');
     expect(outside).not.toMatch(/\broot\b|\bindex\b|try_files/);
+    // server level, so they cover gzip_static (the assets) and gzip (the snapshot): without `gzip_proxied any`
+    // a request with a Via header gets neither
+    expect(outside).toMatch(/^ {4}gzip_vary on;$/m);
+    expect(outside).toMatch(/^ {4}gzip_proxied any;$/m);
+    expect(p.match(/gzip_proxied/g)).toHaveLength(1);
     expect(p.match(/^\s*root /gm)).toHaveLength(3);
     expect(repo('docker/web/nginx.conf').match(/root \/srv\/ct-public-root;/g)).toHaveLength(1);
   });
@@ -170,7 +174,8 @@ describe('compose.web.yml (7b §5.3)', () => {
       'routers.ct-math.service=ct-math',
       'services.ct-math.loadbalancer.server.port=8081',
       'routers.ct-math.priority=1000',
-      'routers.ct-math.middlewares=ct-math-rl@docker,ct-math-if@docker,ct-sec@docker,ct-math-csp@docker',
+      // headers before the limits: a 429 written by Traefik's own limiters passes back through ct-sec and the CSP
+      'routers.ct-math.middlewares=ct-sec@docker,ct-math-csp@docker,ct-math-rl@docker,ct-math-if@docker',
       'middlewares.ct-math-rl.ratelimit.average=5',
       'middlewares.ct-math-rl.ratelimit.burst=20',
       'middlewares.ct-math-rl.ratelimit.sourcecriterion.ipstrategy.depth=0',
