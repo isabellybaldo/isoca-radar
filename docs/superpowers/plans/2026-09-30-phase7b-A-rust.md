@@ -6460,4 +6460,4 @@ Still open (owner):
 1. **Sim premise 3 and the scanner restart.** The runbook recreates only the api (spec §9). The scanner, analyze and compact pick up the 7b image at their next restart (the boot unit, a reboot), and that scanner run is the first with sim premise 3: Edge capture and SWEET count from it anew. Recreate the scanner in step A on purpose (a planned restart, one more reconnect window), or leave it to the next restart as written?
 2. **`publicToLadder` and `measured.host`** (7b-B): the snapshot drops `host`; 7b-B either passes `""` or narrows the component's type.
 3. **09-27 §11 `oha`** stays with 7b-B's flood test.
-4. **Spec text:** §3.3's identity sentence and §5.2's "both sides" size test should be amended to match Tasks 4 and 13.
+4. ~~Spec text~~: done in spec commit e64d638 (ledger identity, size test).

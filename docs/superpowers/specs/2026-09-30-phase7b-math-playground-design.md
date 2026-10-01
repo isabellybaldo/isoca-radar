@@ -72,7 +72,7 @@ The fill arithmetic of `PaperTrader::execute` and `PaperTrader::unwind` (`crates
   - `held` needing rounding.
 - New property test (random books, 2–6 legs): `q_eff ≤` every `per_leg.filled`, every `excess ≥ 0`, and an unwind never sells more than `min(round2(qty), round2(held))`.
 - **`basket_cash` against the ledger:** for random fills, `net_cash` equals the sum of `cash_delta` over the ledger rows that `Account::buy`/`sell`/`convert` produce for the same fills, and the ledger's realized total equals `net_cash` plus the open basis (for a NO basket, the open basis is Σ `held_unsold.basis`). *(Corrected by plan 7b-A: the first draft's identity failed on a two-leg example.)*
-- **The replay identity check (runbook step, before merging 7b-A):** run `scanner::replay::replay_dir_paper_with` over one busy raw hour at `main` and at the branch, through a small script in `scripts/`. The `fills`, `exec` and ledger outputs must be byte-identical (a sorted dump compared with `sha256sum`).
+- **The replay identity check (runbook step, before merging 7b-A):** run `scanner::replay::replay_dir_paper_with` over one busy raw hour at `main` and at the branch, through `scripts/replay-identity.sh`. All six paper row kinds (intent, exec, fill, ledger, markout, account) must be byte-identical, in emission order and sorted, and the frame and parse-error counts must match. *(Measured 2026-09-30 on the 2026-09-28 17:00 hour: 6,721,810 frames, 7,552 paper rows, IDENTICAL.)*
 
 ### 3.4 `arb-wasm`
 
@@ -219,14 +219,19 @@ As 09-27 §8 (minus the panel items, which 7a covered), plus:
 
 - **7b-A** (the rust image, the api writer and the volume): runbook `docs/superpowers/runbooks/phase7b-api-vps.md`.
   - The replay identity check runs on the PC before merge.
-  - Then the rust image is built and shipped, and `api` recreated with the new mount.
+  - Then the rust image is built and shipped. Deploy order (owner decision 2026-09-30: sim premise 3 starts at a known minute):
+    1. stop analyze and compact;
+    2. recreate `api` with the new mount while the scanner still captures;
+    3. recreate the scanner alone in one command, and record its start as the premise-3 start;
+    4. start analyze, then compact.
+  - Nothing is installed on the VPS: the whitelist check runs on the PC.
   - Then, within 60 s, the file must be readable without the api image, which is distroless with no shell:
 
     ```
     docker run --rm -v cute-trading_public-data:/v:ro alpine sh -c 'stat -c %u /v; cat /v/public.json' | …
     ```
 
-    The expected output is `65532`, then JSON with `v: 1` whose key paths match the whitelist (checked with `jq` on the VPS or on the PC).
+    The expected output is `65532`, then JSON with `v: 1` whose key paths match the whitelist (checked on the PC with python against the 48 paths of the Rust whitelist test).
 - **7b-B** (the web image, the web mount and the Traefik labels): runbook `docs/superpowers/runbooks/phase7b-web-vps.md`.
   - The `curl` checks without a cookie (09-27 §8), plus:
     - `/math-data/public.json` returns 200 with `application/json`;
