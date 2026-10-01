@@ -1,6 +1,9 @@
 //! 09-27 spec §8: any input up to 16 KiB returns a model or {"error"}, never a panic.
 //! Every function gets both garbage and structurally valid input (random values around and across
-//! the limits), so the deep paths behind the serde layer are reached.
+//! the limits), so the deep paths behind the serde layer are reached. The accepting shapes also
+//! carry the hostile end of every decimal the limits allow (28-dp fee rates, 6-dp sizes and
+//! q_request, sizes at 1000000, fractional convert_fee_bips, a tiny or huge min_order), so an
+//! unchecked Decimal `*` or `+` that overflows behind the facade would panic here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use arb_wasm::api::{
     basket_json, classify_json, depth_walk_json, episode_json, mirror_json, payoff_json,
@@ -24,10 +27,41 @@ fn price() -> impl Strategy<Value = String> {
     ]
 }
 
+/// A size with all 6 decimals, anywhere up to the limit.
+fn size_6dp() -> impl Strategy<Value = String> {
+    (0u32..=999_999, 1u32..=999_999).prop_map(|(n, f)| format!("{n}.{f:06}"))
+}
+
 fn size() -> impl Strategy<Value = String> {
     prop_oneof![
-        18 => (1u32..=2000).prop_map(|n| n.to_string()),
+        14 => (1u32..=2000).prop_map(|n| n.to_string()),
+        2 => size_6dp(),
+        2 => prop_oneof![Just("1000000"), Just("999999.999999"), Just("0.000001")]
+            .prop_map(str::to_string),
         1 => r#"([0-9]{1,8}|0\.0000001|0|-1|1000000|1000001|x)"#,
+    ]
+}
+
+/// The accepting sizes: mostly small integers, then 6 decimals, the limit itself, and the
+/// smallest size there is.
+fn ok_size() -> impl Strategy<Value = String> {
+    prop_oneof![
+        12 => (1u32..=1000).prop_map(|n| n.to_string()),
+        3 => size_6dp(),
+        2 => Just("1000000".to_string()),
+        1 => Just("999999.999999".to_string()),
+        1 => Just("0.000001".to_string()),
+    ]
+}
+
+/// Fee rates with 28 decimals, the most a Decimal holds: the smallest, the largest below 1, one
+/// beside a live rate, and any other.
+fn rate_28dp() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("0.0000000000000000000000000001".to_string()),
+        Just("0.9999999999999999999999999999".to_string()),
+        Just("0.0700000000000000000000000001".to_string()),
+        r#"0\.[0-9]{28}"#,
     ]
 }
 
@@ -48,6 +82,19 @@ fn fee() -> impl Strategy<Value = String> {
         3 => Just("null".to_string()),
         2 => (prop_oneof![Just("0.07"), Just("0.04"), Just("0"), Just("-1"), Just("2")], 0u8..=5)
             .prop_map(|(r, e)| format!(r#"{{"rate":"{r}","exponent":{e}}}"#)),
+        2 => (rate_28dp(), 0u8..=5)
+            .prop_map(|(r, e)| format!(r#"{{"rate":"{r}","exponent":{e}}}"#)),
+    ]
+}
+
+/// The accepting fees: none, a live schedule, or a 28-dp rate at every valid exponent.
+fn ok_fee() -> impl Strategy<Value = String> {
+    prop_oneof![
+        5 => Just("null".to_string()),
+        2 => (prop_oneof![Just("0.07"), Just("0.04")], 1u8..=4)
+            .prop_map(|(r, e)| format!(r#"{{"rate":"{r}","exponent":{e}}}"#)),
+        3 => (rate_28dp(), 1u8..=4)
+            .prop_map(|(r, e)| format!(r#"{{"rate":"{r}","exponent":{e}}}"#)),
     ]
 }
 
@@ -66,14 +113,22 @@ fn basket() -> impl Strategy<Value = String> {
         ],
         prop_oneof![
             9 => (1u32..=5000).prop_map(|n| n.to_string()),
+            2 => size_6dp(),
             1 => r#"([0-9]{1,7}(\.[0-9]{1,7})?|-1)"#,
         ],
         prop_oneof![
             Just(""),
             Just(r#","convert_fee_bips":"50""#),
             Just(r#","convert_fee_bips":"10001""#),
+            Just(r#","convert_fee_bips":"12.5""#),
+            Just(r#","convert_fee_bips":"0.0000000000000000000000000001""#),
+            Just(r#","convert_fee_bips":"9999.999999999999999999999999""#),
             Just(r#","min_order":"0""#),
-            Just(r#","min_order":"5""#)
+            Just(r#","min_order":"5""#),
+            Just(r#","min_order":"0.000001""#),
+            Just(r#","min_order":"0.0000001""#),
+            Just(r#","min_order":"1000000""#),
+            Just(r#","min_order":"1000000.000001""#)
         ],
     )
         .prop_map(|(kind, legs, q, extra)| {
@@ -91,40 +146,44 @@ fn basket() -> impl Strategy<Value = String> {
 }
 
 /// The accepting shapes: everything on the grid, inside the limits, a book that can trade.
-/// One YES leg: asks from `a` up, bids just under `a`, 1..=3 levels a side.
-fn grid_leg(
-    a: std::ops::RangeInclusive<u32>,
-) -> impl Strategy<Value = (u32, usize, usize, u32, bool)> {
+/// One YES leg: the first ask, the ask and bid level counts, a size per level (3 asks then 3
+/// bids), live or not, and its fee.
+type GridLeg = (u32, usize, usize, Vec<String>, bool, String);
+
+/// Asks from `a` up, bids just under `a`, 1..=3 levels a side.
+fn grid_leg(a: std::ops::RangeInclusive<u32>) -> impl Strategy<Value = GridLeg> {
     (
         a,
         1usize..=3,
         1usize..=3,
-        1u32..=1000,
+        prop::collection::vec(ok_size(), 6),
         prop::bool::weighted(0.9),
+        ok_fee(),
     )
 }
 
-fn render_leg((a, na, nb, size, live): (u32, usize, usize, u32, bool)) -> String {
-    let asks: Vec<String> = (0..na as u32)
-        .map(|k| format!(r#"{{"p":"0.{:02}","s":"{size}"}}"#, a + k))
+fn render_leg((a, na, nb, sizes, live, fee): GridLeg) -> String {
+    let asks: Vec<String> = (0..na)
+        .map(|k| format!(r#"{{"p":"0.{:02}","s":"{}"}}"#, a + k as u32, sizes[k]))
         .collect();
-    let bids: Vec<String> = (1..=nb as u32)
+    let bids: Vec<String> = (1..=nb)
         .map(|k| {
             format!(
-                r#"{{"p":"0.{:02}","s":"{size}"}}"#,
-                a.saturating_sub(k).max(1)
+                r#"{{"p":"0.{:02}","s":"{}"}}"#,
+                a.saturating_sub(k as u32).max(1),
+                sizes[2 + k]
             )
         })
         .collect();
     let st = if live { "live" } else { "other" };
     format!(
-        r#"{{"status":"{st}","bids":[{}],"asks":[{}],"fee":null}}"#,
+        r#"{{"status":"{st}","bids":[{}],"asks":[{}],"fee":{fee}}}"#,
         bids.join(","),
         asks.join(",")
     )
 }
 
-fn render_book(leg: (u32, usize, usize, u32, bool)) -> String {
+fn render_book(leg: GridLeg) -> String {
     let v: serde_json::Value = serde_json::from_str(&render_leg(leg)).unwrap();
     format!(r#"{{"bids":{},"asks":{}}}"#, v["bids"], v["asks"])
 }
@@ -145,17 +204,37 @@ fn ok_basket() -> impl Strategy<Value = String> {
     prop_oneof![Just(true), Just(false)].prop_flat_map(|yes| {
         let open = if yes { 5..=33 } else { 62..=95 };
         (
-            prop::collection::vec((grid_leg(open), grid_leg(5..=95), grid_leg(5..=95)), 2..=4),
-            1u32..=500,
-            prop_oneof![Just(""), Just(r#","min_order":"1""#)],
-            prop_oneof![Just(""), Just(r#","convert_fee_bips":"50""#)],
+            prop::collection::vec(
+                (grid_leg(open), grid_leg(5..=95), grid_leg(5..=95), ok_fee()),
+                2..=4,
+            ),
+            prop_oneof![
+                8 => (1u32..=500).prop_map(|n| n.to_string()),
+                3 => size_6dp(),
+                1 => Just("1000000".to_string()),
+            ],
+            prop_oneof![
+                4 => Just(""),
+                2 => Just(r#","min_order":"1""#),
+                2 => Just(r#","min_order":"0.000001""#),
+                1 => Just(r#","min_order":"4.999999""#),
+                1 => Just(r#","min_order":"1000000""#),
+            ],
+            prop_oneof![
+                3 => Just(""),
+                2 => Just(r#","convert_fee_bips":"50""#),
+                1 => Just(r#","convert_fee_bips":"12.5""#),
+                1 => Just(r#","convert_fee_bips":"0.0000000000000000000000000001""#),
+                1 => Just(r#","convert_fee_bips":"9999.999999999999999999999999""#),
+                1 => Just(r#","convert_fee_bips":"10000""#),
+            ],
         )
             .prop_map(move |(legs, q, extra, conv)| {
                 let legs: Vec<String> = legs
                     .into_iter()
-                    .map(|(o, t, u)| {
+                    .map(|(o, t, u, fee)| {
                         format!(
-                            r#"{{"open":{},"t_x":{},"unwind":{},"fee":null}}"#,
+                            r#"{{"open":{},"t_x":{},"unwind":{},"fee":{fee}}}"#,
                             render_book(o),
                             render_book(t),
                             render_book(u)
@@ -184,8 +263,9 @@ fn ok_depth() -> impl Strategy<Value = String> {
             let legs: Vec<String> = legs
                 .into_iter()
                 .map(|l| {
+                    let fee = l.5.clone();
                     let v: serde_json::Value = serde_json::from_str(&render_book(l)).unwrap();
-                    format!(r#"{{"levels":{},"fee":null}}"#, v["asks"])
+                    format!(r#"{{"levels":{},"fee":{fee}}}"#, v["asks"])
                 })
                 .collect();
             format!(r#"{{"rule":"{rule}","legs":[{}]}}"#, legs.join(","))
