@@ -64,6 +64,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]                # nginx-unprivileged binds >1024 and never chowns at runtime; needs none
     tmpfs: [/tmp]
+    # Phase 7b §5.3: the api's snapshot volume, read-only (nginx serves only public.json from it). The api
+    # mounted it first (7b-A), so the volume root keeps the image's 65532 owner.
+    volumes:
+      - public-data:/srv/ct-public-root/math-data:ro
     cpus: "0.1"
     mem_limit: 32m
     logging: *logging
@@ -76,6 +80,24 @@ services:
       - traefik.http.routers.ct-web.tls.certresolver=letsencrypt
       - traefik.http.routers.ct-web.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker
       - traefik.http.services.ct-web.loadbalancer.server.port=8080
+      # Phase 7b (09-27 §5.3, 7b §5.3): the public playground. Static files only, no ct-auth, per-IP rate and
+      # in-flight limits (depth=0: DNS is a plain A record, no CDN), its own CSP with 'wasm-unsafe-eval'.
+      # Any path it does not match still falls to ct-web (login).
+      # In-flight is 8, not 4: a cold load fetches the js and css together, then the wasm and public.json
+      # together, so a burst of 4 can sit right at the cap (plus a retry or the next tab); 8 clears a normal
+      # load and still holds one IP to 8 concurrent requests. The rate limit (5/s, burst 20) fits the 5 requests.
+      - "traefik.http.routers.ct-math.rule=Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))"
+      - traefik.http.routers.ct-math.entrypoints=websecure
+      - traefik.http.routers.ct-math.tls.certresolver=letsencrypt
+      - traefik.http.routers.ct-math.service=ct-web
+      - traefik.http.routers.ct-math.priority=1000
+      - traefik.http.routers.ct-math.middlewares=ct-math-rl@docker,ct-math-if@docker,ct-sec@docker,ct-math-csp@docker
+      - traefik.http.middlewares.ct-math-rl.ratelimit.average=5
+      - traefik.http.middlewares.ct-math-rl.ratelimit.burst=20
+      - traefik.http.middlewares.ct-math-rl.ratelimit.sourcecriterion.ipstrategy.depth=0
+      - traefik.http.middlewares.ct-math-if.inflightreq.amount=8
+      - traefik.http.middlewares.ct-math-if.inflightreq.sourcecriterion.ipstrategy.depth=0
+      - "traefik.http.middlewares.ct-math-csp.headers.contentSecurityPolicy=default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
   oauth2-proxy:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0@sha256:786bed0f000c0f8a7b31619244ebab02406a8856a4faf3f5fb1df61fbd6c30ed
