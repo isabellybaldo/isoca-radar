@@ -19,7 +19,9 @@ struct PriceIn {
 #[serde(deny_unknown_fields)]
 struct PayoffIn {
     kind: String,
-    s: usize,
+    /// A fixed width, so a huge value is the same parse error on native and on wasm32 (where
+    /// `usize` is 32 bits): the outputs are compared byte for byte.
+    s: u32,
     other_listed: bool,
     prices: Option<Vec<PriceIn>>,
 }
@@ -49,16 +51,17 @@ pub fn payoff_json(input: &str) -> String {
         if i.kind != "implication" && !(2..=6).contains(&i.s) {
             return Err("s must be 2 to 6".to_string());
         }
+        let s = usize::try_from(i.s).map_err(|_| "s must be 2 to 6".to_string())?;
         let m = match i.kind.as_str() {
-            "yes" => payoff::yes_basket(i.s, i.other_listed).map_err(|e| e.to_string())?,
-            "no" => payoff::no_basket(i.s, i.other_listed).map_err(|e| e.to_string())?,
+            "yes" => payoff::yes_basket(s, i.other_listed).map_err(|e| e.to_string())?,
+            "no" => payoff::no_basket(s, i.other_listed).map_err(|e| e.to_string())?,
             "implication" => payoff::implication(),
             k => return Err(format!("unknown kind {k:?}")),
         };
         let top_edge_gross = match &i.prices {
             None => None,
             Some(ps) => {
-                let want = if i.kind == "implication" { 2 } else { i.s };
+                let want = if i.kind == "implication" { 2 } else { s };
                 if ps.len() != want {
                     return Err(format!("expected {want} prices, got {}", ps.len()));
                 }

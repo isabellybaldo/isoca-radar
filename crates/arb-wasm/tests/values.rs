@@ -76,6 +76,24 @@ fn bad_mirror_and_payoff_inputs_are_one_sentence_errors() {
 }
 
 #[test]
+fn an_s_past_32_bits_is_the_same_parse_error_on_every_target() {
+    // `s` is a u32, so 5000000000 fails in serde on native and on wasm32 alike. As a `usize` it
+    // parsed on 64-bit ("s must be 2 to 6", and an implication accepted it) and failed on wasm32.
+    for (kind, column) in [("yes", 28), ("no", 27), ("implication", 36)] {
+        let out = payoff_json(&format!(
+            r#"{{"kind":"{kind}","s":5000000000,"other_listed":true,"prices":null}}"#
+        ));
+        assert_eq!(
+            err(&out),
+            format!(
+                "not valid input: invalid value: integer `5000000000`, expected u32 at line 1 column {column}"
+            ),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
 fn deeply_nested_input_under_16_kib_is_one_error_not_a_crash() {
     // What protects this is the typed input structs: they expect an object of known fields, so
     // `[[[…` and `{"bids":{"bids":…` are rejected at the first wrong token, long before any deep
