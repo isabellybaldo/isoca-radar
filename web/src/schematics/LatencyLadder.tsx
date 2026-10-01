@@ -1,11 +1,10 @@
 import { useId } from 'react';
-import type { LadderRung } from '../api/types';
 import { Empty } from './Empty';
 import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
 import {
-  type LadderModel, MIN_EXEC, NOT_MONOTONE, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
+  type LadderModel, MIN_EXEC, NOT_MONOTONE, type Rung, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
   slotX, stackRung, usBand, usText, yDomain,
 } from '../lib/ladder';
 
@@ -52,7 +51,7 @@ function Markets({ model }: { model: LadderModel }) {
   );
 }
 
-function LadderTable({ rungs }: { rungs: LadderRung[] }) {
+function LadderTable({ rungs }: { rungs: Rung[] }) {
   if (rungs.length === 0) return <Empty text={NO_RUNGS} />;
   return (
     <div className="scroll">
@@ -67,7 +66,7 @@ function LadderTable({ rungs }: { rungs: LadderRung[] }) {
         </thead>
         <tbody>
           {rungs.map((r) => (
-            <tr key={r.account_id}>
+            <tr key={r.scenario}>
               <td>{r.scenario}</td>
               <td className="num">{r.n_exec}</td>
               <td className="num">{r.n_leg_risk}</td>
@@ -143,7 +142,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           const cx = slotX(SLOTS - 1) * W + (j % 2 === 0 ? -14 : 14);
           // A zero-length line with a square cap and a non-scaling stroke: a square at any stretch (a rect would squash).
           const y = sy(geo(r.net));
-          return <line key={r.account_id} className="ll-extra" data-scenario={r.scenario} x1={cx} x2={cx} y1={y} y2={y} />;
+          return <line key={r.scenario} className="ll-extra" data-scenario={r.scenario} x1={cx} x2={cx} y1={y} y2={y} />;
         })}
         <line className="ll-zero" x1={0} x2={W} y1={zero} y2={zero} />
         {beX !== null && <line className="ll-be" x1={beX} x2={beX} y1={0} y2={H} />}
@@ -176,7 +175,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
       {model.extras.length > 0 && (
         <ul className="plain ll-extras" aria-label="extras">
           {model.extras.map((r) => (
-            <li key={r.account_id}>
+            <li key={r.scenario}>
               {extraText(r)}: <Money value={r.net} signed tone cents /> on paper · n {r.n_exec}
             </li>
           ))}

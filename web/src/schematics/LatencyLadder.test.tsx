@@ -1,7 +1,8 @@
 import { render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import type { Ladder } from '../api/types';
-import { LADDER, NOT_MONOTONE, SLOTS, ladderModel, slotX } from '../lib/ladder';
+import { describe, expect, it, vi } from 'vitest';
+import type { Ladder, LadderRung, SweetRow } from '../api/types';
+import { LADDER, type LadderIn, NOT_MONOTONE, type Rung, SLOTS, ladderModel, slotX } from '../lib/ladder';
+import type { GridRow } from '../lib/sweet';
 import { ladderFixture, ladderLiveFixture } from '../test/fixtures';
 import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING } from './LatencyLadder';
 
@@ -158,5 +159,33 @@ describe('LatencyLadder', () => {
     expect(within(nums).getAllByRole('row')).toHaveLength(9); // header + 6 rungs + 2 extras
     expect(within(nums).getByText(/^paper, since the epoch start/)).toBeInTheDocument();
     expect(screen.getAllByText('−$80.10')).toHaveLength(2); // extras line + the numbers fold
+  });
+});
+
+/** A rung as the public snapshot carries it (spec 7b §5.1): no account id. */
+const noAccount = (r: LadderRung): Rung => {
+  const { account_id, ...rest } = r;
+  void account_id;
+  return rest;
+};
+/** A Sweet row with only the fields the grid reads. */
+const gridOnly = (r: SweetRow): GridRow => ({
+  side: r.side, scenario: r.scenario, fee_bips: r.fee_bips, latency_ms: r.latency_ms, dimension: r.dimension, bucket: r.bucket,
+  label: r.label, n_exec: r.n_exec, clusters: r.clusters, mean: r.mean, lo: r.lo, hi: r.hi,
+});
+
+describe('LatencyLadder on the public snapshot (spec 7b §7.2)', () => {
+  it('draws a ladder whose rungs carry no account_id, keyed by scenario (review focus 4)', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const l = ladderFixture();
+    const input: LadderIn = { ...l, measured: { latency_ms: 155 }, rungs: l.rungs.map(noAccount), markets: l.markets.map(gridOnly) };
+    const { container } = render(<LatencyLadder model={ladderModel(input)} />);
+    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big');
+    expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
+    expect(container.querySelectorAll('line.ll-extra')).toHaveLength(2);
+    expect(within(screen.getByRole('list', { name: 'extras' })).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(screen.getByRole('table', { name: 'which markets' })).getAllByRole('button').length).toBeGreaterThan(0);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 });
