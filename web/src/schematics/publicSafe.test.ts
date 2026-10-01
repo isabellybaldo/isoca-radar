@@ -9,6 +9,8 @@ declare const process: { cwd(): string };
 const ROOT = `${process.cwd()}/`;
 /** 09-27 §4.4: what the math bundle must never hold. */
 const DASHBOARD = /^src\/(pages|api|explain)\/|^src\/help\.ts$/;
+/** The story (spec 2026-10-01 §7): on the public page through MathPage. */
+const STORY = ['src/math/story/Story.tsx', 'src/math/story/Chapter.tsx', 'src/math/story/Words.tsx', 'src/math/story/copy.ts', 'src/math/story/presets.ts'];
 /** The public schematics; Tasks 6–8 add theirs. */
 const ENTRIES = [
   'src/schematics/LatencyLadder.tsx', 'src/schematics/DurationBars.tsx', 'src/schematics/PayoffGrid.tsx',
@@ -18,6 +20,7 @@ const ENTRIES = [
   'src/math/sections/DepthSection.tsx', 'src/math/sections/EpisodeSection.tsx', 'src/math/sections/LegMissSection.tsx',
   'src/math/useSnapshot.ts', 'src/math/LiveStrip.tsx', 'src/math/LiveLadder.tsx',
   'src/math/LiveBoundary.tsx', 'src/math/MathPage.tsx', 'src/math/main.tsx',
+  ...STORY,
 ];
 /** `import x from '…'`, `import { type A, b } from '…'`, `export … from '…'`, `import '…'`; never `import type` / `export type`. */
 const IMPORT = /^\s*(?:import|export)\s+(?!type\b)[^'"]*?\s*from\s*'([^']+)'|^\s*import\s+'([^']+)'/gm;
@@ -60,6 +63,7 @@ const STYLE_PROP = /\bstyle=\{/;
 describe('public-safe schematics (spec 7b §7.2)', () => {
   it('the reused schematics reach no dashboard module by a value import (review focus 5)', () => {
     expect(reach(ENTRIES).filter((f) => DASHBOARD.test(f))).toEqual([]);
+    expect(reach(['src/math/main.tsx']).filter((f) => DASHBOARD.test(f))).toEqual([]);
   });
 
   it('the walker follows value imports, so the check can fail', () => {
@@ -70,6 +74,7 @@ describe('public-safe schematics (spec 7b §7.2)', () => {
   it('no file reachable from the math entry sets a style attribute (the math CSP)', () => {
     const files = reach(['src/math/main.tsx']).filter((f) => /\.tsx?$/.test(f));
     expect(files).toContain('src/schematics/LatencyLadder.tsx'); // the walk really leaves src/math
+    for (const f of STORY) expect(files, f).toContain(f); // and reaches the story from the entry, through MathPage
     expect(files.filter((f) => STYLE_PROP.test(readFileSync(ROOT + f, 'utf8')))).toEqual([]);
   });
 

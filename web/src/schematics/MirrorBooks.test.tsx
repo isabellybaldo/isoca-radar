@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { describeWasm, fixtureCase, loadTestEngine } from '../wasm/testEngine';
 import type { Engine, MirrorIn, MirrorModel } from '../wasm/types';
@@ -58,6 +58,20 @@ describe('MirrorBooks (parent §5.7 a)', () => {
     expect(container.querySelectorAll('line.mb-link')).toHaveLength(input.bids.length + input.asks.length);
     expect(screen.getByText(CROSSED)).toHaveClass('mb-alert');
     expect(container.querySelector('.mb-refl')?.children.length).toBeGreaterThan(0);
+  });
+
+  it('remembers its "every level" fold under foldId, so a second drawing on one page keeps its own state (ruling R5)', async () => {
+    const { input, model } = mirror('fed-book');
+    const fold = () => screen.getByText('every level').closest('details') as HTMLDetailsElement;
+    const { unmount } = render(<MirrorBooks bids={input.bids} asks={input.asks} model={model} />);
+    fireEvent.click(screen.getByText('every level'));
+    await waitFor(() => expect(localStorage.getItem('fold:mirror-levels')).toBe('1')); // the default: the id it always had
+    unmount();
+    render(<MirrorBooks bids={input.bids} asks={input.asks} model={model} foldId="story:mirror-levels" />);
+    expect(fold().open).toBe(false); // the other drawing's fold is not this one's
+    fireEvent.click(screen.getByText('every level'));
+    await waitFor(() => expect(localStorage.getItem('fold:story:mirror-levels')).toBe('1'));
+    expect(fold().open).toBe(true);
   });
 
   it('zooms the price axis onto the prices drawn: the ends and 0.50 are labelled, 0.50 stays in the middle (Task 16 V1)', () => {

@@ -5,11 +5,11 @@
 .m-back { margin: 0; font-size: 13px; }
 .m-controls { display: grid; gap: 8px; min-width: 0; }
 .m-btn { font-family: var(--px); font-size: 8px; padding: 10px 12px; min-height: 44px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; justify-self: start; }
-.m-sec .seg button { min-height: 44px; padding: 8px 10px; }
+.m-ch .seg button, .m-sec .seg button { min-height: 44px; padding: 8px 10px; }
 .m-range { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 8ch; gap: 8px; align-items: center; min-height: 44px; font-size: 13px; }
 .m-range input[type='range'] { width: 100%; min-width: 0; min-height: 44px; margin: 0; }
 .m-range:has(input:disabled) { opacity: 0.45; }
-.m-sec .fold summary { min-height: 44px; display: flex; align-items: center; gap: 6px; }
+.m-ch .fold summary, .m-sec .fold summary { min-height: 44px; display: flex; align-items: center; gap: 6px; }
 .m-check { display: flex; gap: 8px; align-items: center; min-height: 44px; }
 .m-check input { width: 24px; height: 24px; flex: none; }
 .m-level, .m-leg { border: 0; border-top: 1px solid var(--line2); padding: 4px 0 8px; margin: 0; min-width: 0; display: grid; gap: 4px; }
@@ -29,12 +29,13 @@
 .m-live-spark { height: 24px; min-width: 0; }
 .m-live-spark .spark { width: 100%; height: 100%; }
 
-/* The page itself (spec 7b section 6.1): one column in the dashboard's frame. Header, tagline, the live strip,
-   a to f, one closing line. Sentences stay in the body font, under 78 characters a line; the drawings take the width. */
+/* The page itself (spec 2026-10-01 section 3): one column in the dashboard's frame. Header, hook, the story's
+   seven chapters, the playground (word list, a to f), one closing line. Sentences stay in the body font, under
+   78 characters a line; the drawings take the width. */
 .app.math { max-width: 960px; }
 .m-top h1 { font-family: var(--px); font-size: 11px; line-height: 1.5; font-weight: 400; }
 .m-body { gap: 14px; grid-template-columns: minmax(0, 1fr); }
-.m-tag, .m-sec > .quip, .m-cap, .m-foot p { max-width: 78ch; }
+.m-tag, .m-sec > .quip, .m-cap, .m-foot p, .m-ch > .m-note { max-width: 78ch; }
 /* The closing line is the page's footer, after main: it lines up with the column above (main's padding). */
 .m-foot { color: var(--dim); padding: 0 14px 14px; }
 @media (max-width: 600px) { .m-foot { padding: 0 8px 8px; } }
@@ -43,14 +44,43 @@
 .m-range input[type='range'], .m-check input { accent-color: var(--teal); }
 /* The live strip is the page's one hero: the only box with a shadow. */
 .m-live { border: 3px solid var(--line); background: var(--card); box-shadow: 4px 4px 0 var(--line); padding: 10px 12px; }
-.m-sec[id] { scroll-margin-top: 12px; }
-/* No box inside a box: the reused ladder and every fold drop their frames inside a section, as in the explain panel. */
-.m-sec .ll-svg { border: 0; }
-.m-sec .fold { border: 0; border-top: 1px dashed var(--line2); margin-top: 0; }
-.m-sec .fold > summary { padding: 0; }
-.m-sec .fold-body { padding: 0 0 8px; }
-/* f's live part sits under the section's caption, behind a dashed rule. Its table and grid scroll inside it:
-   every track is minmax(0, 1fr) and every wrapper may shrink, so nothing in it widens the page at 360 px. */
-.m-liveladder { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; border-top: 1px dashed var(--line2); padding-top: 10px; margin-top: 4px; }
+.m-ch[id], .m-play[id], .m-sec[id] { scroll-margin-top: 12px; }
+/* No frame around a drawing's parts: the reused ladder (chapter 7) and every fold (chapters and sections) drop
+   theirs, as in the explain panel. */
+.m-ch .ll-svg { border: 0; }
+.m-ch .fold, .m-sec .fold { border: 0; border-top: 1px dashed var(--line2); margin-top: 0; }
+.m-ch .fold > summary, .m-sec .fold > summary { padding: 0; }
+.m-ch .fold-body, .m-sec .fold-body { padding: 0 0 8px; }
+/* Chapter 7's live part sits right under the chapter's lead: no rule and no padding of its own. Its table and
+   grid scroll inside it: every track is minmax(0, 1fr) and every wrapper may shrink, so nothing in it widens
+   the page at 360 px. */
+.m-liveladder { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; }
 .m-liveladder .ladder, .m-liveladder .fold-body { grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .m-liveladder .fold, .m-liveladder .scroll { min-width: 0; }
+/* "the numbers": a rung's name stays on one line (on the live page at 360 px it broke mid-word); the table
+   then scrolls sideways inside its own .scroll wrapper, never the page. */
+.m-liveladder .scroll th:first-child, .m-liveladder .scroll td:first-child { white-space: nowrap; overflow-wrap: normal; }
+
+/* The story (spec 2026-10-01 section 3). Chapters stack and are not boxes: a thin rule above each, then a
+   question, a lead, one switch, a drawing, a takeaway. The playground starts under a rule as heavy as the frame.
+   One shrinkable column each, and no child may hold it wider than the screen. */
+.m-ch, .m-play { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.m-ch > *, .m-play > * { min-width: 0; }
+.m-ch { gap: 10px; margin-top: 10px; padding-top: 16px; border-top: 2px solid var(--line2); }
+.m-play { gap: 14px; margin-top: 18px; padding-top: 18px; border-top: 3px solid var(--line); }
+/* The question is a sentence: the body font (theme.css's pixel title is for .box h2 only). Its number is the big font. */
+.m-ch > h2, .m-play > h2 { font-size: 20px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.m-ch-n { font-family: var(--big); font-size: 28px; font-weight: 400; line-height: 1; color: var(--teal); margin-right: 6px; }
+.m-ch-lead, .m-ch-take { max-width: 78ch; overflow-wrap: anywhere; }
+.m-ch-take { font-weight: 600; border-left: 3px solid var(--teal); padding-left: 10px; }
+/* The chapter's one control: two options side by side, on two rows when their labels are long (360 px). */
+.m-ch .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.m-ch .seg > button { font-size: 8px; line-height: 1.5; }
+/* A chapter has no card behind it, so its plots take the card colour: on the page's own colour they had no edge. */
+section.m-ch :is(.mb-svg, .ds-svg, .bl-svg, .ub-svg, .db-svg, .ll-svg) { background: var(--card); }
+/* The word list at the top of the playground: the term, then what it means, one line each where there is room. */
+.m-words { display: grid; gap: 4px; font-size: 13px; max-width: 94ch; }
+.m-word { display: grid; grid-template-columns: minmax(0, 14ch) minmax(0, 1fr); gap: 8px; }
+.m-word + .m-word { border-top: 1px dashed var(--line2); padding-top: 4px; }
+.m-word dt { font-weight: 600; overflow-wrap: anywhere; }
+.m-word dd { overflow-wrap: anywhere; }

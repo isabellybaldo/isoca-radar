@@ -51,7 +51,7 @@ export function Story({ engine, strip, ladder, ladderDrawn }: { engine: Engine |
     <>
       <Preset<MirrorIn, MirrorModel>
         engine={engine} copy={C1} fn="mirror_json" inputs={CH1}
-        draw={(m, i) => <MirrorBooks bids={i.bids} asks={i.asks} model={m} headline={false} />}
+        draw={(m, i) => <MirrorBooks bids={i.bids} asks={i.asks} model={m} headline={false} foldId="story:mirror-levels" />}
         take={(m) => TAKE.ch1(m.crossed)}
       />
       <Preset<PayoffIn, PayoffMatrix>

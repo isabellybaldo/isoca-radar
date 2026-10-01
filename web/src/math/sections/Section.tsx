@@ -3,8 +3,8 @@ import { type EngineError, isError } from '../../wasm/types';
 import '../math.css';
 
 /** 09-27 §6.1: title, the answer and its drawing, controls with a reset, one deadpan line, and a caption
- *  naming the function that computed it. `after` is f's live part (7b §6.2). `id` is the link target (#a to #f). */
-export function Section({ id, title, chapter, quip, caption, controls, onReset, children, after }: {
+ *  naming the function that computed it. `id` is the link target (#a to #f). */
+export function Section({ id, title, chapter, quip, caption, controls, onReset, children }: {
   id: string;
   title: string;
   chapter: string;
@@ -13,7 +13,6 @@ export function Section({ id, title, chapter, quip, caption, controls, onReset, 
   controls: ReactNode;
   onReset: () => void;
   children: ReactNode;
-  after?: ReactNode;
 }) {
   return (
     <section id={id} className="box m-sec" aria-labelledby={`m-${id}`}>
@@ -26,7 +25,6 @@ export function Section({ id, title, chapter, quip, caption, controls, onReset, 
       </div>
       {quip !== null && <p className="quip">{quip}</p>}
       <p className="dim m-cap">{caption}</p>
-      {after}
     </section>
   );
 }

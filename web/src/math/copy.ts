@@ -3,8 +3,6 @@ import type { BasketWord } from '../schematics/BasketLegs';
 // captured at N ms (Task 12 scans the rendered page). Every caption names a function that exists in the
 // Rust code (ruling R7).
 export const TITLE = 'isoca-radar · math';
-export const TAGLINE =
-  'How a basket arbitrage on Polymarket is found, sized and timed, and why it still loses. Every number below comes from the scanner’s own Rust code, compiled to WASM.';
 export const FOOTER = 'The live dashboard is private. The math is not.';
 /** One sentence, and only what the page knows: it cannot tell an old browser from a blocked download. */
 export const ENGINE_FAILED = 'The math engine did not load: the drawings need WebAssembly.';

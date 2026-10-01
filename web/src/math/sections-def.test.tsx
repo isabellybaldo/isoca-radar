@@ -252,18 +252,16 @@ describeWasm('sections d–f on the real engine (7b §8)', () => {
   });
 
   describe('f', () => {
-    it('the start is fixture no-all-fill and says its net cash; the usual burst is no-one-leg-empty-burst', async () => {
+    it('the start is fixture no-all-fill and says its net cash; the usual burst is no-one-leg-empty-burst; f has no live part', async () => {
       const all = fixtureCase('basket_json', 'no-all-fill');
       const burst = fixtureCase('basket_json', 'no-one-leg-empty-burst');
       expect(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, F_START)))).toBe(all.output);
       expect(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, F_BURST)))).toBe(burst.output);
-      render(
-        <LegMissSection engine={engine}>
-          <p>live part</p>
-        </LegMissSection>,
-      );
+      const { container } = render(<LegMissSection engine={engine} />);
       expect(screen.getByText(basketVerdict(JSON.parse(all.output) as BasketModel).big)).toHaveClass('bl-big');
-      expect(screen.getByText('live part')).toBeInTheDocument();
+      // no live part: the ladder is chapter 7's (spec 2026-10-01 §3), and f ends with its own caption
+      expect(container.querySelector('#f')?.lastElementChild).toHaveTextContent(SECTIONS.f.caption);
+      expect(container.querySelector('#f .m-liveladder')).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'the usual burst' }));
       const b = JSON.parse(burst.output) as BasketModel;
       expect(await screen.findByText(basketVerdict(b).big)).toHaveClass('bl-big');

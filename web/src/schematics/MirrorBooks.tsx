@@ -30,8 +30,16 @@ const mirrorOf = (rows: Level[], p: string): Level | undefined => rows.find((r) 
  * band between the rows. Every number is HTML beside the SVG (preserveAspectRatio="none").
  * The best levels come from the engine's best_bid / best_ask, so a reordered input cannot mislabel them.
  * `headline={false}` leaves the D1 line out (the story's chapter 1: that line is the playground's).
+ * `foldId` is the key the "every level" fold remembers its state under: a page that draws this twice gives the
+ * second drawing its own, so opening one does not open the other on the next visit.
  */
-export function MirrorBooks({ bids, asks, model, headline = true }: { bids: Level[]; asks: Level[]; model: MirrorModel; headline?: boolean }) {
+export function MirrorBooks({ bids, asks, model, headline = true, foldId = 'mirror-levels' }: {
+  bids: Level[];
+  asks: Level[];
+  model: MirrorModel;
+  headline?: boolean;
+  foldId?: string;
+}) {
   const max = Math.max(1, ...[...bids, ...asks, ...model.no_bids, ...model.no_asks].map((l) => geoPos(l.s)));
   const h = (l: Level) => Math.sqrt(geoPos(l.s) / max) * BAR;
   const d = mirrorDomain([...bids, ...asks, ...model.no_bids, ...model.no_asks].map((l) => l.p));
@@ -96,7 +104,7 @@ export function MirrorBooks({ bids, asks, model, headline = true }: { bids: Leve
         {model.spread !== null && <li>{`spread ${formatDecimal(model.spread)}`}</li>}
       </ul>
       <p className="dim mb-note">bars: size at each price, teal bids and salmon asks; a line joins YES price p to NO price 1 − p</p>
-      <Fold id="mirror-levels" label="every level">
+      <Fold id={foldId} label="every level">
         <ul className="plain mb-levels">
           {rows.map((r) => (
             <li key={`${r.side}${r.l.p}`}>{`YES ${r.side} ${r.l.p} → NO ${r.to} ${r.n?.p} (1 − ${r.l.p}) · size ${r.l.s}`}</li>

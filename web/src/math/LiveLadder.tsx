@@ -1,5 +1,5 @@
-// Spec 7b §6.2 f: the dashboard's ladder schematic fed by the public snapshot. It brings its own "which
-// markets" fold and its own "on paper" wording; this adds only the heading with the time.
+// Spec 7b §6.2, 2026-10-01 §3 (chapter 7): the dashboard's ladder schematic fed by the public snapshot. It
+// brings its own "which markets" fold and its own "on paper" wording; this adds only the heading with the time.
 import { ladderModel } from '../lib/ladder';
 import { LatencyLadder } from '../schematics/LatencyLadder';
 import { asOfLine } from './LiveStrip';

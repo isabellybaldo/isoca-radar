@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { BasketLegs, basketWord } from '../../schematics/BasketLegs';
 import { call } from '../../wasm/call';
 import type { BasketModel, Engine } from '../../wasm/types';
@@ -10,9 +10,8 @@ import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section } from './Section';
 
 /** 7b §6.2 f: per leg the depth left at t_x and the unwind book against us; shares; fees; "the usual burst".
- *  `children` is the slot for the live part (the ladder from the snapshot, Task 11), drawn after the caption;
- *  this section fetches nothing. */
-export function LegMissSection({ engine, children }: { engine: Engine; children?: ReactNode }) {
+ *  No live part: the ladder from the snapshot is the story's chapter 7 (spec 2026-10-01 §3). */
+export function LegMissSection({ engine }: { engine: Engine }) {
   const [st, setSt] = useState<FState>(F_START);
   const input = useFrameThrottle(st);
   const out = useMemo(() => call<BasketModel>(engine, 'basket_json', basketInput(F_BOOKS, input)), [engine, input]);
@@ -24,7 +23,6 @@ export function LegMissSection({ engine, children }: { engine: Engine; children?
       {...SECTIONS.f}
       quip={isError(out) ? null : F_QUIPS[basketWord(out)]}
       onReset={() => setSt(F_START)}
-      after={children}
       controls={
         <>
           <button type="button" className="m-btn" onClick={() => setSt(F_BURST)}>the usual burst</button>
