@@ -81,8 +81,12 @@ async function landed(f: { mock: { calls: unknown[] } }, expectation: () => unkn
 const stripShown = () => screen.getByRole('region', STRIP);
 const unavailableShown = () => expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
 const behindShown = (n: number) => () => expect(screen.getAllByText(new RegExp(`: ${BEHIND}$`))).toHaveLength(n);
-const sectionsShown = () => expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
-const ladderShown = () => screen.getByRole('heading', { level: 3 });
+/** The six playground sections' own h3s (the live ladder's h3 sits inside f, not directly under a section). */
+const h3s = () => screen.queryAllByRole('heading', { level: 3 });
+const sectionHeads = () => h3s().filter((h) => h.parentElement?.classList.contains('m-sec'));
+const ladderHeads = () => h3s().filter((h) => !h.parentElement?.classList.contains('m-sec'));
+const sectionsShown = () => expect(sectionHeads()).toHaveLength(6);
+const ladderShown = () => expect(ladderHeads()).toHaveLength(1);
 /** Nothing went wrong on screen: no alert (the engine did not load) and no engine sentence in place of a drawing
  *  (Section's Out: a polite status with the error class). */
 const noErrors = () => {
@@ -138,7 +142,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
     render(<MathPage engine={never} now={now} />);
     await landed(f, stripShown);
     expect(screen.getByRole('status')).toHaveTextContent(LOADING);
-    expect(screen.queryAllByRole('heading', { level: 2 })).toHaveLength(0);
+    expect(sectionHeads()).toHaveLength(0);
     expect(screen.queryAllByRole('alert')).toHaveLength(0);
     expect(screen.getByRole('region', STRIP)).toBeInTheDocument();
   });
@@ -150,7 +154,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
     expect(screen.getAllByRole('alert').map((a) => a.textContent)).toEqual([ENGINE_FAILED]);
     expect(ENGINE_FAILED).toMatch(/did not load: the drawings need WebAssembly/);
     expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.queryAllByRole('heading', { level: 2 })).toHaveLength(0);
+    expect(sectionHeads()).toHaveLength(0);
     expect(screen.getByRole('region', STRIP)).toBeInTheDocument();
     expect(screen.getByText(FOOTER)).toBeInTheDocument();
   });
@@ -351,16 +355,16 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const f = mockApi({ [SNAPSHOT_URL]: snap });
     const { container } = render(<MathPage engine={Promise.resolve(engine)} now={now} />);
     await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
-    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(TITLES);
+    expect(sectionHeads().map((h) => h.textContent)).toEqual(TITLES);
     expect([...container.querySelectorAll('section.m-sec')].map((s) => s.id)).toEqual([...IDS]);
     const strip = screen.getByRole('region', STRIP);
     const first = screen.getByRole('region', { name: SECTIONS.a.title });
     expect(strip.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const sf = screen.getByRole('region', { name: SECTIONS.f.title });
-    expect(within(sf).getByRole('heading', { level: 3 })).toHaveTextContent(/^on the live scanner, as of \d\d:\d\d UTC$/);
+    expect(within(sf).getByRole('heading', { name: /^on the live scanner/ })).toHaveTextContent(/^on the live scanner, as of \d\d:\d\d UTC$/);
     expect(sf.lastElementChild).toHaveClass('m-liveladder');
     expect(within(sf).getByText(breakEvenText(ladderModel(publicToLadder(snap.ladder))).big)).toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(1);
+    expect(ladderHeads()).toHaveLength(1);
     expect(screen.queryByText(LIVE_UNAVAILABLE)).toBeNull();
     expect(screen.queryByRole('status')).toBeNull();
     noErrors();
@@ -377,15 +381,15 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const behind = screen.getAllByText(new RegExp(`: ${BEHIND}$`));
     expect(behind).toHaveLength(2);
     expect(behind.some((el) => el.tagName === 'H3')).toBe(true);
-    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
+    expect(sectionHeads()).toHaveLength(6);
   });
 
   it('without the snapshot, f has no live part and every section still works', async () => {
     const f = mockApi({});
     render(<MathPage engine={Promise.resolve(engine)} now={now} />);
     await landed(f, () => (sectionsShown(), unavailableShown()));
-    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
-    expect(screen.queryAllByRole('heading', { level: 3 })).toHaveLength(0);
+    expect(sectionHeads()).toHaveLength(6);
+    expect(ladderHeads()).toHaveLength(0);
     expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
     noErrors();
     for (const k of IDS) expect(screen.getByText(SECTIONS[k].caption)).toBeInTheDocument();
@@ -400,8 +404,8 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect(errors).toHaveBeenCalled();
     expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
     expect(screen.queryByRole('region', STRIP)).toBeNull();
-    expect(screen.queryAllByRole('heading', { level: 3 })).toHaveLength(0);
-    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(TITLES);
+    expect(ladderHeads()).toHaveLength(0);
+    expect(sectionHeads().map((h) => h.textContent)).toEqual(TITLES);
     for (const k of IDS) expect(screen.getByText(SECTIONS[k].caption)).toBeInTheDocument();
     noErrors();
   });
@@ -414,9 +418,9 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const { container } = render(<MathPage engine={Promise.resolve(engine)} now={now} />);
     await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
     expect(await openEveryFold(container, f)).toBeGreaterThanOrEqual(4); // a and d's levels, the ladder's two
-    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
+    expect(sectionHeads()).toHaveLength(6);
     expect(screen.getByRole('region', STRIP)).toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(1);
+    expect(ladderHeads()).toHaveLength(1);
     expect(readable(container).filter((s) => /\$\d/.test(s)).length).toBeGreaterThan(10); // the scan looks at real figures
     expectHonest(container, 'the starting state');
     expect(requested(f)).toEqual(['/math-data/public.json']);
@@ -438,8 +442,8 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const { container } = render(<MathPage engine={Promise.resolve(spied)} now={now} />);
     await screen.findByRole('region', STRIP);
     const sec = (k: (typeof IDS)[number]) => within(screen.getByRole('region', { name: SECTIONS[k].title }));
-    await within(await screen.findByRole('region', { name: SECTIONS.f.title })).findByRole('heading', { level: 3 });
-    await waitFor(() => expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6));
+    await within(await screen.findByRole('region', { name: SECTIONS.f.title })).findByRole('heading', { name: /^on the live scanner/ });
+    await waitFor(() => expect(sectionHeads()).toHaveLength(6));
     for (const s of container.querySelectorAll('details:not([open]) > summary')) fireEvent.click(s);
     await waitFor(() => expect(container.querySelectorAll('details:not([open])')).toHaveLength(0));
 
@@ -510,7 +514,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const f = mockApi({});
     render(<MathPage engine={Promise.resolve(engine)} now={now} />);
     await landed(f, () => (sectionsShown(), unavailableShown()));
-    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
+    expect(sectionHeads()).toHaveLength(6);
     expect(scrolled).toEqual([]);
   });
 });

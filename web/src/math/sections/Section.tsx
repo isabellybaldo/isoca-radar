@@ -4,9 +4,10 @@ import '../math.css';
 
 /** 09-27 §6.1: title, the answer and its drawing, controls with a reset, one deadpan line, and a caption
  *  naming the function that computed it. `after` is f's live part (7b §6.2). `id` is the link target (#a to #f). */
-export function Section({ id, title, quip, caption, controls, onReset, children, after }: {
+export function Section({ id, title, chapter, quip, caption, controls, onReset, children, after }: {
   id: string;
   title: string;
+  chapter: string;
   quip: string | null;
   caption: string;
   controls: ReactNode;
@@ -16,7 +17,8 @@ export function Section({ id, title, quip, caption, controls, onReset, children,
 }) {
   return (
     <section id={id} className="box m-sec" aria-labelledby={`m-${id}`}>
-      <h2 id={`m-${id}`}>{title}</h2>
+      <h3 id={`m-${id}`}>{title}</h3>
+      <p className="dim m-back">{chapter}</p>
       {children}
       <div className="m-controls">
         {controls}
