@@ -157,7 +157,7 @@ describe('LatencyLadder', () => {
     const nums = screen.getByText('the numbers').closest('details') as HTMLDetailsElement;
     expect(nums.open).toBe(false);
     expect(within(nums).getAllByRole('row')).toHaveLength(9); // header + 6 rungs + 2 extras
-    expect(within(nums).getByText(/^paper, since the epoch start/)).toBeInTheDocument();
+    expect(within(nums).getByText(/^on paper, since the epoch start/)).toBeInTheDocument();
     expect(screen.getAllByText('−$80.10')).toHaveLength(2); // extras line + the numbers fold
   });
 });

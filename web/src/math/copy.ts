@@ -6,9 +6,9 @@ export const TITLE = 'isoca-radar · math';
 export const TAGLINE =
   'How a basket arbitrage on Polymarket is found, sized and timed, and why it still loses. Every number below comes from the scanner’s own Rust code, compiled to WASM.';
 export const FOOTER = 'The live dashboard is private. The math is not.';
-export const ENGINE_FAILED = 'The math engine did not load. Your browser may be too old, or something blocked it.';
+/** One sentence, and only what the page knows: it cannot tell an old browser from a blocked download. */
+export const ENGINE_FAILED = 'The math engine did not load: the drawings need WebAssembly.';
 export const LOADING = 'Loading the math engine. The pixels are warming up.';
-export const LIVE_MISSING = 'live numbers unavailable';
 
 /** Section b's deadpan line per basket kind; each is true of that kind's matrix (fixtures yes-3-other, no-3-other, implication-prices). */
 export const B_QUIPS = {

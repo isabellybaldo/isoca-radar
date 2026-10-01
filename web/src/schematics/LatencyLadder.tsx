@@ -18,7 +18,7 @@ export const MARKETS_WARMING = 'warming: part of the 30 days is still being fill
 export const MARKETS_RECOMPUTING = 'recomputing after the ladder';
 export const MARKETS_MISSING = 'no markets data';
 export const NO_RUNGS = 'No ladder account has a mark in this epoch yet.';
-export const TABLE_CAPTION = 'paper, since the epoch start, every sum cut at the same mark';
+export const TABLE_CAPTION = 'on paper, since the epoch start, every sum cut at the same mark';
 
 const W = 700;
 const H = 200;

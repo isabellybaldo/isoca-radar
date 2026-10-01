@@ -3,7 +3,7 @@ import { type EngineError, isError } from '../../wasm/types';
 import '../math.css';
 
 /** 09-27 §6.1: title, the answer and its drawing, controls with a reset, one deadpan line, and a caption
- *  naming the function that computed it. `after` is f's live part (7b §6.2). */
+ *  naming the function that computed it. `after` is f's live part (7b §6.2). `id` is the link target (#a to #f). */
 export function Section({ id, title, quip, caption, controls, onReset, children, after }: {
   id: string;
   title: string;
@@ -15,7 +15,7 @@ export function Section({ id, title, quip, caption, controls, onReset, children,
   after?: ReactNode;
 }) {
   return (
-    <section className="box m-sec" aria-labelledby={`m-${id}`}>
+    <section id={id} className="box m-sec" aria-labelledby={`m-${id}`}>
       <h2 id={`m-${id}`}>{title}</h2>
       {children}
       <div className="m-controls">

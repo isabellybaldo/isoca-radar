@@ -7,7 +7,7 @@ import { ladderModel } from '../lib/ladder';
 import { LatencyLadder } from '../schematics/LatencyLadder';
 import sampleText from './__fixtures__/public.sample.json?raw';
 import { snapshotFixture } from './fixtures';
-import { FRESH_MS, freshness, hourlyValues, parseSnapshot, publicToLadder } from './snapshot';
+import { FRESH_MS, MAX_MS, freshness, hourlyValues, parseSnapshot, publicToLadder } from './snapshot';
 
 /** What fetch().json() hands over: plain JSON (undefined fields gone). */
 const json = (x: unknown): unknown => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
@@ -114,8 +114,8 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
       ['v 2', { ...b, v: 2 }],
       ['no written_ms', { ...b, written_ms: undefined }],
       ['a fractional written_ms', { ...b, written_ms: 1.5 }],
-      ['a written_ms past the Date range', { ...b, written_ms: 9e15 }],
-      ['a start_ms past the Date range', { ...b, ladder: { ...L, start_ms: 8.64e15 + 1 } }],
+      ['a written_ms past the year 9999 (still a valid Date, but toISOString grows a sign and two digits)', { ...b, written_ms: 253402300800000 }],
+      ['a start_ms past the year 9999', { ...b, ladder: { ...L, start_ms: MAX_MS + 1 } }],
       ['an as_of_ms past the Date range', { ...b, ladder: { ...L, as_of_ms: 9e15 } }],
       ['a day_start_ms past the Date range', { ...b, today: { ...b.today, day_start_ms: 9e15 } }],
       ['no today', { ...b, today: undefined }],

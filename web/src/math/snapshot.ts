@@ -74,8 +74,9 @@ type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 /** A safe integer >= 0: every count, every `*_ms` and every latency in the file. */
 const isInt = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
-/** An epoch-ms stamp: Date is valid only to 8.64e15, past that toISOString throws while the page renders. */
-export const MAX_MS = 8.64e15;
+/** An epoch-ms stamp, up to the last millisecond of year 9999. Date itself goes to 8.64e15 (past that toISOString
+ *  throws while the page renders), but from year 10000 on it prints "+010000-…" and the "as of" text is cut wrong. */
+export const MAX_MS = 253_402_300_799_999;
 const isMs = (x: unknown): x is number => isInt(x) && x <= MAX_MS;
 const isMsOrNull = (x: unknown): x is number | null => x === null || isMs(x);
 const isIntOrNull = (x: unknown): x is number | null => x === null || isInt(x);

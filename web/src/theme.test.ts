@@ -8,6 +8,17 @@ import { describe, expect, it } from 'vitest';
 declare const process: { cwd(): string };
 const css: string = readFileSync(`${process.cwd()}/src/theme.css`, 'utf8');
 const html: string = readFileSync(`${process.cwd()}/index.html`, 'utf8');
+const read = (path: string): string => {
+  try {
+    return readFileSync(`${process.cwd()}/${path}`, 'utf8');
+  } catch {
+    return ''; // a missing file fails the test that needs it, with a readable message
+  }
+};
+/** The public page's own layout and its entry (spec 7b §6.1): the same structural rules run over them. */
+const mathCss: string = read('src/math/math.css');
+const mathHtml: string = read('math.html');
+const FONTS = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Press+Start+2P&family=VT323&display=swap';
 
 function rule(selector: string): string {
   const i = css.indexOf(`\n${selector} {`); // at a line start: `html, body {` is not the body rule
@@ -29,15 +40,18 @@ describe('theme', () => {
   });
 
   it('loads the three fonts from Google Fonts only (the CSP stays as it is)', () => {
-    expect(html).toContain('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Press+Start+2P&family=VT323&display=swap');
+    expect(html).toContain(FONTS);
     expect(html).not.toMatch(/<script(?![^>]*type="module")/);
   });
 
-  it('never forces a page wider than 360 px', () => {
-    for (const m of css.matchAll(/(?<![-\w])(min-width|width):\s*(\d+)px/g)) {
-      expect(Number(m[2]), `${m[0]}`).toBeLessThanOrEqual(328);
+  it('never forces a page wider than 360 px: the dashboard sheet and the public math sheet', () => {
+    for (const [name, sheet] of [['theme.css', css], ['math/math.css', mathCss]] as const) {
+      expect(sheet.length, `${name} is missing`).toBeGreaterThan(0);
+      for (const m of sheet.matchAll(/(?<![-\w])(min-width|width):\s*(\d+)px/g)) {
+        expect(Number(m[2]), `${name}: ${m[0]}`).toBeLessThanOrEqual(328);
+      }
+      expect(sheet, name).not.toMatch(/minmax\(\s*\d+px/);
     }
-    expect(css).not.toMatch(/minmax\(\s*\d+px/);
     expect(rule('.scroll')).toMatch(/overflow-x:\s*auto/);
     expect(rule('body')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/);
@@ -86,5 +100,24 @@ describe('theme', () => {
     expect(rule('.ub-axis li span')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
     expect(rule('.ds-svg .ds-loss')).toMatch(/stroke-dasharray/); // the loss area differs from the profit area by more than colour
+  });
+
+  it('gives the public page its own entry: same fonts, no inline script or style, nothing of the dashboard (spec 7b §6.1, the math CSP)', () => {
+    expect(mathHtml, 'math.html is missing').not.toBe('');
+    expect(mathHtml).toMatch(/<html lang="en">/);
+    expect(mathHtml).toContain('<title>isoca-radar · math</title>');
+    expect(mathHtml).toMatch(/<meta name="description" content="[^"]{50,200}" \/>/);
+    expect(mathHtml).toContain('<meta name="viewport" content="width=device-width, initial-scale=1" />');
+    expect(mathHtml).not.toMatch(/noindex/); // public, meant to be found (index.html is not)
+    // style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com: the dashboard's three links, nothing else remote
+    expect(mathHtml).toContain(FONTS);
+    expect([...mathHtml.matchAll(/https?:\/\/[^"'\s]+/g)].map((m) => m[0]).filter((u) => !/^https:\/\/fonts\.(googleapis|gstatic)\.com/.test(u))).toEqual([]);
+    for (const tag of html.match(/<link [^>]*>/g) ?? []) expect(mathHtml, tag).toContain(tag);
+    // script-src 'self' 'wasm-unsafe-eval': one module script with a src, no inline script, style or handler
+    expect(mathHtml.match(/<script[^>]*>[^<]*<\/script>/g)).toEqual(['<script type="module" src="/src/math/main.tsx"></script>']);
+    expect(mathHtml).not.toMatch(/\sstyle=|<style|\son\w+=/);
+    expect(mathHtml).not.toContain('/api/');
+    expect(mathHtml).not.toContain('/src/main.tsx');
+    expect(mathHtml).toContain('<div id="root"></div>');
   });
 });

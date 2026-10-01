@@ -382,6 +382,14 @@ describe('the page cannot be blanked by a stamp (fix round 1)', () => {
     expect(() => render(<LiveLadder snap={snap} stale />)).not.toThrow();
   });
 
+  it('the bound is the end of year 9999, so "as of" keeps its shape (a later Date prints +010000-01-01)', () => {
+    expect(MAX_MS).toBe(Date.UTC(9999, 11, 31, 23, 59, 59, 999));
+    expect(asOfLine(MAX_MS, true)).toBe(`as of 9999-12-31 23:59 UTC: ${BEHIND}`);
+    expect(asOfLine(MAX_MS, false)).toBe('as of 23:59 UTC');
+    expect(parseSnapshot(JSON.parse(JSON.stringify(snapshotFixture({}, MAX_MS))))?.written_ms).toBe(MAX_MS);
+    expect(parseSnapshot(JSON.parse(JSON.stringify(snapshotFixture({}, MAX_MS + 1))))).toBeNull();
+  });
+
   it('LiveLadder passes the ladder its empty states through: epoch 0, no rungs, markets missing', () => {
     const base = snapshotFixture({}, T0);
     const snap = {

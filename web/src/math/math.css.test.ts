@@ -28,4 +28,29 @@ describe('math.css', () => {
     expect(rule('.m-live-k, .m-live-n, .m-live-h')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule('.m-live {')).toMatch(/min-width:\s*0/);
   });
+  it('lets nothing in a section or the reused ladder widen the page: single shrinkable columns (Task 11 handoff)', () => {
+    expect(rule('.m-sec {')).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(rule('.m-liveladder {')).toMatch(/min-width:\s*0/);
+    expect(rule('.m-liveladder {')).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(rule('.m-liveladder .ladder, .m-liveladder .fold-body {')).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(rule('.m-liveladder .fold, .m-liveladder .scroll {')).toMatch(/min-width:\s*0/);
+  });
+  it('keeps the reused ladder frameless inside the section box, like the explain panel does', () => {
+    expect(rule('.m-sec .ll-svg {')).toMatch(/border:\s*0/);
+    expect(rule('.m-sec .fold {')).toMatch(/border:\s*0;\s*border-top:\s*1px dashed var\(--line2\)/);
+  });
+  it('keeps the fold marker apart from its label and dims a disabled slider once (Task 9 review)', () => {
+    expect(rule('.m-sec .fold summary')).toMatch(/(?<![-\w])gap:\s*\d+px/);
+    expect(css.match(/opacity:\s*0\.45/g)).toHaveLength(1);
+    expect(css).not.toMatch(/\.m-range input:disabled/);
+  });
+  it('keeps the value beside a slider inside the section: a column as wide as the longest value, "20 ticks"', () => {
+    expect(Number(/minmax\(0, 2fr\) (\d+)ch/.exec(rule('.m-range {'))?.[1])).toBeGreaterThanOrEqual('20 ticks'.length);
+  });
+  it('lays the page out as one column in the dashboard frame, with a link target per section', () => {
+    expect(rule('.app.math {')).toMatch(/max-width:\s*960px/);
+    expect(rule('.m-sec[id] {')).toMatch(/scroll-margin-top/);
+    expect(css).not.toMatch(/var\(--px\)[^}]*\}[^{]*\.m-(tag|foot|cap)/); // sentences stay in the body font
+    expect(rule('.m-top h1 {')).toMatch(/font-family:\s*var\(--px\)/);
+  });
 });
