@@ -88,7 +88,7 @@ describe('theme', () => {
 
   it("wraps the panel's axis labels between words, never inside one: `extras` stays whole, `in time` cells keep a gap", () => {
     // The body's overflow-wrap: anywhere split `extras` into extra/s and let six `in time` labels touch (7a-B Chrome check).
-    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.ds-yaxis li', '.bl-axis li', '.ub-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
+    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.ds-yaxis li', '.bl-axis li', '.ub-axis li', '.ps-labels td']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
     // 7 slots in a 360 px panel leave ~44 px each: `extras` (6 ch) fits at 12 px (43.2 px), not at 13 px.
     expect(Number(/font-size:\s*(\d+)px/.exec(rule('.ll-axis'))?.[1])).toBeLessThanOrEqual(12);
     // A gap narrower than `in time` forces the two words onto two lines instead of into the next cell.
@@ -98,6 +98,7 @@ describe('theme', () => {
   it('keeps the basket leg labels breakable inside a cell and the planned outline visible (7b-B review I4)', () => {
     expect(rule('.bl-axis li span')).toMatch(/overflow-wrap:\s*anywhere/); // a long figure splits rather than overflow 360 px
     expect(rule('.ub-axis li span')).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule('.ps-labels td b, .ps-labels td span')).toMatch(/overflow-wrap:\s*anywhere/); // a price wider than its segment splits, it does not run into the next
     expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
     // The loss area differs from the profit area by more than colour: a dashed outline. It only shows when the
     // stroke is not the fill's own colour and is not faded with it (fill-opacity, never opacity on the element).
@@ -114,6 +115,30 @@ describe('theme', () => {
     const sw = rule('.ds-sw.loss');
     expect(paint('background', sw)).toBe('var(--rose)');
     expect(paint('border', sw)).toBe('1px dashed var(--fg)');
+  });
+
+  it('the price stack (the story, chapter 3): a label row that mirrors the bar, a gap that differs by more than colour, thin strokes that do not scale', () => {
+    expect(rule('.ps-labels')).toMatch(/table-layout:\s*fixed/); // the columns are the cols' shares, never the labels' own width
+    expect(rule('.ps-labels')).toMatch(/(?<![-\w])width:\s*100%/); // its own, not the global table rule's: the shares are of the bar's width
+    // the mark above the gap: a solid bracket in the gap's own colour, a line that keeps its width when the bar stretches
+    const mark = rule('.ps-svg .ps-mark');
+    expect(mark).toMatch(/fill:\s*none/);
+    expect(mark).toMatch(/stroke:\s*var\(--salmon\)/);
+    expect(mark).toMatch(/stroke-width:\s*2px/);
+    expect(mark).toMatch(/vector-effect:\s*non-scaling-stroke/);
+    expect(mark).not.toMatch(/dasharray/);
+    // the legend's swatch is drawn as the gap is: the same tint, the same dashed outline
+    const gap = rule('.ps-svg .ps-gap');
+    const sw = rule('.ps-sw.gap');
+    expect(gap).toMatch(/fill:\s*var\(--salmon\);\s*fill-opacity:\s*0\.25/);
+    expect(gap).toMatch(/stroke:\s*var\(--salmon\)/);
+    expect(sw).toMatch(/background:\s*color-mix\(in srgb, var\(--salmon\) 25%, transparent\)/);
+    expect(sw).toMatch(/border:\s*1px dashed var\(--salmon\)/);
+    expect(rule('.ps-labels td')).toMatch(/padding:\s*0;\s*border:\s*0/);
+    expect(rule('.ps-svg .ps-gap')).toMatch(/stroke-dasharray/);
+    for (const sel of ['.ps-svg .ps-leg', '.ps-svg .ps-gap', '.ps-svg .ps-over', '.ps-svg .ps-dollar', '.ps-svg .ps-mark']) expect(rule(sel), sel).toMatch(/vector-effect:\s*non-scaling-stroke/);
+    expect(rule('.ps-sw.gap')).toMatch(/dashed/); // the swatch is drawn as the gap is
+    expect(rule('.pstack')).toMatch(/min-width:\s*0/);
   });
 
   it('keeps the zoomed drawings readable: join band, cost axis beside the stairs, dashed swatches, one peak line (7b-B Task 16)', () => {
@@ -142,6 +167,10 @@ describe('theme', () => {
     expect(mathHtml).toMatch(/<html lang="en">/);
     expect(mathHtml).toContain('<title>isoca-radar · math</title>');
     expect(mathHtml).toMatch(/<meta name="description" content="[^"]{50,200}" \/>/);
+    // the description is shown by search engines without the page's frames: no figure and no claim about the result
+    const description = /<meta name="description" content="([^"]*)"/.exec(mathHtml)?.[1] ?? '';
+    expect(description).not.toContain('$');
+    expect(description).not.toMatch(/loses|pays|profit/i);
     expect(mathHtml).toContain('<meta name="viewport" content="width=device-width, initial-scale=1" />');
     expect(mathHtml).not.toMatch(/noindex/); // public, meant to be found (index.html is not)
     // style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com: the dashboard's three links, nothing else remote

@@ -28,6 +28,28 @@ describe('ClassifyTree (parent §5.7 c)', () => {
     expect(container.querySelector('.cl-net')).not.toHaveTextContent(NOT_RISK_FREE);
   });
 
+  it('path={false} leaves the fourteen tests out and keeps where they end and the money line (the story, chapter 3)', () => {
+    const m = classify('no-edge-3');
+    const { container } = render(<ClassifyTree model={m} path={false} />);
+    expect(container.querySelector('.cl-path')).toBeNull();
+    expect(container.querySelectorAll('.cl-node, .cl-dot, .cl-ran')).toHaveLength(0);
+    expect([...(container.querySelector('figure.ctree')?.children ?? [])].map((k) => k.className)).toEqual(['cl-end', 'cl-net']);
+    expect(screen.getByText(endText(m))).toHaveClass('cl-end');
+    expect(container.querySelector('.cl-net')?.textContent).toBe(netLine(m, ''));
+  });
+
+  it('path={false} with no signal is the one word, and no money line', () => {
+    const { container } = render(<ClassifyTree model={classify('decided')} path={false} />);
+    expect(container.querySelector('figure.ctree')?.textContent).toBe('nothing');
+    expect(container.querySelector('.cl-net')).toBeNull();
+  });
+
+  it('by default the path is there (section c)', () => {
+    const { container } = render(<ClassifyTree model={classify('decided')} />);
+    expect(container.querySelector('ol.cl-path')?.children).toHaveLength(14);
+    expect([...(container.querySelector('figure.ctree')?.children ?? [])].map((k) => k.className)).toEqual(['cl-path', 'cl-end']);
+  });
+
   it('ends in nothing for a decided event', () => {
     const m = classify('decided');
     const { container } = render(<ClassifyTree model={m} />);

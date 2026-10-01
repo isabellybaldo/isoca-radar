@@ -411,6 +411,27 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 .cl-ran, .ll-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .cl-end { font-family: var(--big); font-size: 32px; line-height: 1; }
 
+/* Spec 2026-10-01 §5.1 chapter 3: the story's price stack (ps-*). One bar: a segment per leg, the dollar line, the
+   gap up to it (dashed, so it differs by more than colour) under a bracket. The label row is a layout table whose cols carry the
+   bar's own shares of the width, so each label sits under its segment; no border of its own. */
+.pstack { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.ps-svg { display: block; width: 100%; height: 48px; background: var(--bg); }
+.ps-svg .ps-leg { fill: var(--teal); stroke: var(--bg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.ps-svg .ps-gap { fill: var(--salmon); fill-opacity: 0.25; stroke: var(--salmon); stroke-width: 2px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ps-svg .ps-over { fill: var(--rose); fill-opacity: 0.6; stroke: var(--fg); stroke-width: 1px; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
+.ps-svg .ps-mark { fill: none; stroke: var(--salmon); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.ps-svg .ps-dollar { stroke: var(--fg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.ps-labels { width: 100%; table-layout: fixed; font-size: 13px; line-height: 1.3; }
+.ps-labels td { padding: 0; border: 0; text-align: center; vertical-align: top; overflow-wrap: normal; }
+.ps-labels td b, .ps-labels td span { display: block; overflow-wrap: anywhere; }
+.ps-labels td.ps-one { text-align: right; padding: 2px 4px 0 0; border-right: 2px solid var(--fg); color: var(--dim); }
+.ps-off { font-size: 13px; }
+ul.plain.ps-legend { gap: 2px; font-size: 13px; }
+.ps-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+.ps-sw.cost { background: var(--teal); }
+.ps-sw.gap { background: color-mix(in srgb, var(--salmon) 25%, transparent); border: 1px dashed var(--salmon); }
+.ps-sw.over { background: var(--rose); border: 1px dashed var(--fg); }
+
 /* Spec 7b §6: schematics d (ds-*) and f (bl-*). Every SVG part has its own class; labels are HTML. */
 .dstairs, .blegs { display: grid; gap: 4px; margin: 0; min-width: 0; }
 .ds-big, .bl-big { font-family: var(--big); font-size: 32px; line-height: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; }

@@ -3,8 +3,6 @@ import type { BasketWord } from '../schematics/BasketLegs';
 // captured at N ms (Task 12 scans the rendered page). Every caption names a function that exists in the
 // Rust code (ruling R7).
 export const TITLE = 'isoca-radar · math';
-export const TAGLINE =
-  'How a basket arbitrage on Polymarket is found, sized and timed, and why it still loses. Every number below comes from the scanner’s own Rust code, compiled to WASM.';
 export const FOOTER = 'The live dashboard is private. The math is not.';
 /** One sentence, and only what the page knows: it cannot tell an old browser from a blocked download. */
 export const ENGINE_FAILED = 'The math engine did not load: the drawings need WebAssembly.';
@@ -32,34 +30,40 @@ export const E_QUIPS = {
 
 export const SECTIONS = {
   a: {
-    title: 'a · one book, twice',
+    title: 'a · the book, twice',
+    chapter: 'chapter 1',
     quip: 'Same book, twice. If both sides ever look like free money, the free money is a bug.',
     caption:
       'Computed by arb_core::book::d1_sums and the Book mirror (arb_core::book::Book), with arb_core::detect::canary for the crossed-book alert: the scanner’s own code compiled to WASM.',
   },
   b: {
-    title: 'b · payoff tables',
+    title: 'b · the basket’s payoff',
+    chapter: 'chapter 2',
     quip: B_QUIPS.yes,
     caption: 'Computed by arb_core::payoff; the edge at the top of the book by arb_core::fill::walk, one share a leg, no fees.',
   },
   c: {
-    title: 'c · classify one update',
+    title: 'c · is this update an edge?',
+    chapter: 'chapter 3',
     quip: 'Most updates end in “nothing”. That is the right answer most of the time.',
     caption: 'Computed by arb_core::classify::classify.',
   },
   d: {
-    title: 'd · depth walk',
+    title: 'd · how much: the depth walk',
+    chapter: 'chapter 4',
     quip: 'The first shares are the cheap ones. The walk stops where the next basket costs more than it pays.',
     caption: 'Computed by arb_core::fill::walk; the steps drawn come from arb_core::steps::walk_steps.',
   },
   e: {
-    title: 'e · episode and latency',
+    title: 'e · how long: the episode',
+    chapter: 'chapter 5',
     quip: E_QUIPS.caught,
     caption:
       'Teaching model: one taker at t_x gets the edge of the latest update, or nothing once the episode closed; no queue, no consumed liquidity, no unwinds, so caught is not filled: see f. Computed by arb_core::classify::classify, arb_core::episode::EpisodeTracker and sim::latency::exec_delay_ms.',
   },
   f: {
     title: 'f · one leg misses',
+    chapter: 'chapter 6',
     quip: F_QUIPS.filled,
     caption:
       'Computed by sim::policy::settle and sim::venue::{basket_buy, unwind_sell, basket_cash}: the same rules the paper accounts on the live scanner use; here the unwind happens at one instant, the live sim waits the account’s delay.',

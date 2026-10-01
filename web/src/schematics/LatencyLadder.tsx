@@ -5,7 +5,7 @@ import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
 import {
-  type LadderModel, MIN_EXEC, NOT_MONOTONE, type Rung, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
+  type LadderModel, MIN_EXEC, NOT_MONOTONE, NO_MARK_YET, NO_RUNGS, type Rung, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
   slotX, stackRung, usBand, usText, yDomain,
 } from '../lib/ladder';
 
@@ -17,7 +17,8 @@ export const MARKETS_CAPTION = 'Sweet spots: per trade attempt over the last 30 
 export const MARKETS_WARMING = 'warming: part of the 30 days is still being filled.';
 export const MARKETS_RECOMPUTING = 'recomputing after the ladder';
 export const MARKETS_MISSING = 'no markets data';
-export const NO_RUNGS = 'No ladder account has a mark in this epoch yet.';
+/** The sentence lives with the model's other words (lib/ladder.ts: it is also the headline's line when no rung is marked). */
+export { NO_RUNGS };
 /** Under a rung with no account the axis shows this mark: the words would run into the next rung at 360 px. The
  *  dashed box above it is the drawing; the legend and the screen-reader text carry the words. */
 export const NO_ACCOUNT_MARK = '–';
@@ -103,6 +104,8 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
   // The dashed box needs its legend only beside a drawn rung. With no rung at all (no epoch yet) the big line
   // already says why, and "no account at this latency" under every slot would say it of the whole ladder.
   const someMissing = present.length > 0 && model.columns.some((c) => c.kind === 'missing');
+  // With no rung marked in a started epoch the empty slots are accounts without a mark, not absent accounts.
+  const noMarks = model.thinReason === 'no_marks';
   return (
     <figure className="ladder" aria-label="at what latency would this pay">
       <p className="ll-kicker">break-even</p>
@@ -156,7 +159,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
             {c.kind === 'missing' ? (
               <>
                 <span aria-hidden="true">{NO_ACCOUNT_MARK}</span>
-                <span className="ll-sr">{rungCountText(c, thin)}</span>
+                <span className="ll-sr">{noMarks ? NO_MARK_YET : rungCountText(c, thin)}</span>
               </>
             ) : (
               <span>{rungCountText(c, thin)}</span>

@@ -2,7 +2,7 @@
 // the helpers; the engine's own figures for the page's inputs are checked where the drawings are rendered.
 import { describe, expect, it } from 'vitest';
 import { FED_ASKS, FED_BIDS, fromTick, toTick } from '../math/defaults';
-import { type TickDomain, along, costDomain, mirrorDomain, tickText } from './geo';
+import { STACK_FULL, STACK_MAX, type TickDomain, along, costDomain, mirrorDomain, stackSpans, tickText } from './geo';
 
 /** The prices section a draws for a YES book: its own levels and their NO mirrors (1 − p). */
 const drawn = (yes: string[]) => [...yes, ...yes.map((p) => fromTick(100 - toTick(p)))];
@@ -12,6 +12,57 @@ const holds = (d: TickDomain, prices: string[]) => prices.every((p) => Number(p)
 describe('tickText', () => {
   it('writes whole ticks as a decimal string, no float text', () => {
     expect([0, 5, 40, 50, 100, 109, 250].map(tickText)).toEqual(['0.00', '0.05', '0.40', '0.50', '1.00', '1.09', '2.50']);
+  });
+});
+
+describe('stackSpans (the price stack)', () => {
+  it('lays prices end to end in ticks, and ends the axis a tenth of a dollar past the dollar line', () => {
+    expect(stackSpans(['0.30', '0.32', '0.35'])).toEqual({ spans: [{ from: 0, to: 30 }, { from: 30, to: 62 }, { from: 62, to: 97 }], end: 97, hi: 110 });
+    expect(stackSpans(['0.33', '0.33', '0.34'])).toMatchObject({ end: 100, hi: 110 }); // exactly on the line: no float noise
+    expect(stackSpans(['0.1', '0.2', '0.7']).end).toBe(100);
+  });
+
+  it('past the dollar line the axis follows the stack, so the overshoot stays inside the box', () => {
+    const s = stackSpans(['0.40', '0.45', '0.50']);
+    expect(s.end).toBe(135);
+    expect(s.hi).toBeGreaterThan(s.end);
+    expect(s.hi).toBeCloseTo(148.5);
+  });
+
+  it('a price that cannot be placed takes no width: malformed, empty, negative, too large', () => {
+    for (const bad of ['', ' ', 'abc', 'NaN', 'Infinity', '-0.20', '1e305', '1e999']) {
+      const s = stackSpans(['0.30', bad, '0.35']);
+      expect(s, JSON.stringify(bad)).toEqual({ spans: [{ from: 0, to: 30 }, { from: 30, to: 30 }, { from: 30, to: 65 }], end: 65, hi: 110 });
+    }
+    expect(stackSpans([])).toEqual({ spans: [], end: 0, hi: 110 });
+  });
+
+  it('two finite prices whose sum is not finite take no width: nothing here is ever NaN or Infinity (review M4)', () => {
+    expect(stackSpans(['1e300', '1e300'])).toEqual({ spans: [{ from: 0, to: 0 }, { from: 0, to: 0 }], end: 0, hi: 110 });
+    for (const prices of [['1e300'], ['1e300', '1e300', '0.5'], ['1.7e300', '1.7e300'], ['0.3', '1e300', '1e300', '0.35']]) {
+      const s = stackSpans(prices);
+      expect(JSON.stringify(s), prices.join()).not.toMatch(/null/); // JSON writes NaN and Infinity as null
+      expect(s.hi).toBeLessThanOrEqual(STACK_MAX * 1.1);
+    }
+    expect(stackSpans(['0.3', '1e300', '1e300', '0.35'])).toMatchObject({ end: 65, hi: 110 });
+  });
+
+  it('a price that would take the stack past STACK_MAX takes no width, so the dollar line always keeps a share of the bar', () => {
+    expect(stackSpans(['0.30', '20000', '0.35'])).toEqual({ spans: [{ from: 0, to: 30 }, { from: 30, to: 30 }, { from: 30, to: 65 }], end: 65, hi: 110 });
+    const big = stackSpans(['9999', '0.5']); // just under the limit: placed
+    expect(big.end).toBe(999950);
+    expect(STACK_FULL / big.hi).toBeGreaterThan(5e-7);
+  });
+
+  it('a price whose share of the bar rounds to zero takes no width', () => {
+    expect(stackSpans(['0.50', '0.0000001'])).toEqual({ spans: [{ from: 0, to: 50 }, { from: 50, to: 50 }], end: 50, hi: 110 });
+    expect(stackSpans(['0.50', '0.01']).spans[1]).toEqual({ from: 50, to: 51 }); // a whole tick is drawn
+    const s = stackSpans(['9000', '0.001']); // a tenth of a tick beside nine thousand dollars
+    expect(s.spans[1].to).toBe(s.spans[1].from);
+    const wide = stackSpans(['9000', '0.01', '5']);
+    expect(wide.spans.map(({ from, to }) => to - from)).toEqual([900000, 1, 500]); // a whole tick still has a share that can be written
+    for (const { from, to } of wide.spans) expect((to - from) / wide.hi).toBeGreaterThanOrEqual(5e-7);
+    expect(stackSpans(['abc'])).toEqual({ spans: [{ from: 0, to: 0 }], end: 0, hi: 110 });
   });
 });
 

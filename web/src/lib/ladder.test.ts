@@ -4,8 +4,7 @@ import type { BreakEven } from '../api/types';
 import { ladderFixture, ladderLiveFixture, ladderRung } from '../test/fixtures';
 import {
   LADDER, MIN_BAND, MIN_EXEC, SLOTS, asOfText, breakEvenText, epochText, extraText, ladderModel, latencyX, rungCountText, rungMsText,
-  slotX, stackRung, usBand, usText, yDomain,
-} from './ladder';
+  slotX, stackRung, usBand, usText, yDomain, NO_RUNGS } from './ladder';
 
 describe('the web LADDER', () => {
   it('names the same six rungs and latencies as the live api (spec §17)', () => {
@@ -48,6 +47,23 @@ describe('ladderModel', () => {
     );
     expect(few.thinReason).toBe('few');
     expect(breakEvenText(few).big).toBe('too few trades yet');
+  });
+
+  it('an epoch that has started with no ladder rung marked yet: its own reason, never "a rung has no account" (the accounts exist)', () => {
+    const none = ladderModel(ladderFixture({ rungs: [], break_even: { kind: 'thin' } }));
+    expect(none.thinReason).toBe('no_marks');
+    expect(breakEvenText(none)).toEqual({ big: 'no marks yet', line: NO_RUNGS });
+    expect(NO_RUNGS).toBe('No ladder account has a mark in this epoch yet.');
+    expect(none.columns.every((c) => c.kind === 'missing')).toBe(true);
+    // the extras alone do not make a ladder
+    const extras = ladderModel(ladderFixture({ rungs: ladderFixture().rungs.filter((r) => r.extra), break_even: { kind: 'thin' } }));
+    expect(extras.thinReason).toBe('no_marks');
+    // one rung marked and the others not is still the old state, word for word (ruling: a configured rung without an account)
+    const one = ladderModel(ladderFixture({ rungs: ladderFixture().rungs.filter((r) => !r.extra).slice(0, 1), break_even: { kind: 'thin' } }));
+    expect(one.thinReason).toBe('missing');
+    expect(breakEvenText(one)).toEqual({ big: 'a rung has no account yet', line: 'Every rung needs its own paper account before the ladder can answer.' });
+    // and a break-even the api did answer is never rewritten
+    expect(ladderModel(ladderFixture({ rungs: [] })).thinReason).toBeNull();
   });
 
   it('epoch 0: no rungs is six missing columns and no epoch yet', () => {

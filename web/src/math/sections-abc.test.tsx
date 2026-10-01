@@ -2,7 +2,7 @@
 // the page's own input; none is computed by hand here (R13). No fixed sleeps: every wait is a waitFor/findBy.
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
 import { existsSync, readFileSync } from 'node:fs';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { formatDecimal } from '../lib/money';
 import { CROSSED } from '../schematics/MirrorBooks';
@@ -13,6 +13,9 @@ import { IMPLICATION_PRICE_USE } from './adapt';
 import { B_QUIPS, SECTIONS } from './copy';
 import { toTick } from './defaults';
 import { CLASSIFY_START, ClassifySection, classifyInput } from './sections/ClassifySection';
+import { DepthSection } from './sections/DepthSection';
+import { EpisodeSection } from './sections/EpisodeSection';
+import { LegMissSection } from './sections/LegMissSection';
 import { MIRROR_START, MirrorSection } from './sections/MirrorSection';
 import { PAYOFF_START, PayoffSection, payoffInput } from './sections/PayoffSection';
 
@@ -64,12 +67,41 @@ describeWasm('sections a–c on the real engine (09-27 §8)', () => {
     expect(engine.mirror_json(JSON.stringify(MIRROR_START))).toBe(fx.output);
     const m = JSON.parse(fx.output) as MirrorModel;
     render(<MirrorSection engine={engine} />);
-    expect(screen.getByRole('heading', { name: 'a · one book, twice' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'a · the book, twice' })).toBeInTheDocument();
     expect(screen.getByText(`D1 long ${m.d1_long}`)).toBeInTheDocument();
     expect(screen.getByText(`short ${m.d1_short}`)).toBeInTheDocument();
     expect(screen.getByText(`spread ${m.spread}`)).toBeInTheDocument();
     expect(screen.getByText(SECTIONS.a.quip)).toBeInTheDocument();
     expect(screen.getByText(SECTIONS.a.caption)).toBeInTheDocument();
+  });
+
+  it('each section is an h3 with its new title and says which chapter introduced it, as text, not a link', () => {
+    const { container } = render(
+      <>
+        <MirrorSection engine={engine} />
+        <PayoffSection engine={engine} />
+        <ClassifySection engine={engine} />
+        <DepthSection engine={engine} />
+        <EpisodeSection engine={engine} />
+        <LegMissSection engine={engine} />
+      </>,
+    );
+    const want: [string, string, string][] = [
+      ['a', 'a · the book, twice', 'chapter 1'],
+      ['b', 'b · the basket’s payoff', 'chapter 2'],
+      ['c', 'c · is this update an edge?', 'chapter 3'],
+      ['d', 'd · how much: the depth walk', 'chapter 4'],
+      ['e', 'e · how long: the episode', 'chapter 5'],
+      ['f', 'f · one leg misses', 'chapter 6'],
+    ];
+    for (const [id, title, chapter] of want) {
+      const s = container.querySelector(`section#${id}`) as HTMLElement;
+      expect(within(s).getByRole('heading', { level: 3 })).toHaveTextContent(title);
+      expect(s).toHaveAccessibleName(title);
+      expect(within(s).getByText(chapter)).toHaveClass('dim');
+      expect(s.querySelector('a')).toBeNull();
+      expect(s.querySelector('h2')).toBeNull();
+    }
   });
 
   it('a: crossing the book raises the alert, and reset clears it', async () => {

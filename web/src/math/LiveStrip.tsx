@@ -1,4 +1,4 @@
-// Spec 7b §6.1 / §6.3: today's counts from the public snapshot, under the page header.
+// Spec 7b §6.1 / §6.3: today's counts from the public snapshot, in the story's chapter 3 (spec 2026-10-01 §3).
 import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
 import { fmtUtcDayHm, fmtUtcHm } from '../lib/time';

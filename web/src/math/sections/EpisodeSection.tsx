@@ -28,11 +28,12 @@ const KNOBS: [keyof Lat, string][] = [['proc_ms', 'proc ms'], ['net_ms', 'net ms
 
 const leg = (bid: number): LegIn => ({ status: 'live', bids: [{ p: fromTick(bid), s: '100' }], asks: [{ p: fromTick(bid + 1), s: '100' }], fee: null });
 
-/** episode_json's input: no basket (the engine has none to fill, 7b §6.2 e) and no gap_ms (it changes nothing). */
-export function episodeInput(st: EpisodeState): EpisodeIn {
+/** episode_json's input: no basket (the engine has none to fill, 7b §6.2 e) and no gap_ms (it changes nothing).
+ *  `times` are the updates' clock (the story's second state uses a shorter one). */
+export function episodeInput(st: EpisodeState, times: number[] = EPISODE_T): EpisodeIn {
   return {
     kind: 'no',
-    updates: EPISODE_T.slice(0, st.upto).map((t, i) => ({ t_ms: t, legs: EPISODE_BIDS[i].map(leg) })),
+    updates: times.slice(0, st.upto).map((t, i) => ({ t_ms: t, legs: EPISODE_BIDS[i].map(leg) })),
     scenario: { ...st.sc, honor_seconds_delay: true },
     seconds_delay: st.delay ? 1 : null,
   };
@@ -51,6 +52,28 @@ function timesLine(m: EpisodeModel): string | null {
 function closing(out: EpisodeModel | EngineError): string | null {
   if (isError(out) || out.open_ms === null) return null;
   return out.caught ? E_QUIPS.caught : E_QUIPS.missed;
+}
+
+/** The answer section e draws: the verdict word, what was captured, the exact times, then the two drawings.
+ *  The story's chapter 5 draws the same. */
+export function EpisodeView({ m }: { m: EpisodeModel }) {
+  const lat = m.t_x !== null && m.open_ms !== null ? m.t_x - m.open_ms : null;
+  const word = m.open_ms === null ? 'no episode yet' : m.caught ? 'caught' : 'missed';
+  const times = timesLine(m);
+  return (
+    <>
+      <p className={m.open_ms === null ? 'm-verdict' : m.caught ? 'm-verdict pos' : 'm-verdict neg'}>{word}</p>
+      {m.caught && m.captured !== null && lat !== null && (
+        <p className="m-verdict-line">
+          {`captured ${lat} ms after it opened: `}
+          <Money value={m.captured} signed cents /> on the table at t_x, in this teaching model
+        </p>
+      )}
+      {times !== null && <p className="dim m-times">{times}</p>}
+      <UpdateBars updates={m.updates} peakMs={m.peak_ms} />
+      <DurationBars rows={episodeRows(m)} />
+    </>
+  );
 }
 
 /** 09-27 §6.2 e: scrub updates, proc/net/match sliders with the LADDER presets, secondsDelay. */
@@ -84,27 +107,7 @@ export function EpisodeSection({ engine }: { engine: Engine }) {
         </>
       }
     >
-      <Out out={out}>
-        {(m) => {
-          const lat = m.t_x !== null && m.open_ms !== null ? m.t_x - m.open_ms : null;
-          const word = m.open_ms === null ? 'no episode yet' : m.caught ? 'caught' : 'missed';
-          const times = timesLine(m);
-          return (
-            <>
-              <p className={m.open_ms === null ? 'm-verdict' : m.caught ? 'm-verdict pos' : 'm-verdict neg'}>{word}</p>
-              {m.caught && m.captured !== null && lat !== null && (
-                <p className="m-verdict-line">
-                  {`captured ${lat} ms after it opened: `}
-                  <Money value={m.captured} signed cents /> on the table at t_x, in this teaching model
-                </p>
-              )}
-              {times !== null && <p className="dim m-times">{times}</p>}
-              <UpdateBars updates={m.updates} peakMs={m.peak_ms} />
-              <DurationBars rows={episodeRows(m)} />
-            </>
-          );
-        }}
-      </Out>
+      <Out out={out}>{(m) => <EpisodeView m={m} />}</Out>
     </Section>
   );
 }
