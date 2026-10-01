@@ -119,9 +119,24 @@ describe('theme', () => {
 
   it('the price stack (the story, chapter 3): a label row that mirrors the bar, a gap that differs by more than colour, thin strokes that do not scale', () => {
     expect(rule('.ps-labels')).toMatch(/table-layout:\s*fixed/); // the columns are the cols' shares, never the labels' own width
+    expect(rule('.ps-labels')).toMatch(/(?<![-\w])width:\s*100%/); // its own, not the global table rule's: the shares are of the bar's width
+    // the mark above the gap: a solid bracket in the gap's own colour, a line that keeps its width when the bar stretches
+    const mark = rule('.ps-svg .ps-mark');
+    expect(mark).toMatch(/fill:\s*none/);
+    expect(mark).toMatch(/stroke:\s*var\(--salmon\)/);
+    expect(mark).toMatch(/stroke-width:\s*2px/);
+    expect(mark).toMatch(/vector-effect:\s*non-scaling-stroke/);
+    expect(mark).not.toMatch(/dasharray/);
+    // the legend's swatch is drawn as the gap is: the same tint, the same dashed outline
+    const gap = rule('.ps-svg .ps-gap');
+    const sw = rule('.ps-sw.gap');
+    expect(gap).toMatch(/fill:\s*var\(--salmon\);\s*fill-opacity:\s*0\.25/);
+    expect(gap).toMatch(/stroke:\s*var\(--salmon\)/);
+    expect(sw).toMatch(/background:\s*color-mix\(in srgb, var\(--salmon\) 25%, transparent\)/);
+    expect(sw).toMatch(/border:\s*1px dashed var\(--salmon\)/);
     expect(rule('.ps-labels td')).toMatch(/padding:\s*0;\s*border:\s*0/);
     expect(rule('.ps-svg .ps-gap')).toMatch(/stroke-dasharray/);
-    for (const sel of ['.ps-svg .ps-leg', '.ps-svg .ps-gap', '.ps-svg .ps-over', '.ps-svg .ps-dollar']) expect(rule(sel), sel).toMatch(/vector-effect:\s*non-scaling-stroke/);
+    for (const sel of ['.ps-svg .ps-leg', '.ps-svg .ps-gap', '.ps-svg .ps-over', '.ps-svg .ps-dollar', '.ps-svg .ps-mark']) expect(rule(sel), sel).toMatch(/vector-effect:\s*non-scaling-stroke/);
     expect(rule('.ps-sw.gap')).toMatch(/dashed/); // the swatch is drawn as the gap is
     expect(rule('.pstack')).toMatch(/min-width:\s*0/);
   });

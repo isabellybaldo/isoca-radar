@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { checkHonesty } from '../../explain/honesty';
 import { CROSSED } from '../../schematics/MirrorBooks';
 import { describeWasm, loadTestEngine } from '../../wasm/testEngine';
-import type { Engine, EngineFn } from '../../wasm/types';
+import { ENGINE_FNS, type Engine, type EngineFn } from '../../wasm/types';
 import { CH3_COUNT, CH7_EXTRAS, CHAPTERS, TAKE } from './copy';
 import { CH1, CH2, CH3, CH3_LABELS, CH5, CH6 } from './presets';
 import { Story } from './Story';
@@ -106,7 +106,6 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
     expect(s.querySelectorAll('.cl-path, .cl-node')).toHaveLength(0);
     expect(s.querySelector('.pstack')?.textContent).not.toContain('$'); // the amount is the engine's, in its own framed line
     expect(s.querySelector('.cl-net')?.textContent).toMatch(/\$\d[\d.,]* on the table/);
-    expect(s.textContent).toMatch(/\$\d[\d.,]* on the table/);
     const order = [...s.children].map((k) => k.textContent);
     expect(order.indexOf(CH3_COUNT)).toBeGreaterThan(order.indexOf(TAKE.ch3(true)));
     expect(order.indexOf('STRIP')).toBe(order.indexOf(CH3_COUNT) + 1);
@@ -178,6 +177,20 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
     for (const ch of CHAPTERS.slice(0, 6)) second(sec(c, ch.id));
     expect(scan()).toBeGreaterThan(0);
     expect(c.querySelectorAll('a, nav, [style], svg text')).toHaveLength(0);
+  });
+
+  it('asks the engine once per chapter on first paint (six calls, one per export), not again when its parent draws again, and once for a switch', () => {
+    const calls: EngineFn[] = [];
+    const counting = Object.fromEntries(ENGINE_FNS.map((fn) => [fn, (i: string) => (calls.push(fn), engine[fn](i))])) as Engine;
+    const { container, rerender } = render(<Story engine={counting} strip={<p>STRIP</p>} ladder={<p>LADDER</p>} ladderDrawn />);
+    expect([...calls].sort()).toEqual(['basket_json', 'classify_json', 'depth_walk_json', 'episode_json', 'mirror_json', 'payoff_json']);
+    // the page draws again whenever the snapshot or its clock moves: new live parts, the same engine
+    rerender(<Story engine={counting} strip={<p>STRIP again</p>} ladder={<p>LADDER again</p>} ladderDrawn />);
+    rerender(<Story engine={counting} strip={null} ladder={<p>unavailable</p>} ladderDrawn={false} />);
+    expect(within(sec(container, 's7')).getByText('unavailable')).toBeInTheDocument(); // it did draw again
+    expect(calls).toHaveLength(6);
+    second(sec(container, 's4'));
+    expect(calls.slice(6)).toEqual(['depth_walk_json']);
   });
 
   it('review focus 3: switching one chapter moves no other, for each of the six', () => {

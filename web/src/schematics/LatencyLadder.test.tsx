@@ -177,6 +177,27 @@ describe('LatencyLadder', () => {
     expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
   });
 
+  it('an epoch with no mark yet says so: the headline, the line, six empty slots read as "no mark yet", and nothing about a missing account', () => {
+    const { container } = render(<LatencyLadder model={ladderModel(ladderFixture({ rungs: [], break_even: { kind: 'thin' } }))} />);
+    expect(screen.getByText('no marks yet')).toHaveClass('ll-big');
+    expect(container.querySelector('.ll-line')).toHaveTextContent('No ladder account has a mark in this epoch yet.');
+    expect(screen.getAllByText('no mark yet')).toHaveLength(6); // what a screen reader hears under each rung
+    expect(container.textContent).not.toMatch(/no account|needs its own paper account/);
+    expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
+    expect(container.querySelectorAll('rect.ll-missing')).toHaveLength(6);
+    expect(container.querySelectorAll('.ll-seg, .ll-net')).toHaveLength(0);
+  });
+
+  it('a rung missing beside marked ones reads as before: "no account" under it, the legend row, the old headline', () => {
+    const rungs = ladderFixture().rungs.filter((r) => r.scenario !== 'rung-100');
+    const { container } = render(<LatencyLadder model={ladderModel(ladderFixture({ rungs, break_even: { kind: 'thin' } }))} />);
+    expect(screen.getByText('a rung has no account yet')).toHaveClass('ll-big');
+    expect(container.querySelector('.ll-line')).toHaveTextContent('Every rung needs its own paper account before the ladder can answer.');
+    expect(screen.getAllByText('no account')).toHaveLength(1);
+    expect(screen.queryByText('no mark yet')).toBeNull();
+    expect(screen.getByText(NO_ACCOUNT_LEGEND)).toBeInTheDocument();
+  });
+
   it('the dashed-box legend needs a rung with an account and one without: none drawn, all drawn and no rung at all leave it out', () => {
     const all = ladderFixture().rungs;
     const ladderOnly = all.filter((r) => !r.extra);

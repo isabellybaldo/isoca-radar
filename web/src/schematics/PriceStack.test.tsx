@@ -39,6 +39,18 @@ describe('PriceStack (the story, chapter 3)', () => {
     expect(right(gap[0])).toBeCloseTo(dollarX(container));
     expect(num(gap[0], 'width') / num(s[0], 'width')).toBeCloseTo(3 / 30);
     expect(container.querySelector('rect.ps-over')).toBeNull();
+    // the gap is narrow (three ticks): a bracket above the bar spans exactly it
+    const mark = container.querySelectorAll('path.ps-mark');
+    expect(mark).toHaveLength(1);
+    const d = /^M([\d.]+) ([\d.]+)V([\d.]+)H([\d.]+)V([\d.]+)$/.exec(mark[0].getAttribute('d') ?? '');
+    expect(d, mark[0].getAttribute('d') ?? 'no d').not.toBeNull();
+    const [x0, yFoot, yTop, x1, yFoot2] = (d as RegExpExecArray).slice(1).map(Number);
+    expect(x0).toBeCloseTo(num(gap[0], 'x'));
+    expect(x1).toBeCloseTo(right(gap[0]));
+    expect(yFoot2).toBe(yFoot);
+    expect(yTop).toBeLessThan(yFoot); // open towards the bar,
+    expect(yFoot).toBeLessThanOrEqual(num(gap[0], 'y')); // in the headroom above it
+    expect(yTop).toBeGreaterThan(0);
     // the dollar line is inside the frame, not on it
     expect(dollarX(container)).toBeGreaterThan(0);
     expect(dollarX(container)).toBeLessThan(viewW(container));
@@ -53,6 +65,7 @@ describe('PriceStack (the story, chapter 3)', () => {
     expect(container.querySelector('rect.ps-gap')).toBeNull();
     expect(container.querySelector('rect.ps-over')).toBeNull();
     expect(right(s[2])).toBeCloseTo(dollarX(container));
+    expect(container.querySelector('path.ps-mark')).toBeNull(); // no gap, no mark
     expect(screen.queryByText('the gap')).toBeNull();
     expect(screen.getByText('what the basket costs')).toBeInTheDocument();
   });
@@ -67,6 +80,7 @@ describe('PriceStack (the story, chapter 3)', () => {
     expect(right(over[0])).toBeCloseTo(right(s[2]));
     expect(right(s[2])).toBeLessThan(viewW(container));
     expect(num(s[1], 'width') / num(s[0], 'width')).toBeCloseTo(45 / 40);
+    expect(container.querySelector('path.ps-mark')).toBeNull();
     expect(screen.queryByText('the gap')).toBeNull();
   });
 
@@ -106,14 +120,17 @@ describe('PriceStack (the story, chapter 3)', () => {
   });
 
   it.each([
-    ['no leg', legs()],
-    ['a malformed price', legs('0.30', 'abc', '0.35')],
-    ['an empty price', legs('', '0.50')],
-    ['a negative price', legs('-0.20', '0.50')],
-    ['a price too large to place', legs('0.30', '1e305')],
-    ['a price past any axis', legs('1e999', '0.10')],
-    ['only zero', legs('0', '0.00')],
-  ])('%s draws without NaN, inside the box', (_name, given) => {
+    ['no leg', legs(), null],
+    ['a malformed price', legs('0.30', 'abc', '0.35'), 'not drawn: B abc'],
+    ['an empty price', legs('', '0.50'), 'not drawn: A'],
+    ['a negative price', legs('-0.20', '0.50'), 'not drawn: A -0.20'],
+    ['a price too large to place', legs('0.30', '1e305'), 'not drawn: B 1e305'],
+    ['a price past any axis', legs('1e999', '0.10'), 'not drawn: A 1e999'],
+    ['only zero', legs('0', '0.00'), 'not drawn: A 0 · B 0.00'],
+    ['two finite prices whose sum is not', legs('1e300', '1e300'), 'not drawn: A 1e300 · B 1e300'],
+    ['a price that would shrink the dollar to nothing', legs('0.30', '20000', '0.35'), 'not drawn: B 20000'],
+    ['a price too small to have a width', legs('0.50', '0.0000001'), 'not drawn: B 0.0000001'],
+  ])('%s draws without NaN, inside the box, and names what it left out', (_name, given, off) => {
     const { container } = render(<PriceStack legs={given} />);
     expect(attrs(container)).not.toMatch(/NaN|Infinity/);
     expect(container.textContent).not.toMatch(/NaN|Infinity/);
@@ -128,7 +145,10 @@ describe('PriceStack (the story, chapter 3)', () => {
     for (const c of cols(container)) expect(c).toBeGreaterThan(0);
     expect(cols(container).reduce((a, b) => a + b, 0)).toBeCloseTo(1, 3);
     // every leg is still named with the string given: under its segment, or in the line for what takes no width
-    for (const l of given) expect(container.textContent, l.name).toMatch(new RegExp(`${l.name} ?${l.price.replace(/[.+-]/g, '\\$&')}`));
+    expect(container.querySelector('.ps-off')?.textContent?.trim() ?? null).toBe(off);
+    const left = given.filter((l) => !(off ?? '').replace('not drawn: ', '').split(' · ').some((x) => x.split(' ')[0] === l.name));
+    expect([...container.querySelectorAll('td.ps-leg-l')].map((td) => td.textContent)).toEqual(left.map((l) => `${l.name}${l.price}`));
+    expect(segs(container)).toHaveLength(left.length);
   });
 
   it('a price that takes no width is named in its own line, not squeezed into the row', () => {

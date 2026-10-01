@@ -44,7 +44,7 @@ export type LadderColumn =
   | { kind: 'rung'; scenario: string; latency_ms: number; latencyKnown: boolean; rung: Rung };
 
 /** Why a `thin` answer is thin, so the big line never says "too few trades" beside rungs that all have enough. */
-export type ThinReason = 'few' | 'missing' | 'unknown' | 'no_epoch';
+export type ThinReason = 'few' | 'missing' | 'unknown' | 'no_epoch' | 'no_marks';
 
 export interface LadderModel {
   epoch: number;
@@ -70,6 +70,9 @@ export function ladderModel(l: LadderIn): LadderModel {
   let thinReason: ThinReason | null = null;
   if (l.break_even.kind === 'thin') {
     if (l.start_ms === null) thinReason = 'no_epoch';
+    // The epoch has started and no ladder account has a mark yet (its first minutes): the accounts exist, so
+    // this is not "a rung has no account", which stays for a ladder with some rungs marked and some absent.
+    else if (present.length === 0) thinReason = 'no_marks';
     else if (present.some((c) => c.rung.n_exec < MIN_EXEC)) thinReason = 'few';
     else if (present.length < LADDER.length) thinReason = 'missing';
     else if (present.some((c) => !c.latencyKnown)) thinReason = 'unknown';
@@ -172,11 +175,17 @@ export interface BreakEvenText {
   line: string;
 }
 
+/** An epoch whose ladder accounts have no mark yet: the headline's line, and what stands in for the numbers table. */
+export const NO_RUNGS = 'No ladder account has a mark in this epoch yet.';
+/** Under an empty rung in that state, for a screen reader: the account is there, its first mark is not. */
+export const NO_MARK_YET = 'no mark yet';
+
 const THIN: Record<ThinReason, BreakEvenText> = {
   few: { big: 'too few trades yet', line: `Each rung needs ${MIN_EXEC} trades; the counts are under the drawing.` },
   missing: { big: 'a rung has no account yet', line: 'Every rung needs its own paper account before the ladder can answer.' },
   unknown: { big: 'rung latencies unknown', line: 'The api has no policies file, so it cannot place the rungs.' },
   no_epoch: { big: 'no epoch yet', line: 'The ladder counts from the start of the first epoch.' },
+  no_marks: { big: 'no marks yet', line: NO_RUNGS },
 };
 
 export const NOT_MONOTONE = 'The sign changes more than once along the ladder; this is the first change.';

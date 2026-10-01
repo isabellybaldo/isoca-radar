@@ -46,19 +46,39 @@ export const along = (d: TickDomain, v: string): number => (inTicks(v) - d.lo) /
 /** What a complete basket pays, in ticks: one dollar. */
 export const STACK_FULL = 100;
 
+/** The longest stack that is drawn, in ticks (ten thousand dollars): past it the dollar line would have no
+ *  share of the bar left to be drawn in. */
+export const STACK_MAX = 1e6;
+/** The smallest share of the bar that can be written: a column's width is a percentage to four decimals. */
+export const STACK_MIN_SHARE = 5e-7;
+
 /** Prices laid end to end, in ticks, against the `STACK_FULL` a basket pays (the story's price stack). Each
- *  span runs from where the one before ended; a price that cannot be placed (malformed, empty, negative, too
- *  large) takes no width, so nothing here is ever NaN. The sums are made on whole millionths of a tick, so
- *  0.33 + 0.33 + 0.34 ends exactly on the line. `hi` is the axis' end: a tenth past the farther of the stack's
- *  end and the line, so neither sits on the frame. */
+ *  span runs from where the one before ended. A price takes no width (its span is empty, and the drawing names
+ *  it as not drawn) when it cannot be placed (malformed, empty, negative, zero, too large for `inTicks`), when
+ *  it would take the running sum past `STACK_MAX` (which also keeps the sum finite: two prices of 1e300 are
+ *  each finite and their sum is not), or when its share of the bar would round to zero. So every number here
+ *  is finite and every span that has a width can be drawn. The sums are made on whole millionths of a tick,
+ *  so 0.33 + 0.33 + 0.34 ends exactly on the line. `hi` is the axis' end: a tenth past the farther of the
+ *  stack's end and the line, so neither sits on the frame. */
 export function stackSpans(prices: string[]): { spans: { from: number; to: number }[]; end: number; hi: number } {
-  let at = 0;
-  const spans = prices.map((p) => {
-    const from = at;
-    at += Math.round(inTicks(p) * 1e6);
-    return { from: from / 1e6, to: at / 1e6 };
+  const MICRO = 1e6;
+  let sum = 0;
+  const fits = prices.map((p) => {
+    const m = Math.round(inTicks(p) * MICRO);
+    if (!(m > 0) || !(sum + m <= STACK_MAX * MICRO)) return 0;
+    sum += m;
+    return m;
   });
-  const end = at / 1e6;
+  // Shares are judged on the axis of everything that fits; leaving the slivers out only shortens that axis,
+  // so what stays keeps at least the share it was judged by.
+  const axis = Math.max(STACK_FULL * MICRO, sum) * 1.1;
+  let at = 0;
+  const spans = fits.map((m) => {
+    const from = at;
+    if (m / axis >= STACK_MIN_SHARE) at += m;
+    return { from: from / MICRO, to: at / MICRO };
+  });
+  const end = at / MICRO;
   const far = Math.max(STACK_FULL, end);
   return { spans, end, hi: far + far / 10 };
 }

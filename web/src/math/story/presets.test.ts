@@ -7,6 +7,7 @@ import { call } from '../../wasm/call';
 import { describeWasm, loadTestEngine } from '../../wasm/testEngine';
 import type { BasketModel, ClassifyModel, Engine, EpisodeModel, MirrorModel, PayoffMatrix, WalkModel } from '../../wasm/types';
 import { isError } from '../../wasm/types';
+import { CHAPTERS } from './copy';
 import { CH1, CH2, CH3, CH3_LABELS, CH4, CH5, CH6 } from './presets';
 
 declare const process: { cwd(): string };
@@ -81,5 +82,15 @@ describeWasm('story presets on the real engine (spec §4)', () => {
     const toml: string = readFileSync(`${process.cwd()}/../config/policies.toml`, 'utf8');
     expect(LADDER).toHaveLength(6);
     for (const l of LADDER) expect(toml).toContain(`"${l.scenario}"`);
+    expect(CHAPTERS[6].lead).toMatch(/\bsix paper accounts\b/);
+    // The file's scenarios, less the ones its own comment calls "extras beside the ladder", are the ladder: exactly LADDER.
+    const scenarios = toml.split('[[scenarios]]').slice(1).map((block) => /^name\s*=\s*"([^"]+)"/m.exec(block)?.[1] ?? '');
+    const comments = toml.split('\n').filter((l) => l.startsWith('#')).map((l) => l.replace(/^#\s*/, '')).join(' ');
+    const sentence = comments.split(/(?<=\.)\s+/).find((x) => x.includes('extras beside the ladder')) ?? '';
+    const extras = scenarios.filter((n) => new RegExp(`(?<![\\w-])${n}(?![\\w-])`).test(sentence));
+    expect(extras).toHaveLength(2); // the sentence was found, and it names two
+    const ladder = scenarios.filter((n) => !extras.includes(n));
+    expect(ladder).toHaveLength(LADDER.length);
+    expect([...ladder].sort()).toEqual(LADDER.map((l) => l.scenario).sort());
   });
 });

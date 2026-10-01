@@ -525,6 +525,8 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     // A slow frame (50 ms, like a busy CI runner): an assertion that reads the output before its frame has landed fails here, every time.
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 50));
     vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id));
+    // The test's budget is 15 s: its waits get 5 s each, so on a slow runner the budget is what runs out, not a 1 s default.
+    const SLOW = { timeout: 5000 };
     const sent: { fn: EngineFn; input: unknown }[] = [];
     const spied = Object.fromEntries(ENGINE_FNS.map((fn) => [fn, (i: string) => (sent.push({ fn, input: JSON.parse(i) }), engine[fn](i))])) as Engine;
     const last = <T,>(fn: EngineFn) => sent.filter((x) => x.fn === fn).at(-1)?.input as T;
@@ -533,16 +535,16 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     clock = sample.written_ms + 60_000;
     mockApi({ [SNAPSHOT_URL]: () => new Response(sampleText, { status: 200 }) });
     const { container } = render(<MathPage engine={Promise.resolve(spied)} now={now} />);
-    await screen.findByRole('region', STRIP);
-    await screen.findByRole('region', { name: SECTIONS.f.title });
+    await screen.findByRole('region', STRIP, SLOW);
+    await screen.findByRole('region', { name: SECTIONS.f.title }, SLOW);
     const s7 = within(part('s7'));
-    await s7.findByRole('heading', { name: /^on the live scanner/ });
-    await waitFor(() => expect(sectionHeads()).toHaveLength(6));
+    await s7.findByRole('heading', { name: /^on the live scanner/ }, SLOW);
+    await waitFor(() => expect(sectionHeads()).toHaveLength(6), SLOW);
     // Each section is found by its accessible name, once: a role query walks the whole page, which is twice as long now.
     const regions = new Map(IDS.map((k) => [k, screen.getByRole('region', { name: SECTIONS[k].title })]));
     const sec = (k: (typeof IDS)[number]) => within(regions.get(k) as HTMLElement);
     for (const s of container.querySelectorAll('details:not([open]) > summary')) fireEvent.click(s);
-    await waitFor(() => expect(container.querySelectorAll('details:not([open])')).toHaveLength(0));
+    await waitFor(() => expect(container.querySelectorAll('details:not([open])')).toHaveLength(0), SLOW);
 
     // chapter 7's live ladder, "which markets": a tapped cell with a mean writes a $ line under the grid
     const row = sample.ladder.markets.find((r) => r.mean !== null);
@@ -557,7 +559,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expectHonest(container, 'chapter 7: a market cell with a mean');
 
     fireEvent.click(sec('a').getByRole('button', { name: 'cross the book' }));
-    expect(await sec('a').findByText(CROSSED)).toBeInTheDocument();
+    expect(await sec('a').findByText(CROSSED, {}, SLOW)).toBeInTheDocument();
     expectHonest(container, 'a: crossed book');
 
     fireEvent.click(sec('b').getByLabelText('with prices'));
@@ -569,23 +571,23 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
       fireEvent.click(sec('b').getByRole('button', { name: button }));
       // One expectation on the last request: the kind AND the prices. "YES basket" is already the kind at the start,
       // so waiting for the kind alone is satisfied by the first, unpriced request (the CI race).
-      await waitFor(() => expect(last<PayoffIn>('payoff_json')).toMatchObject({ kind, prices: expect.any(Array) }));
-      expect(await sec('b').findByRole('table', { name: table })).toBeInTheDocument();
-      expect(await sec('b').findByText(/ =$/)).toBeInTheDocument(); // the formula line with the engine's edge is on screen
+      await waitFor(() => expect(last<PayoffIn>('payoff_json')).toMatchObject({ kind, prices: expect.any(Array) }), SLOW);
+      expect(await sec('b').findByRole('table', { name: table }, SLOW)).toBeInTheDocument();
+      expect(await sec('b').findByText(/ =$/, {}, SLOW)).toBeInTheDocument(); // the formula line with the engine's edge is on screen
       expectHonest(container, `b: ${kind} with prices`);
     }
 
     fireEvent.click(sec('d').getByLabelText(/taker fees on/));
     const walked = JSON.parse(engine.depth_walk_json(JSON.stringify(depthInput({ ...DEPTH_START, fees: true })))) as WalkModel;
-    await waitFor(() => expect(last<DepthWalkIn>('depth_walk_json')).toEqual(depthInput({ ...DEPTH_START, fees: true })));
-    expect(await sec('d').findByText(`Q* ${walked.q_star}`)).toBeInTheDocument();
+    await waitFor(() => expect(last<DepthWalkIn>('depth_walk_json')).toEqual(depthInput({ ...DEPTH_START, fees: true })), SLOW);
+    expect(await sec('d').findByText(`Q* ${walked.q_star}`, {}, SLOW)).toBeInTheDocument();
     expectHonest(container, 'd: fees on');
 
     fireEvent.click(sec('f').getByRole('button', { name: 'the usual burst' }));
-    await waitFor(() => expect(last<BasketIn>('basket_json')).toEqual(basketInput(F_BOOKS, F_BURST)));
+    await waitFor(() => expect(last<BasketIn>('basket_json')).toEqual(basketInput(F_BOOKS, F_BURST)), SLOW);
     expectHonest(container, 'f: the usual burst');
     fireEvent.click(sec('f').getByLabelText(/taker fees on/));
-    await waitFor(() => expect(last<BasketIn>('basket_json')).toEqual(basketInput(F_BOOKS, { ...F_BURST, fees: true })));
+    await waitFor(() => expect(last<BasketIn>('basket_json')).toEqual(basketInput(F_BOOKS, { ...F_BURST, fees: true })), SLOW);
     expectHonest(container, 'f: the usual burst with fees');
 
     // and all of it again with every chapter on its second state
@@ -699,9 +701,9 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect([fold('s1').open, fold('a').open]).toEqual([true, false]); // remembered for the story, not for a
   });
 
-  it('review focus 4: a day with no episodes and an epoch with no rungs still reads true', async () => {
+  it('a day with no episodes and an epoch with no mark yet: chapter 3 counts zero, chapter 7 says "no marks yet" and never that an account is missing', async () => {
     const base = snapshotFixture({}, T0);
-    // what the api writes for an epoch with no rung: break_even "thin" (cards::ladder::break_even on an empty ladder)
+    // what the api writes at the start of an epoch: no rung, break_even "thin" (cards::ladder::break_even on an empty ladder)
     const empty: PublicSnapshot = {
       ...base,
       ladder: { ...base.ladder, rungs: [], markets: [], break_even: { kind: 'thin' } },
@@ -715,13 +717,42 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect([...stripShown().querySelectorAll('.m-big')].slice(0, 2).map((b) => b.textContent)).toEqual(['0', '0']);
     expect(stripShown()).toHaveTextContent(/on the table/);
     const s7 = within(part('s7'));
-    expect(s7.getByText(NO_RUNGS)).toBeInTheDocument();
-    expect(s7.getByText(breakEvenText(ladderModel(publicToLadder(empty.ladder))).big)).toHaveClass('ll-big');
+    // the lead says the scanner keeps six paper accounts: the ladder must not say one of them does not exist
+    expect(s7.getByText(CHAPTERS[6].lead)).toBeInTheDocument();
+    expect(s7.getByText('no marks yet')).toHaveClass('ll-big');
+    expect(part('s7').querySelector('.ll-line')).toHaveTextContent(NO_RUNGS);
+    expect(s7.getAllByText(NO_RUNGS)).toHaveLength(2); // under the headline, and in place of "the numbers"
+    expect(part('s7').textContent).not.toMatch(/no account|has no account yet|needs its own paper account/);
+    expect(breakEvenText(ladderModel(publicToLadder(empty.ladder))).big).toBe('no marks yet');
     expect(part('s7').querySelectorAll('.ll-svg .ll-seg, .ll-svg .ll-net')).toHaveLength(0); // nothing is drawn as a result
     expect(part('s7').lastElementChild).toHaveTextContent(TAKE.ch7);
     expect(sectionHeads()).toHaveLength(6);
     noErrors();
     expectHonest(container, 'an empty day');
+  });
+
+  it('nothing done on the page leaves the browser: a control moved, a switch flipped and a fold opened, and the one request is still the snapshot, sent with no body', async () => {
+    const xhr = vi.spyOn(XMLHttpRequest.prototype, 'open');
+    const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
+    render(<MathPage engine={Promise.resolve(engine)} now={now} />);
+    await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
+    expect(within(part('play')).getByText(PLAY.line)).toHaveTextContent(/leaves your browser\.$/);
+    const shares = within(part('f')).getByLabelText('shares to buy') as HTMLInputElement;
+    const before = part('f').innerHTML;
+    fireEvent.change(shares, { target: { value: '100' } });
+    await landed(f, () => expect(shares.value).toBe('100'));
+    expect(part('f').innerHTML).not.toBe(before); // the control really moved
+    fireEvent.click(switchOf('s1')[1]);
+    expect(pressed('s1')).toEqual(['false', 'true']);
+    fireEvent.click(within(part('play')).getByText(WORDS_LABEL));
+    await landed(f, () => expect(localStorage.getItem('fold:math:words')).toBe('1')); // what is kept is kept in the browser
+    await settle(f);
+    expect(f.mock.calls).toHaveLength(1);
+    const [url, init] = f.mock.calls[0];
+    expect(String(url)).toBe(SNAPSHOT_URL);
+    expect(Object.keys(init ?? {})).toEqual(['signal']); // a plain GET: no method, no body, no header of ours
+    expect(init?.body).toBeUndefined();
+    expect(xhr).not.toHaveBeenCalled();
   });
 
   it('the story is honest in both states of every chapter', async () => {
@@ -733,6 +764,8 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
     await openEveryFold(container, f);
     const takes = () => STORY.map((id) => part(id).querySelector('.m-ch-take')?.textContent);
+    const playground = () => IDS.map((k) => part(k).innerHTML);
+    const untouched = playground();
     const first = takes();
     for (const id of STORY.slice(0, 6)) expect(pressed(id), id).toEqual(['true', 'false']);
     expect(first.every((t) => typeof t === 'string' && t !== '')).toBe(true);
@@ -746,6 +779,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect(STORY.filter((_, i) => second[i] !== first[i])).toEqual(['s1', 's2', 's3', 's5', 's6']);
     expect(dollars()[2]).toBeGreaterThan(0); // chapter 3's edge, on the table
     expectHonest(container, 'story: second states');
-    expect(sectionHeads()).toHaveLength(6); // the playground did not move
+    expect(sectionHeads()).toHaveLength(6);
+    expect(playground()).toEqual(untouched); // the playground did not move: not one byte of a to f
   });
 });

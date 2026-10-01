@@ -36,6 +36,17 @@ describe('story copy (spec §5, §6)', () => {
     expect(new Set([TAKE.ch6('filled'), TAKE.ch6('caught'), TAKE.ch6('nothing filled')]).size).toBe(3);
   });
 
+  it('the sentences the whole-branch review corrected say what is true of the page', () => {
+    // chapter 7 is drawn from the live snapshot, not by the engine
+    expect(HOOK.endsWith(' Chapters 1 to 6 run the scanner’s own Rust code, compiled to WASM; chapter 7 shows its live paper accounts.')).toBe(true);
+    expect(HOOK).not.toMatch(/Every drawing/);
+    // chapter 3 and section c draw different things, and a fold's state is kept in the browser
+    expect(PLAY.line).toBe('The engine behind each chapter, with every control. Nothing you do here leaves your browser.');
+    // the second state names what the drawing shows
+    expect(TAKE.ch3(true)).toBe('The gap, on every basket the books can fill, is the edge. The scanner runs this check each time a price moves.');
+    expect(TAKE.ch3(false)).toBe('At exactly one dollar there is nothing to take.');
+  });
+
   it('the word list has the twelve terms of the spec, in its order', () => {
     expect(WORDS.map(([t]) => t)).toEqual([
       'YES / NO share', 'book, bid, ask', 'basket, leg', 'NO basket', 'edge (Π)', 'Q*', 'episode', 't_x', 'unwind', 'convert', 'on the table', 'on paper',

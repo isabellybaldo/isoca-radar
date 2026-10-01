@@ -3,20 +3,26 @@ import { PLOT_W as W, STACK_FULL as FULL, stackSpans } from './geo';
 const H = 48;
 const BAR_TOP = 10;
 const BAR_H = 28;
+/** The bracket over the gap sits in the headroom above the bar: its feet at MARK_FOOT, its span at MARK_TOP. */
+const MARK_FOOT = 7;
+const MARK_TOP = 3;
 
-/** A share of the width as a column width. A `width` attribute on a col is a presentational hint, not a style
- *  attribute: the public page's CSP (no inline style) lets it through, and no element carries `style`. */
+/** A share of the width as a column width, to four decimals of a percent (`STACK_MIN_SHARE` in geo.ts is the
+ *  smallest share that does not round to zero here). A `width` attribute on a col is a presentational hint,
+ *  not a style attribute: the public page's CSP (no inline style) lets it through, and no element carries `style`. */
 const share = (ticks: number, hi: number) => `${((ticks / hi) * 100).toFixed(4)}%`;
 
 /**
- * Spec 2026-10-01 (task 7), the story's chapter 3: the best ask of every leg of a basket, laid end to end
- * against the one dollar a complete basket pays. Where the prices stop short of the line the space between is
- * the gap, drawn as its own dashed rect; past the line the overshoot is its own rect. Geometry only: the prices
+ * Spec 2026-10-01 §5.1 chapter 3 and §7, the story's chapter 3: the best ask of every leg of a basket, laid
+ * end to end against the one dollar a complete basket pays. Where the prices stop short of the line the space
+ * between is the gap, drawn as its own dashed rect with a bracket above it (the gap is a few ticks wide, a few
+ * pixels on a phone); past the line the overshoot is its own rect. Geometry only: the prices
  * become numbers in `stackSpans` (geo.ts) to be placed, and are written under the bar as the strings given. No
  * sum, no difference and no `$`: the amount is the engine's, shown by whoever draws this.
  * The label row is a layout table whose columns are the bar's own breakpoints (each leg's end, the dollar line,
  * the axis' end), so every label sits under its segment and "one dollar" ends on the line at any width. A price
- * that takes no width (zero, negative, unreadable) is named in a line of its own.
+ * that takes no width (zero, negative, unreadable, or too large or too small to draw: see `stackSpans`) is named
+ * in a line of its own.
  */
 export function PriceStack({ legs }: { legs: { name: string; price: string }[] }) {
   const { spans, end, hi } = stackSpans(legs.map((l) => l.price));
@@ -33,6 +39,7 @@ export function PriceStack({ legs }: { legs: { name: string; price: string }[] }
           <rect key={l.i} className="ps-leg" x={x(l.from)} y={BAR_TOP} width={x(l.to) - x(l.from)} height={BAR_H} />
         ))}
         {end < FULL && <rect className="ps-gap" x={x(end)} y={BAR_TOP} width={x(FULL) - x(end)} height={BAR_H} />}
+        {end < FULL && <path className="ps-mark" d={`M${x(end)} ${MARK_FOOT}V${MARK_TOP}H${x(FULL)}V${MARK_FOOT}`} />}
         {end > FULL && <rect className="ps-over" x={x(FULL)} y={BAR_TOP} width={x(end) - x(FULL)} height={BAR_H} />}
         <line className="ps-dollar" x1={x(FULL)} x2={x(FULL)} y1={0} y2={H} />
       </svg>

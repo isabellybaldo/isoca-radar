@@ -1,6 +1,8 @@
 // The story's engine inputs (spec 2026-10-01 §4): two per chapter, built from the playground's own starting
-// states and input builders, so a chapter and its playground section can never disagree. presets.test.ts runs
-// each through the real engine and pins what the chapter's words rely on.
+// states and input builders, so a chapter asks the engine the same kind of question its playground section
+// does. They need not draw the same thing: chapter 3 draws its preset's prices as a stack (the engine is not
+// asked for that picture), and presets.test.ts pins that the engine's answer agrees with it (no signal at a
+// sum of 1.00, a YES basket below it), as it pins what every other chapter's words rely on.
 import { tickText } from '../../schematics/geo';
 import type { BasketIn, ClassifyIn, DepthWalkIn, EpisodeIn, MirrorIn, PayoffIn } from '../../wasm/types';
 import { basketInput, drain } from '../basket';

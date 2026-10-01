@@ -4,7 +4,7 @@
 import type { BasketWord } from '../../schematics/BasketLegs';
 
 export const HOOK =
-  'Sometimes the prices of every outcome of an event add up to less than the one dollar the winner pays. In theory, that gap is free money. This page shows how a scanner finds it, sizes it and times it, and what can go wrong between seeing it and holding it. Every drawing runs the scanner’s own Rust code, compiled to WASM.';
+  'Sometimes the prices of every outcome of an event add up to less than the one dollar the winner pays. In theory, that gap is free money. This page shows how a scanner finds it, sizes it and times it, and what can go wrong between seeing it and holding it. Chapters 1 to 6 run the scanner’s own Rust code, compiled to WASM; chapter 7 shows its live paper accounts.';
 
 export interface ChapterCopy {
   n: number;
@@ -62,7 +62,10 @@ export const TAKE = {
     broken
       ? 'Someone outside the basket can win, and that column pays nothing. Not an arbitrage: see ✗.'
       : 'The basket pays the same in every column. That is what risk-free means here.',
-  ch3: (signal: boolean) => (signal ? 'The scanner runs this check each time a price moves.' : 'At exactly one dollar there is nothing to take.'),
+  ch3: (signal: boolean) =>
+    signal
+      ? 'The gap, on every basket the books can fill, is the edge. The scanner runs this check each time a price moves.'
+      : 'At exactly one dollar there is nothing to take.',
   ch4: 'The edge has a size. A thinner book reaches it sooner.',
   ch5: (caught: boolean) =>
     caught ? 'The order landed in time. Whether every leg fills is the next chapter.' : 'The edge was real. It just did not wait.',
@@ -81,7 +84,7 @@ export const CH7_EXTRAS =
 
 export const PLAY = {
   title: 'Try it yourself',
-  line: 'The same six drawings, with every control. Nothing you do here is recorded or sent anywhere.',
+  line: 'The engine behind each chapter, with every control. Nothing you do here leaves your browser.',
 } as const;
 
 export const WORDS: readonly (readonly [string, string])[] = [
