@@ -15,6 +15,7 @@ const ENTRIES = [
   'src/schematics/MirrorBooks.tsx', 'src/schematics/ClassifyTree.tsx',
   'src/schematics/DepthStairs.tsx', 'src/schematics/BasketLegs.tsx', 'src/schematics/UpdateBars.tsx',
   'src/math/sections/MirrorSection.tsx', 'src/math/sections/PayoffSection.tsx', 'src/math/sections/ClassifySection.tsx',
+  'src/math/sections/DepthSection.tsx', 'src/math/sections/EpisodeSection.tsx', 'src/math/sections/LegMissSection.tsx',
 ];
 /** `import x from '…'`, `import { type A, b } from '…'`, `export … from '…'`, `import '…'`; never `import type` / `export type`. */
 const IMPORT = /^\s*(?:import|export)\s+(?!type\b)[^'"]*?\s*from\s*'([^']+)'|^\s*import\s+'([^']+)'/gm;

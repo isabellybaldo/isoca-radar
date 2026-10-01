@@ -8,12 +8,19 @@ export interface Verdict {
   tone: 'pos' | 'neg' | null;
 }
 
+export type BasketWord = 'caught' | 'nothing filled' | 'filled';
+
+/** The verdict's word alone (sections that say one line about the outcome read it here, never re-derive it). */
+export function basketWord(m: BasketModel): BasketWord {
+  return m.legs.some((l) => signOf(l.excess) > 0) ? 'caught' : signOf(m.q_eff) === 0 ? 'nothing filled' : 'filled';
+}
+
 /** Spec 7b §6.2 f with the review ruling I2: a word and a money half, decided on the engine's strings
  *  (signOf / compareDecimal), no arithmetic. The word: "caught" if any leg has an excess, else "nothing filled"
  *  when q_eff is 0, else "filled". The money half is |net_cash| in cents: "lost" when nothing is held, "out ...
  *  shares still held" when shares or a resolution value remain, "+$x" when it is not negative. */
 export function basketVerdict(m: BasketModel): Verdict {
-  const word = m.legs.some((l) => signOf(l.excess) > 0) ? 'caught' : signOf(m.q_eff) === 0 ? 'nothing filled' : 'filled';
+  const word = basketWord(m);
   const holding = m.cash.held_unsold.some((h) => signOf(h.qty) > 0) || (m.value_at_resolution !== null && signOf(m.value_at_resolution) > 0);
   const net = m.cash.net_cash.trim();
   const cents = formatMoneyCents(net.replace(/^-/, ''));

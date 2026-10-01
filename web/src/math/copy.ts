@@ -16,6 +16,14 @@ export const B_QUIPS = {
   implication: 'If A happens B must too, so one column cannot happen, and the basket holds in every other.',
 } as const;
 
+/** Section f's deadpan line per outcome: it follows the engine's verdict word (basketWord), so it never says a leg
+ *  missed when every leg filled. */
+export const F_QUIPS = {
+  filled: 'Every leg filled. Drain one at t_x to see what a miss does.',
+  caught: 'Some legs filled more than others. The extra shares are now a bet, and the exit is the bid.',
+  nothing: 'Nothing filled, so there is nothing to sell back.',
+} as const;
+
 export const SECTIONS = {
   a: {
     title: 'a · one book, twice',
@@ -46,7 +54,7 @@ export const SECTIONS = {
   },
   f: {
     title: 'f · one leg misses',
-    quip: 'Two legs filled, one did not. The two you hold are now a bet, and the exit is the bid.',
+    quip: F_QUIPS.filled,
     caption:
       'Computed by sim::policy::settle and sim::venue::{basket_buy, unwind_sell, basket_cash}: the same rules the paper accounts on the live scanner use; here the unwind happens at one instant, the live sim waits the account’s delay.',
   },

@@ -17,3 +17,7 @@
 .m-formula { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 .m-big { font-family: var(--big); font-size: 28px; line-height: 1; }
 .m-cap, .m-note { font-size: 13px; }
+.m-verdict { font-weight: 700; font-size: 20px; margin: 0; }
+.m-verdict.pos { color: var(--mint); }
+.m-verdict.neg { color: var(--salmon); }
+.m-verdict-line, .m-times { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
