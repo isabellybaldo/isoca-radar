@@ -95,6 +95,10 @@ describe('web image (09-27 §4.2)', () => {
       const out = execFileSync('sh', [`${dir}/scripts/wasm-bindgen-version.sh`], { encoding: 'utf8' }) as string;
       expect(out, JSON.stringify(eol)).toBe('9.8.7\n');
     }
+    // the CR is written as the visible escape, never a raw byte an editor could strip
+    const src = repo('scripts/wasm-bindgen-version.sh');
+    expect(src).toContain('sub(/' + String.fromCharCode(92) + 'r$/');
+    expect(src.includes(String.fromCharCode(13))).toBe(false);
   });
 });
 
@@ -175,6 +179,8 @@ describe('compose.web.yml (7b §5.3)', () => {
       "middlewares.ct-math-csp.headers.contentSecurityPolicy=default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     ];
     for (const l of lines) expect(w, l).toContain(`traefik.http.${l}`);
+    // the CSP label must END at the closing quote: an appended directive must fail
+    expect(w).toContain(`      - "traefik.http.${lines[lines.length - 1]}"\n`);
     expect(w).not.toMatch(/ct-math\.middlewares=[^\n]*ct-auth/);
     expect(w).toContain('traefik.http.routers.ct-web.middlewares=ct-rl@docker,ct-sec@docker,ct-csp@docker,ct-auth@docker');
     expect(w).toContain('traefik.http.routers.ct-web.service=ct-web');

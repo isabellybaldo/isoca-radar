@@ -5,7 +5,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 # Cargo.lock is CRLF in a Windows checkout and the Docker build context copies that working tree: drop the CR first
-VERSIONS=$(awk '{ sub(/$/, "") } /^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print }' Cargo.lock)
+VERSIONS=$(awk '{ sub(/\r$/, "") } /^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print }' Cargo.lock)
 if [ -z "$VERSIONS" ] || [ "$(printf '%s
 ' "$VERSIONS" | wc -l)" -ne 1 ]; then
   echo "wasm-bindgen-version: expected exactly one wasm-bindgen in Cargo.lock, found: ${VERSIONS:-none}" >&2
