@@ -152,7 +152,12 @@ As 09-27 §4, with one more function. **All book inputs are YES-book levels**, a
   ``Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))``
 
   Its middlewares (per-IP rate and in-flight limits, `ct-sec`, the math CSP) and priority 1000 apply as in 09-27. `connect-src 'self'` allows the fetch.
-- **Compose:** a named volume `public-data`. `api` mounts it read-write at `/var/lib/ct-public` (7b-A). `web` mounts it read-only at `/srv/ct-public-root/math-data` (7b-B). There's no new container and no new memory.
+- **A separate nginx server for the public router (amended 2026-10-01, overrides 09-27 §5.3's `service = ct-web`).**
+  - The public paths are served by their own nginx `server` on port 8081. It holds only the three locations (`= /math`, `/math-assets/`, `= /math-data/public.json`) and `location / { return 404; }`.
+  - The `ct-math` router points at its own Traefik service, `ct-math`, on that port. The login-gated server has no math locations.
+  - Why: Traefik keeps `%2F` encoded, so `/math-assets/..%2findex.html` matches the public router. On a shared server nginx then decodes it and serves the dashboard's files without login. With its own server, a traversal has nothing else to reach.
+  - The runbook probes this with `curl --path-as-is`.
+- **Compose:** a named volume `public-data`. `web` mounts it `:ro,nocopy`, and the image does not pre-create the mount point, so an empty volume can't inherit a root owner from the web image. `api` mounts it read-write at `/var/lib/ct-public` (7b-A). `web` mounts it read-only at `/srv/ct-public-root/math-data` (7b-B). There's no new container and no new memory.
 
 ## 6. The playground page (plan 7b-B)
 
