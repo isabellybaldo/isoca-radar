@@ -182,9 +182,9 @@ if not: `200` over plain HTTP = report (the `ct-http` router on `oauth2-proxy`).
 
 22. (On the VPS) Start the memory sampler for the floods: one `docker stats` round every few seconds for about 10 minutes, in the background (an earlier sampler from a previous run of this step is stopped first); run steps 23–25 right after.
 ```bash
-P=$(cat /root/7bB_flood.pid 2>/dev/null); [ -n "$P" ] && grep -qa 'docker stats' "/proc/$P/cmdline" 2>/dev/null && kill "$P" && echo "stopped the earlier sampler $P"; nohup sh -c 'for i in $(seq 1 90); do date -u +%T; docker stats --no-stream --format "{{.Name}} {{.MemUsage}} {{.CPUPerc}}" cute-trading-web-1 cute-trading-api-1 cute-trading-scanner-1 cute-trading-postgres-1; sleep 5; done' > /root/7bB_flood.txt 2>&1 & echo $! > /root/7bB_flood.pid; sleep 10; cat /root/7bB_flood.txt
+P=$(cat /root/7bB_flood.pid 2>/dev/null); [ -n "$P" ] && grep -qa 'docker stats' "/proc/$P/cmdline" 2>/dev/null && kill "$P" && echo "stopped the earlier sampler $P"; sleep 3; : > /root/7bB_flood.txt; nohup sh -c 'for i in $(seq 1 90); do date -u +%T; docker stats --no-stream --format "{{.Name}} {{.MemUsage}} {{.CPUPerc}}" cute-trading-web-1 cute-trading-api-1 cute-trading-scanner-1 cute-trading-postgres-1; sleep 5; done' >> /root/7bB_flood.txt 2>&1 & echo $! > /root/7bB_flood.pid; sleep 10; cat /root/7bB_flood.txt
 ```
-→ expected: a job line (`[1] <pid>`), then a UTC time and four `<name> <used> / <limit> <cpu>%` lines (the first round, before the flood); on a re-run within 10 minutes, `stopped the earlier sampler <pid>` first.
+→ expected: a job line (`[1] <pid>`), then a UTC time and four `<name> <used> / <limit> <cpu>%` lines (the first round, before the flood); on a re-run within 10 minutes, `stopped the earlier sampler <pid>` first (a `Terminated` job notice may follow).
 if not: an empty file = `docker stats` is slow: `cat /root/7bB_flood.txt` again after 10 s.
 
 23. (On the PC) Flood the wasm from one IP (`oha` for 60 s if it is installed, otherwise 3,000 requests, 50 at a time), while the owner reloads the dashboard in Chrome (logged in).
@@ -232,7 +232,7 @@ document.documentElement.scrollWidth <= window.innerWidth
 → expected: `true` at both widths; at 360 px the sections stay one column, the controls work by touch, no label is cut, and the axis labels of the live ladder under f do not collide.
 if not: `false` = horizontal scroll: screenshot and report (a layout fix on a branch; no rollback needed).
 
-30. (Chrome, logged in as the owner) the dashboard itself: `https://radar.isoca.space/`, then `/paper`, then `/episodes`: click a row (the episode's detail page opens), click the `EXPLAIN ▸` tab, then the question `Would we have caught it?`.
+30. (Chrome, logged in as the owner) the dashboard itself: `https://radar.isoca.space/`, then `/paper`, then `/episodes`: click an episode's title (the link in the event column; `/episodes/<id>` opens), click the `EXPLAIN ▸` tab, then the question `Would we have caught it?`.
 → expected: the three pages and the episode detail load with live numbers; the explain panel opens; under `At what latency would this pay?` (first on every page) the axis label `extras` is whole (never `extra` / `s`); under `Would we have caught it?` (on an episode's detail page only) the six rung labels `in time` / `too late` each sit on two lines without touching (PR #12's label fixes ride in this image).
 if not: a page that does not load = `docker compose -f compose.yml -f compose.web.yml --profile web logs --tail 30 web` on the VPS (in `/home/isoca/projects/cute-trading`) and report; a broken label = screenshot and report (no rollback needed).
 **STOP**
