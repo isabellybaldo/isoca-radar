@@ -64,6 +64,14 @@ describe('theme', () => {
     expect(rule('.explain-tab')).toMatch(/border-right:\s*0/);
   });
 
+  it('keeps the mirror axis labels under the plot: same gutter as the rows, labels in the label font, alert token', () => {
+    expect(rule('.mb-row')).toMatch(/grid-template-columns:\s*4ch/);
+    expect(rule('.mb-axis')).toMatch(/margin-left:\s*calc\(4ch \+ 6px\)/);
+    expect(rule('.mb-axis')).not.toMatch(/font-size/); // a font-size here would make 4ch differ from the row's
+    expect(rule('ul.plain.mb-lab')).not.toMatch(/--px/);
+    expect(rule('.mb-alert')).toMatch(/var\(--bad\)/);
+  });
+
   it("wraps the panel's axis labels between words, never inside one: `extras` stays whole, `in time` cells keep a gap", () => {
     // The body's overflow-wrap: anywhere split `extras` into extra/s and let six `in time` labels touch (7a-B Chrome check).
     for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);

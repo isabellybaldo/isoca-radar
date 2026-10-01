@@ -3,7 +3,7 @@ import type { ClassifyModel, ClassifyNode } from '../wasm/types';
 
 /** The classify path nodes, in the order arb_core::classify::classify runs them, with a label each. */
 export const NODES: [ClassifyNode, string][] = [
-  ['decided', 'is the event decided?'],
+  ['decided', 'the event is decided'],
   ['no_basket_tried', 'NO basket over the legs with a YES bid'],
   ['no_basket_few_legs', 'fewer than two legs have a YES bid'],
   ['no_basket_crossed', 'a crossed book: our state is wrong'],
@@ -22,7 +22,7 @@ export const NODES: [ClassifyNode, string][] = [
 const KIND: Record<string, string> = {
   yes_basket: 'YES basket', yes_basket_incomplete: 'YES basket, incomplete set', no_basket: 'NO basket', implication: 'implication',
 };
-const REALIZATION: Record<string, string> = { settlement: 'held to settlement', converter: 'converted', not_arbitrage: 'not arbitrage' };
+const REALIZATION: Record<string, string> = { settlement: 'held to settlement', converter: 'via the converter', not_arbitrage: 'not arbitrage' };
 
 /** Where the path ends: the kind and how it is realized, or "nothing". */
 export function endText(m: ClassifyModel): string {
@@ -37,6 +37,7 @@ export function endText(m: ClassifyModel): string {
  */
 export function ClassifyTree({ model }: { model: ClassifyModel }) {
   const known = new Set<string>(NODES.map(([id]) => id));
+  const last = model.path[model.path.length - 1];
   const extra = [...new Set(model.path.filter((n) => !known.has(n)))].map((n): [string, string] => [n, n]);
   return (
     <figure className="ctree" aria-label="classify one update">
@@ -44,9 +45,10 @@ export function ClassifyTree({ model }: { model: ClassifyModel }) {
         {[...(NODES as [string, string][]), ...extra].map(([id, text]) => {
           const on = model.path.includes(id);
           return (
-            <li key={id} className={on ? 'cl-node lit' : 'cl-node'} data-node={id} aria-current={on ? 'step' : undefined}>
+            <li key={id} className={on ? 'cl-node lit' : 'cl-node'} data-node={id} aria-current={on && id === last ? 'step' : undefined}>
               <span className="cl-dot" aria-hidden="true" />
               <span>{text}</span>
+              {on && id !== last && <span className="cl-ran">ran</span>}
             </li>
           );
         })}

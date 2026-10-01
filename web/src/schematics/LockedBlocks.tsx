@@ -2,14 +2,12 @@ import type { Position } from '../api/types';
 import { Money } from '../components/Money';
 import { daysText, positionKey } from '../explain/models';
 import { accountPolicyTag, shortId } from '../lib/labels';
+import { geoPos } from './geo';
 
 /** Spec 7a §9.2: open positions as blocks sized by basis (their cost; HTML flex, geometry only), each
  *  listed with its paper basis and days to resolution. */
 export function LockedBlocks({ positions, selected, nowMs }: { positions: Position[]; selected: string | null; nowMs: number }) {
-  const sizes = positions.map((p) => {
-    const n = Number(p.basis);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  });
+  const sizes = positions.map((p) => geoPos(p.basis));
   const total = sizes.reduce((a, b) => a + b, 0);
   return (
     <figure className="locked" aria-label="money locked until resolution">

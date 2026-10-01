@@ -2,6 +2,7 @@
 // `npm test` works without Rust, 09-27 §4.2) and the .wasm bytes from disk through initSync.
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
 import { readFileSync } from 'node:fs';
+import { describe } from 'vitest';
 import { ENGINE_FNS, type Engine, type EngineFn } from './types';
 
 declare const process: { cwd(): string; env: Record<string, string | undefined> };
@@ -37,6 +38,13 @@ export function fixtureCase(fn: EngineFn, name: string): FixtureCase {
   const c = fixtureCases(fn).find((x) => x.name === name);
   if (c === undefined) throw new Error(`no fixture case ${fn}/${name}`);
   return c;
+}
+
+/** A describe block that needs the real WASM: skipped with a printed reason when pkg is missing, a failure under WASM_REQUIRED=1. */
+export function describeWasm(name: string, fn: () => void): void {
+  const skip = !HAVE_PKG && !WASM_REQUIRED;
+  if (skip) console.info(skipReason(name));
+  describe.skipIf(skip)(name, fn);
 }
 
 let cached: Promise<Engine> | null = null;

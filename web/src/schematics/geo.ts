@@ -1,5 +1,5 @@
-// The one geometry helper the schematics share (7b-B R12/R14). A decimal string becomes a number HERE and
-// only here, for drawing (SVG coordinates, bar sizes) and for pairing prices; no value shown as text goes through it.
+// The one geometry helper the schematics share (7b-B R12/R14). A decimal string becomes a number here, for
+// drawing (SVG coordinates, bar sizes) and for pairing prices; no value shown as text goes through it.
 
 /** A decimal string as geometry; malformed or not finite draws at zero instead of NaN. */
 export const geo = (v: string): number => {

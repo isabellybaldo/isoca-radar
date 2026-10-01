@@ -1,3 +1,5 @@
+import { Fold } from '../components/Fold';
+import { formatDecimal } from '../lib/money';
 import type { Level, MirrorModel } from '../wasm/types';
 import { geoPos, tick } from './geo';
 
@@ -27,6 +29,10 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
     ...bids.map((l) => [l, mirrorOf(model.no_asks, l.p)] as const),
     ...asks.map((l) => [l, mirrorOf(model.no_bids, l.p)] as const),
   ];
+  const rows = [
+    ...bids.map((l) => ({ l, side: 'bid', to: 'ask', n: mirrorOf(model.no_asks, l.p) })),
+    ...asks.map((l) => ({ l, side: 'ask', to: 'bid', n: mirrorOf(model.no_bids, l.p) })),
+  ].filter((r) => r.n !== undefined);
   const noAsk = model.best_bid && mirrorOf(model.no_asks, model.best_bid.p);
   const noBid = model.best_ask && mirrorOf(model.no_bids, model.best_ask.p);
   return (
@@ -60,9 +66,16 @@ export function MirrorBooks({ bids, asks, model }: { bids: Level[]; asks: Level[
       <ul className="plain mb-refl" aria-label="the mirror at the top of the book">
         {model.best_bid && noAsk && <li>{`NO ask ${noAsk.p} (1 − ${model.best_bid.p})`}</li>}
         {model.best_ask && noBid && <li>{`NO bid ${noBid.p} (1 − ${model.best_ask.p})`}</li>}
-        {model.spread !== null && <li>{`spread ${model.spread}`}</li>}
+        {model.spread !== null && <li>{`spread ${formatDecimal(model.spread)}`}</li>}
       </ul>
       <p className="dim mb-note">bars: size at each price, teal bids and salmon asks; a line joins YES price p to NO price 1 − p</p>
+      <Fold id="mirror-levels" label="every level">
+        <ul className="plain mb-levels">
+          {rows.map((r) => (
+            <li key={`${r.side}${r.l.p}`}>{`YES ${r.side} ${r.l.p} → NO ${r.to} ${r.n?.p} (1 − ${r.l.p}) · size ${r.l.s}`}</li>
+          ))}
+        </ul>
+      </Fold>
     </figure>
   );
 }

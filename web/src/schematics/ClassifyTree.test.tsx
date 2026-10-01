@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { HAVE_PKG, WASM_REQUIRED, fixtureCase, fixtureCases, loadTestEngine } from '../wasm/testEngine';
+import { describeWasm, fixtureCase, fixtureCases, loadTestEngine } from '../wasm/testEngine';
 import { CLASSIFY_NODES, type ClassifyModel, type Engine } from '../wasm/types';
 import { ClassifyTree, NODES, endText } from './ClassifyTree';
 
@@ -18,8 +18,8 @@ describe('ClassifyTree (parent §5.7 c)', () => {
     const { container } = render(<ClassifyTree model={m} />);
     expect(container.querySelectorAll('li.cl-node')).toHaveLength(14);
     expect(lit(container)).toEqual(m.path);
-    expect(screen.getByText('NO basket · converted')).toHaveClass('cl-end');
-    expect(container.querySelector('.cl-net')).toHaveTextContent('net Π +$0.50 on the table · gross +$0.50 · Q* 10');
+    expect(screen.getByText('NO basket · via the converter')).toHaveClass('cl-end');
+    expect(container.querySelector('.cl-net')).toHaveTextContent(`net Π +$${Number(m.net).toFixed(2)} on the table · gross +$${Number(m.gross).toFixed(2)} · Q* ${m.q_star}`);
   });
 
   it('ends in nothing for a decided event', () => {
@@ -28,6 +28,15 @@ describe('ClassifyTree (parent §5.7 c)', () => {
     expect(lit(container)).toEqual(['decided']);
     expect(screen.getByText('nothing')).toHaveClass('cl-end');
     expect(container.querySelector('.cl-net')).toBeNull();
+  });
+
+  it('marks only the last lit node as the current step; the other lit nodes say ran', () => {
+    const m = classify('no-edge-3');
+    const { container } = render(<ClassifyTree model={m} />);
+    const cur = [...container.querySelectorAll('li[aria-current]')].map((li) => li.getAttribute('data-node'));
+    expect(cur).toEqual([m.path[m.path.length - 1]]);
+    expect(container.querySelectorAll('.cl-ran')).toHaveLength(m.path.length - 1);
+    expect(container.querySelector('li[data-node="decided"] .cl-ran')).toBeNull();
   });
 
   it('lights both branches of a crossed leg and says nothing', () => {
@@ -67,7 +76,7 @@ describe('ClassifyTree (parent §5.7 c)', () => {
   });
 });
 
-describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('ClassifyTree on the real engine', () => {
+describeWasm('ClassifyTree on the real engine', () => {
   let engine: Engine;
   beforeAll(async () => {
     engine = await loadTestEngine();

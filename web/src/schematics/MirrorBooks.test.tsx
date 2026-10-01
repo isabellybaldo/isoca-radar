@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine } from '../wasm/testEngine';
+import { describeWasm, fixtureCase, loadTestEngine } from '../wasm/testEngine';
 import type { Engine, MirrorIn, MirrorModel } from '../wasm/types';
 import { CROSSED, MirrorBooks } from './MirrorBooks';
 
@@ -38,7 +38,42 @@ describe('MirrorBooks (parent §5.7 a)', () => {
     expect(model.crossed).toBe(true);
     render(<MirrorBooks bids={input.bids} asks={input.asks} model={model} />);
     expect(screen.getByText(CROSSED)).toHaveClass('mb-alert');
-    expect(screen.getByText(`spread ${model.spread}`)).toBeInTheDocument();
+  });
+
+  it('crossed is the engine flag, not a price comparison', () => {
+    const fed = mirror('fed-book');
+    const crossedPrices = mirror('crossed');
+    const { unmount } = render(<MirrorBooks bids={fed.input.bids} asks={fed.input.asks} model={{ ...fed.model, crossed: true }} />);
+    expect(screen.getByText(CROSSED)).toBeInTheDocument();
+    unmount();
+    render(<MirrorBooks bids={crossedPrices.input.bids} asks={crossedPrices.input.asks} model={{ ...crossedPrices.model, crossed: false }} />);
+    expect(screen.queryByText(CROSSED)).toBeNull();
+  });
+
+  it('a crossed spread shows a real minus sign', () => {
+    const { input, model } = mirror('crossed');
+    render(<MirrorBooks bids={input.bids} asks={input.asks} model={model} />);
+    expect(screen.getByText('spread −0.01')).toBeInTheDocument();
+  });
+
+  it('colours the NO rows by the side they are on (bids-only: 1 YES bid bar, 1 NO ask bar, no NO bid bar)', () => {
+    const { input, model } = mirror('bids-only');
+    const { container } = render(<MirrorBooks bids={input.bids} asks={input.asks} model={model} />);
+    expect(container.querySelectorAll('rect.mb-bid')).toHaveLength(1);
+    expect(container.querySelectorAll('rect.mb-ask')).toHaveLength(1);
+  });
+
+  it('lists every level with its mirror in a closed fold, sizes as sent', () => {
+    const { input, model } = mirror('fed-book');
+    const { container } = render(<MirrorBooks bids={input.bids} asks={input.asks} model={model} />);
+    const fold = container.querySelector('details.fold');
+    expect(fold).not.toHaveAttribute('open');
+    expect(fold?.querySelector('summary')).toHaveTextContent('every level');
+    const li = [...container.querySelectorAll('ul.mb-levels li')];
+    expect(li).toHaveLength(input.bids.length + input.asks.length);
+    const b = input.bids[1];
+    const n = model.no_asks.find((x) => x.s === b.s);
+    expect(li[1]).toHaveTextContent(`YES bid ${b.p} → NO ask ${n?.p} (1 − ${b.p}) · size ${b.s}`);
   });
 
   it('an empty book draws no bars and no NaN (review focus 3)', () => {
@@ -72,7 +107,7 @@ describe('MirrorBooks (parent §5.7 a)', () => {
   });
 });
 
-describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('MirrorBooks on the real engine', () => {
+describeWasm('MirrorBooks on the real engine', () => {
   let engine: Engine;
   beforeAll(async () => {
     engine = await loadTestEngine();

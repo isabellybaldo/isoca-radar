@@ -2,15 +2,13 @@
 // (crates/arb-wasm/fixtures/<export>.json, 7b-A). Read with node fs; vite's fs.allow stays as it is (7b §11).
 // @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
 import { existsSync, readdirSync } from 'node:fs';
-import { beforeAll, describe, expect, it } from 'vitest';
-import { FIXTURES, HAVE_PKG, WASM_REQUIRED, fixtureCases, loadTestEngine, skipReason } from './testEngine';
+import { beforeAll, expect, it } from 'vitest';
+import { FIXTURES, describeWasm, fixtureCases, loadTestEngine } from './testEngine';
 import { ENGINE_FNS, type Engine } from './types';
 
 const FILES: string[] = existsSync(FIXTURES) ? readdirSync(FIXTURES).filter((f: string) => f.endsWith('.json')).sort() : [];
 
-if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('parity'));
-
-describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('native = WASM (parity)', () => {
+describeWasm('native = WASM (parity)', () => {
   let engine: Engine;
   beforeAll(async () => {
     engine = await loadTestEngine();
