@@ -18,13 +18,23 @@ function crossed(b: MirrorIn): MirrorIn {
   return { asks: b.asks, bids: [{ p, s: b.bids[0]?.s ?? '100' }, ...b.bids.slice(1).filter((l) => toTick(l.p) < toTick(p))] };
 }
 
-/** The ticks a level may take: strictly between its neighbours on its own side (bids fall, asks rise), so a
- *  drag can never put two levels at one price. A crossed book between the sides stays possible. */
-function room(side: 'bids' | 'asks', rows: Level[], i: number): [number, number] {
-  const prev = rows[i - 1] === undefined ? null : toTick(rows[i - 1].p);
-  const next = rows[i + 1] === undefined ? null : toTick(rows[i + 1].p);
-  const [lo, hi] = side === 'bids' ? [next, prev] : [prev, next];
-  return [lo === null ? 1 : lo + 1, hi === null ? 99 : hi - 1];
+/** The ticks level i may take so every level on its side still fits strictly in order inside 1–99 (bids fall and
+ *  asks rise from the best): the levels behind it need room. A crossed book between the sides stays possible. */
+function room(side: 'bids' | 'asks', n: number, i: number): [number, number] {
+  return side === 'bids' ? [n - i, 99 - i] : [1 + i, 99 - (n - 1 - i)];
+}
+
+/** Moves level i to `want` ticks (clamped to its room) and pushes its same-side neighbours along, so the side stays
+ *  strictly ordered with no two levels at one price. Works on q = p for asks and 100 − p for bids (ascending). */
+function drag(rows: Level[], side: 'bids' | 'asks', i: number, want: number): Level[] {
+  const flip = (t: number) => (side === 'bids' ? 100 - t : t);
+  const [lo, hi] = room(side, rows.length, i);
+  const t = Math.min(hi, Math.max(lo, want));
+  const q = rows.map((l) => flip(toTick(l.p)));
+  q[i] = flip(t);
+  for (let k = i - 1; k >= 0; k--) q[k] = Math.min(q[k], q[k + 1] - 1);
+  for (let k = i + 1; k < q.length; k++) q[k] = Math.max(q[k], q[k - 1] + 1);
+  return rows.map((l, k) => ({ ...l, p: fromTick(flip(q[k])) }));
 }
 
 /** 09-27 §6.2 a: drag any level's price (0.01 ticks) or size; "cross the book". */
@@ -34,12 +44,8 @@ export function MirrorSection({ engine }: { engine: Engine }) {
   const out = useMemo(() => call<MirrorModel>(engine, 'mirror_json', input), [engine, input]);
   const setLevel = (side: 'bids' | 'asks', i: number, patch: Partial<Level>) =>
     setBook((b) => {
-      const next = b[side].map((l, k) => {
-        if (k !== i) return l;
-        if (patch.p === undefined) return { ...l, ...patch };
-        const [lo, hi] = room(side, b[side], i);
-        return { ...l, ...patch, p: fromTick(Math.min(hi, Math.max(lo, toTick(patch.p)))) };
-      });
+      const rows = patch.p === undefined ? b[side] : drag(b[side], side, i, toTick(patch.p));
+      const next = patch.s === undefined ? rows : rows.map((l, k) => (k === i ? { ...l, s: patch.s as string } : l));
       return side === 'bids' ? { ...b, bids: next } : { ...b, asks: next };
     });
   return (
@@ -54,11 +60,11 @@ export function MirrorSection({ engine }: { engine: Engine }) {
             {(['bids', 'asks'] as const).flatMap((side) =>
               book[side].map((l, i) => {
                 const name = `YES ${SIDE[side]} ${i + 1}`;
-                const [lo, hi] = room(side, book[side], i);
+                const [lo, hi] = room(side, book[side].length, i);
                 return (
                   <fieldset key={`${side}${i}`} className="m-level">
                     <legend>{name}</legend>
-                    <Range label={`${name} price`} min={lo} max={Math.max(lo, hi)} value={toTick(l.p)} show={l.p} onChange={(t) => setLevel(side, i, { p: fromTick(t) })} />
+                    <Range label={`${name} price`} min={lo} max={hi} value={toTick(l.p)} show={l.p} onChange={(t) => setLevel(side, i, { p: fromTick(t) })} />
                     <label className="m-size">
                       size
                       <input type="number" aria-label={`${name} size`} min={0} step="0.01" value={l.s} onChange={(e) => setLevel(side, i, { s: e.target.value })} />

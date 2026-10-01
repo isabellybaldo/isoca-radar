@@ -9,6 +9,13 @@ export const ENGINE_FAILED = 'The math engine did not load. Your browser may be 
 export const LOADING = 'Loading the math engine. The pixels are warming up.';
 export const LIVE_MISSING = 'live numbers unavailable';
 
+/** Section b's deadpan line per basket kind; each is true of that kind's matrix (fixtures yes-3-other, no-3-other, implication-prices). */
+export const B_QUIPS = {
+  yes: 'A YES basket is only risk-free if nothing outside it can win.',
+  no: 'A NO basket pays whoever wins, and an outcome outside the set only adds to it.',
+  implication: 'If A happens B must too, so one column cannot happen, and the basket holds in every other.',
+} as const;
+
 export const SECTIONS = {
   a: {
     title: 'a · one book, twice',
@@ -18,7 +25,7 @@ export const SECTIONS = {
   },
   b: {
     title: 'b · payoff tables',
-    quip: 'A basket is only risk-free if nothing outside it can win.',
+    quip: B_QUIPS.yes,
     caption: 'Computed by arb_core::payoff; the edge at the top of the book by arb_core::fill::walk, one share a leg, no fees.',
   },
   c: {

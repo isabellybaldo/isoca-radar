@@ -34,19 +34,20 @@ export function Out<T>({ out, children }: { out: T | EngineError; children: (m: 
   return isError(out) ? <p className="error" role="alert">{out.error}</p> : <>{children(out)}</>;
 }
 
-export function Range({ label, min, max, step = 1, value, show, onChange }: {
+export function Range({ label, min, max, step = 1, value, show, disabled, onChange }: {
   label: string;
   min: number;
   max: number;
   step?: number;
   value: number;
   show?: string;
+  disabled?: boolean;
   onChange: (v: number) => void;
 }) {
   return (
     <label className="m-range">
       <span>{label}</span>
-      <input type="range" aria-label={label} min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+      <input type="range" aria-label={label} aria-valuetext={show ?? String(value)} disabled={disabled} min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
       <span className="num">{show ?? String(value)}</span>
     </label>
   );
@@ -59,7 +60,7 @@ export function Seg<T extends string | number>({ label, options, value, onPick }
   onPick: (v: T) => void;
 }) {
   return (
-    <div className="seg m-seg" role="group" aria-label={label}>
+    <div className="seg" role="group" aria-label={label}>
       {options.map(([v, text]) => (
         <button key={String(v)} type="button" className={v === value ? 'on' : undefined} aria-pressed={v === value} onClick={() => onPick(v)}>
           {text}

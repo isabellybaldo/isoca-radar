@@ -9,9 +9,9 @@ const hasFrames = (): boolean => typeof globalThis.requestAnimationFrame === 'fu
 export function useFrameThrottle<T>(value: T): T {
   const [out, setOut] = useState(value);
   const latest = useRef(value);
-  latest.current = value;
   const pending = useRef<{ id: number; frame: boolean } | null>(null);
   useEffect(() => {
+    latest.current = value;
     if (Object.is(value, out) || pending.current !== null) return;
     const done = () => {
       pending.current = null;

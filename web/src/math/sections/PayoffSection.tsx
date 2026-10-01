@@ -3,8 +3,8 @@ import { formatDecimal } from '../../lib/money';
 import { PayoffGrid } from '../../schematics/PayoffGrid';
 import { call } from '../../wasm/call';
 import type { Engine, PayoffIn, PayoffKind, PayoffMatrix } from '../../wasm/types';
-import { matrixToPayoff } from '../adapt';
-import { SECTIONS } from '../copy';
+import { IMPLICATION_PRICE_USE, matrixToPayoff } from '../adapt';
+import { B_QUIPS, SECTIONS } from '../copy';
 import { IMPLICATION_TICKS, LEGS, PAYOFF_TICKS, fromTick } from '../defaults';
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section, Seg } from './Section';
@@ -34,13 +34,23 @@ export function payoffInput(st: PayoffState): PayoffIn {
   let prices: PayoffIn['prices'] = null;
   if (st.priced) {
     if (st.kind === 'implication') {
-      const [a, b] = st.impl;
-      prices = [{ bid: fromTick(a), ask: fromTick(a + 1) }, { bid: fromTick(b - 1), ask: fromTick(b) }];
+      // each leg's tick is the one price the engine reads for it (IMPLICATION_PRICE_USE); the other side is its grid neighbour
+      prices = IMPLICATION_PRICE_USE.map((u, j) => {
+        const t = st.impl[j] ?? 50;
+        return u.side === 'bid' ? { bid: fromTick(t), ask: fromTick(t + 1) } : { bid: fromTick(t - 1), ask: fromTick(t) };
+      });
     } else {
       prices = st.ticks.slice(0, n).map((t) => (st.kind === 'no' ? { bid: fromTick(t), ask: fromTick(t + 1) } : { bid: fromTick(t - 1), ask: fromTick(t) }));
     }
   }
   return { kind: st.kind, s: n, other_listed: st.kind === 'implication' ? false : st.listed, prices };
+}
+
+/** The words beside the engine's edge: positive is on the table; zero or negative is nothing; a broken column says so. */
+function edgeNote(m: PayoffMatrix): string {
+  const edge = m.top_edge_gross ?? '0';
+  const sense = edge === '0' || edge.startsWith('-') ? 'before fees (nothing on the table)' : 'before fees, on the table';
+  return `per basket at the top of the book, ${sense}${m.broken.some(Boolean) ? ' · not risk-free: see ✗' : ''}`;
 }
 
 /** 09-27 §6.2 b: YES / NO / implication, S 2–6, "Other listed", optional prices per leg. */
@@ -54,13 +64,20 @@ export function PayoffSection({ engine }: { engine: Engine }) {
   const sliders = () => {
     if (!st.priced) return null;
     if (st.kind === 'implication') {
-      const [a, b] = st.impl;
-      return (
-        <>
-          <Range label="A bid (NO_A costs 1 − bid)" min={1} max={98} value={a} show={fromTick(a)} onChange={(v) => set({ impl: [v, b] })} />
-          <Range label="B ask" min={2} max={99} value={b} show={fromTick(b)} onChange={(v) => set({ impl: [a, v] })} />
-        </>
-      );
+      return IMPLICATION_PRICE_USE.map((u, j) => {
+        const t = st.impl[j] ?? 50;
+        return (
+          <Range
+            key={u.leg}
+            label={u.label}
+            min={u.side === 'bid' ? 1 : 2}
+            max={u.side === 'bid' ? 98 : 99}
+            value={t}
+            show={fromTick(t)}
+            onChange={(v) => set({ impl: st.impl.map((x, k) => (k === j ? v : x)) })}
+          />
+        );
+      });
     }
     return st.ticks.slice(0, st.s).map((t, i) => (
       <Range
@@ -78,6 +95,7 @@ export function PayoffSection({ engine }: { engine: Engine }) {
     <Section
       id="b"
       {...SECTIONS.b}
+      quip={B_QUIPS[input.kind]}
       onReset={() => setSt(START)}
       controls={
         <>
@@ -96,7 +114,7 @@ export function PayoffSection({ engine }: { engine: Engine }) {
             {m.top_edge_gross !== null && (
               <p className="m-formula">
                 <span>{`${formula} =`}</span> <span className="m-big">{formatDecimal(m.top_edge_gross)}</span>{' '}
-                <span className="dim">per basket at the top of the book, before fees, on the table</span>
+                <span className="dim">{edgeNote(m)}</span>
               </p>
             )}
           </>
