@@ -54,9 +54,9 @@ if not: check the key path is quoted with forward slashes and the port is 50158.
 
 ## On the VPS: deploy
 
-7. Rollback tag `web:pre7b` on the web that runs now (before step 8's load moves `web:dev`), only if `web:pre7b` does not exist yet; `web:pre7a` is only compared, never retagged.
+7. Rollback tag `web:pre7b` on the image the web container runs now (by ID: on 2026-09-30 the VPS had no `web:dev` tag), only if `web:pre7b` does not exist yet; `web:pre7a` is only compared, never retagged.
 ```bash
-cd /home/isoca/projects/cute-trading && { docker image inspect cute-trading/web:pre7b >/dev/null 2>&1 || docker tag cute-trading/web:dev cute-trading/web:pre7b; } && docker image inspect -f '{{.Id}}' cute-trading/web:pre7b cute-trading/web:pre7a; docker inspect -f '{{.Image}}' cute-trading-web-1
+cd /home/isoca/projects/cute-trading && { docker image inspect cute-trading/web:pre7b >/dev/null 2>&1 || docker tag "$(docker inspect -f '{{.Image}}' cute-trading-web-1)" cute-trading/web:pre7b; } && docker image inspect -f '{{.Id}}' cute-trading/web:pre7b cute-trading/web:pre7a; docker inspect -f '{{.Image}}' cute-trading-web-1
 ```
 → expected: three identical `sha256:…` lines (pre7b, pre7a, the running web).
 if not (first run, before step 8 only): the running ID differs from the first line = `docker tag <the running sha256 ID> cute-trading/web:pre7b` and run the last two commands again until the first and third lines match; only `pre7a` differs or is missing = write it in Results and go on (never retag `pre7a`).
