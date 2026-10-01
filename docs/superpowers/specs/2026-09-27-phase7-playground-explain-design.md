@@ -2,6 +2,7 @@
 
 **Date:** 2026-09-27. **Parent spec:** `2026-09-22-arb-scanner-design.md` (§5.7 schematics, §14 frontend, §19 Phase 7). **Builds on:** Phase 4 (`2026-09-25-phase4-dashboard-design.md`), Phase 5a (`2026-09-26-phase5a-cards-design.md`).
 **Superseded in part (2026-09-29):** §7 (the explain panel) is replaced by `2026-09-29-phase7a-latency-answer-design.md` (Phase 7a). The rest of this spec is **Phase 7b** (the public `/math` playground), unchanged; 7b reuses 7a's `src/schematics/`. §1's "no api writes" no longer holds for the dashboard: 7a adds `POST /api/paper/reset`.
+**Superseded in part (2026-09-30):** Phase 7b is specified by `2026-09-30-phase7b-math-playground-design.md`, which keeps §1–6 and §8–12 here and adds section f (leg risk), the public snapshot and two plans.
 **Status:** approved in conversation, section by section (2026-09-27). The owner asked for an independent subagent review of this file instead of their own review before the plan.
 
 ## 1. Purpose, scope and success

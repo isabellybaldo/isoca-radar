@@ -141,6 +141,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arb-wasm"
+version = "0.1.0"
+dependencies = [
+ "arb-core",
+ "proptest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sim",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -16,6 +16,11 @@ pub struct Config {
     /// Phase 7a §7.1: the policies file the ladder reads its latencies from (the copy baked into
     /// the shared image, as analyze uses).
     pub policies_path: String,
+    /// Phase 7b §4: where the public snapshot is written (compose: /var/lib/ct-public). None when
+    /// unset or empty: no snapshot task (local dev and tests).
+    pub public_dir: Option<String>,
+    /// Seconds between snapshots (PUBLIC_EVERY_S, default 300, 10..=3600).
+    pub public_every_s: u32,
 }
 
 impl fmt::Debug for Config {
@@ -30,6 +35,8 @@ impl fmt::Debug for Config {
                 &self.reset_database_url.as_ref().map(|_| "<redacted>"),
             )
             .field("policies_path", &self.policies_path)
+            .field("public_dir", &self.public_dir)
+            .field("public_every_s", &self.public_every_s)
             .finish()
     }
 }
@@ -71,6 +78,16 @@ impl Config {
         let policies_path = get("POLICIES_PATH")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/etc/cute-trading/policies.toml".to_string());
+        let public_dir = get("PUBLIC_DIR").filter(|s| !s.is_empty());
+        let public_every_s = parse_or(
+            get("PUBLIC_EVERY_S").filter(|s| !s.is_empty()),
+            300,
+            "PUBLIC_EVERY_S",
+        )?;
+        anyhow::ensure!(
+            (10..=3_600).contains(&public_every_s),
+            "PUBLIC_EVERY_S must be 10..=3600"
+        );
         Ok(Self {
             database_url,
             bind,
@@ -78,6 +95,8 @@ impl Config {
             statement_timeout_ms,
             reset_database_url,
             policies_path,
+            public_dir,
+            public_every_s,
         })
     }
 }
@@ -147,6 +166,36 @@ mod tests {
         .unwrap();
         assert!(c.reset_database_url.is_some());
         assert!(!format!("{c:?}").contains("hunter3"));
+    }
+
+    #[test]
+    fn the_public_dir_is_optional_and_the_period_is_bounded() {
+        let url = (
+            "DATABASE_URL",
+            "postgres://analyze_ro:pw@postgres/cute_trading",
+        );
+        let c = cfg(&[url]).unwrap();
+        assert_eq!((c.public_dir, c.public_every_s), (None, 300));
+        assert_eq!(cfg(&[url, ("PUBLIC_DIR", "")]).unwrap().public_dir, None);
+        let c = cfg(&[
+            url,
+            ("PUBLIC_DIR", "/var/lib/ct-public"),
+            ("PUBLIC_EVERY_S", "10"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (c.public_dir.as_deref(), c.public_every_s),
+            (Some("/var/lib/ct-public"), 10)
+        );
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "9")]).is_err());
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "3601")]).is_err());
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "5m")]).is_err());
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "0")]).is_err());
+        assert!(cfg(&[url, ("PUBLIC_EVERY_S", "99999999999")]).is_err());
+        assert_eq!(
+            cfg(&[url, ("PUBLIC_EVERY_S", "")]).unwrap().public_every_s,
+            300
+        );
     }
 
     #[test]

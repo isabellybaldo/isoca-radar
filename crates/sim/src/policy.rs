@@ -152,7 +152,8 @@ pub fn walk_cost(
 
 /// A `settle` failure: either the walk itself can't be quoted at `q` (should only happen for a
 /// `q` past what `q_open` already validated), or the venue-rounded size fell below `min`.
-enum Settle {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle {
     BadInput,
     TooSmall,
 }
@@ -160,8 +161,9 @@ enum Settle {
 /// Re-quotes the walk at `q` and rounds it down to venue precision (`order_size`), repeating
 /// because rounding can cross a book breakpoint — which changes the worst price touched, which
 /// can change the rounded size again (spec §5.6). Bounded so a pathological book can't loop
-/// forever; on return, `limits` always matches the settled `q` exactly.
-fn settle(
+/// forever; on return, `limits` always matches the settled `q` exactly. Public since 7b §3.2:
+/// arb-wasm's `basket_json` plans a basket with it exactly as `decide` does.
+pub fn settle(
     at: &impl Fn(Decimal) -> Option<(Decimal, Vec<Price>)>,
     mut q: Decimal,
     min: Decimal,

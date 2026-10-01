@@ -113,3 +113,18 @@ fn order_size_rounds_down_to_venue_precision() {
         "below the 5-share minimum"
     );
 }
+
+#[test]
+fn books_live_in_venue_and_the_trader_re_exports_them() {
+    use arb_core::book::Book;
+    use std::collections::HashMap;
+    fn via_venue(b: &impl sim::venue::Books) -> bool {
+        b.yes_book("y1").is_some()
+    }
+    fn via_trader(b: &impl sim::trader::Books) -> bool {
+        b.yes_book("y1").is_some() && b.yes_book("y2").is_none()
+    }
+    let mut m: HashMap<String, Book> = HashMap::new();
+    m.insert("y1".into(), book(&[("0.40", "10")], &[]));
+    assert!(via_venue(&m) && via_trader(&m));
+}

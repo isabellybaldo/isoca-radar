@@ -25,7 +25,7 @@ pub const PREMISES: &[(&str, &str, &[&str])] = &[
     ("host", "1", &[]),
     (
         "sim",
-        "2",
+        "3",
         &[
             "crates/sim/src/account.rs",
             "crates/sim/src/config.rs",

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "yes-3-other",
+    "input": "{\"kind\":\"yes\",\"other_listed\":false,\"prices\":null,\"s\":3}",
+    "output": "{\"rows\":[\"YES_A\",\"YES_B\",\"YES_C\"],\"cols\":[\"A\",\"B\",\"C\",\"Other\"],\"possible\":[true,true,true,true],\"cells\":[[\"1\",\"0\",\"0\",\"0\"],[\"0\",\"1\",\"0\",\"0\"],[\"0\",\"0\",\"1\",\"0\"]],\"basket\":[\"1\",\"1\",\"1\",\"0\"],\"guaranteed\":\"1\",\"broken\":[false,false,false,true],\"top_edge_gross\":null}"
+  },
+  {
+    "name": "yes-3-listed",
+    "input": "{\"kind\":\"yes\",\"other_listed\":true,\"prices\":null,\"s\":3}",
+    "output": "{\"rows\":[\"YES_A\",\"YES_B\",\"YES_C\"],\"cols\":[\"A\",\"B\",\"C\"],\"possible\":[true,true,true],\"cells\":[[\"1\",\"0\",\"0\"],[\"0\",\"1\",\"0\"],[\"0\",\"0\",\"1\"]],\"basket\":[\"1\",\"1\",\"1\"],\"guaranteed\":\"1\",\"broken\":[false,false,false],\"top_edge_gross\":null}"
+  },
+  {
+    "name": "no-3-other",
+    "input": "{\"kind\":\"no\",\"other_listed\":false,\"prices\":null,\"s\":3}",
+    "output": "{\"rows\":[\"NO_A\",\"NO_B\",\"NO_C\"],\"cols\":[\"A\",\"B\",\"C\",\"Other\"],\"possible\":[true,true,true,true],\"cells\":[[\"0\",\"1\",\"1\",\"1\"],[\"1\",\"0\",\"1\",\"1\"],[\"1\",\"1\",\"0\",\"1\"]],\"basket\":[\"2\",\"2\",\"2\",\"3\"],\"guaranteed\":\"2\",\"broken\":[false,false,false,false],\"top_edge_gross\":null}"
+  },
+  {
+    "name": "no-2-listed-prices",
+    "input": "{\"kind\":\"no\",\"other_listed\":true,\"prices\":[{\"ask\":\"0.61\",\"bid\":\"0.60\"},{\"ask\":\"0.51\",\"bid\":\"0.50\"}],\"s\":2}",
+    "output": "{\"rows\":[\"NO_A\",\"NO_B\"],\"cols\":[\"A\",\"B\"],\"possible\":[true,true],\"cells\":[[\"0\",\"1\"],[\"1\",\"0\"]],\"basket\":[\"1\",\"1\"],\"guaranteed\":\"1\",\"broken\":[false,false],\"top_edge_gross\":\"0.1\"}"
+  },
+  {
+    "name": "yes-2-prices",
+    "input": "{\"kind\":\"yes\",\"other_listed\":true,\"prices\":[{\"ask\":\"0.45\",\"bid\":\"0.40\"},{\"ask\":\"0.52\",\"bid\":\"0.50\"}],\"s\":2}",
+    "output": "{\"rows\":[\"YES_A\",\"YES_B\"],\"cols\":[\"A\",\"B\"],\"possible\":[true,true],\"cells\":[[\"1\",\"0\"],[\"0\",\"1\"]],\"basket\":[\"1\",\"1\"],\"guaranteed\":\"1\",\"broken\":[false,false],\"top_edge_gross\":\"0.03\"}"
+  },
+  {
+    "name": "implication-prices",
+    "input": "{\"kind\":\"implication\",\"other_listed\":true,\"prices\":[{\"ask\":\"0.72\",\"bid\":\"0.70\"},{\"ask\":\"0.42\",\"bid\":\"0.40\"}],\"s\":2}",
+    "output": "{\"rows\":[\"NO_A\",\"YES_B\"],\"cols\":[\"A∧B\",\"A∧¬B\",\"¬A∧B\",\"¬A∧¬B\"],\"possible\":[true,false,true,true],\"cells\":[[\"0\",null,\"1\",\"1\"],[\"1\",null,\"1\",\"0\"]],\"basket\":[\"1\",null,\"2\",\"1\"],\"guaranteed\":\"1\",\"broken\":[false,false,false,false],\"top_edge_gross\":\"0.28\"}"
+  },
+  {
+    "name": "yes-s1",
+    "input": "{\"kind\":\"yes\",\"other_listed\":true,\"prices\":null,\"s\":1}",
+    "output": "{\"error\":\"s must be 2 to 6\"}"
+  },
+  {
+    "name": "yes-s2",
+    "input": "{\"kind\":\"yes\",\"other_listed\":false,\"prices\":null,\"s\":2}",
+    "output": "{\"rows\":[\"YES_A\",\"YES_B\"],\"cols\":[\"A\",\"B\",\"Other\"],\"possible\":[true,true,true],\"cells\":[[\"1\",\"0\",\"0\"],[\"0\",\"1\",\"0\"]],\"basket\":[\"1\",\"1\",\"0\"],\"guaranteed\":\"1\",\"broken\":[false,false,true],\"top_edge_gross\":null}"
+  },
+  {
+    "name": "no-s6",
+    "input": "{\"kind\":\"no\",\"other_listed\":false,\"prices\":null,\"s\":6}",
+    "output": "{\"rows\":[\"NO_A\",\"NO_B\",\"NO_C\",\"NO_D\",\"NO_E\",\"NO_F\"],\"cols\":[\"A\",\"B\",\"C\",\"D\",\"E\",\"F\",\"Other\"],\"possible\":[true,true,true,true,true,true,true],\"cells\":[[\"0\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\"],[\"1\",\"0\",\"1\",\"1\",\"1\",\"1\",\"1\"],[\"1\",\"1\",\"0\",\"1\",\"1\",\"1\",\"1\"],[\"1\",\"1\",\"1\",\"0\",\"1\",\"1\",\"1\"],[\"1\",\"1\",\"1\",\"1\",\"0\",\"1\",\"1\"],[\"1\",\"1\",\"1\",\"1\",\"1\",\"0\",\"1\"]],\"basket\":[\"5\",\"5\",\"5\",\"5\",\"5\",\"5\",\"6\"],\"guaranteed\":\"5\",\"broken\":[false,false,false,false,false,false,false],\"top_edge_gross\":null}"
+  },
+  {
+    "name": "no-s7",
+    "input": "{\"kind\":\"no\",\"other_listed\":false,\"prices\":null,\"s\":7}",
+    "output": "{\"error\":\"s must be 2 to 6\"}"
+  },
+  {
+    "name": "prices-wrong-count",
+    "input": "{\"kind\":\"no\",\"other_listed\":true,\"prices\":[{\"ask\":\"0.61\",\"bid\":\"0.60\"},{\"ask\":\"0.51\",\"bid\":\"0.50\"}],\"s\":3}",
+    "output": "{\"error\":\"expected 3 prices, got 2\"}"
+  },
+  {
+    "name": "bad-kind",
+    "input": "{\"kind\":\"maybe\",\"other_listed\":true,\"prices\":null,\"s\":3}",
+    "output": "{\"error\":\"unknown kind \\\"maybe\\\"\"}"
+  }
+]

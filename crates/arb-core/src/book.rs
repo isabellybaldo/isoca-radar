@@ -123,3 +123,13 @@ impl Book {
         self.bids.len() + self.asks.len() != before
     }
 }
+
+/// D1 sums (parent §5.7 (a), L2): long = A + (1 − B), short = B + (1 − A), from the best bid B and
+/// best ask A; `None` without both sides. The book is crossed (B > A) exactly when long < 1 and
+/// short > 1.
+pub fn d1_sums(top: &Top) -> Option<(Decimal, Decimal)> {
+    let (b, _) = top.best_bid?;
+    let (a, _) = top.best_ask?;
+    let (a, b) = (a.get(), b.get());
+    Some((a + (Decimal::ONE - b), b + (Decimal::ONE - a)))
+}

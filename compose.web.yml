@@ -24,6 +24,12 @@ services:
       # Phase 7a §5.1: the reset pool (paper_reset_rw: INSERT on paper_reset_requests only)
       RESET_DATABASE_URL: postgres://paper_reset_rw:${RESET_RW_DB_PASSWORD:?set RESET_RW_DB_PASSWORD in .env}@postgres:5432/cute_trading
       POLICIES_PATH: /etc/cute-trading/policies.toml
+      # Phase 7b §4: the public snapshot (public.json, every 5 min), served by nginx as a static file
+      PUBLIC_DIR: /var/lib/ct-public
+    # The api's only writable mount. It mounts public-data FIRST, so the new volume copies the
+    # image's /var/lib/ct-public owner (65532); web mounts it read-only later (7b-B).
+    volumes:
+      - public-data:/var/lib/ct-public
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,6 +142,9 @@ services:
       - "traefik.http.middlewares.ct-csp.headers.contentSecurityPolicy=default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
       - traefik.http.middlewares.ct-rl.ratelimit.average=30
       - traefik.http.middlewares.ct-rl.ratelimit.burst=60
+
+volumes:
+  public-data: {}
 
 networks:
   ct_radar:

@@ -3,10 +3,13 @@
 #![forbid(unsafe_code)]
 
 pub mod book;
+pub mod classify;
 pub mod detect;
 pub mod episode;
 pub mod fee;
 pub mod fill;
 pub mod money;
+pub mod payoff;
 pub mod premises;
 pub mod stats;
+pub mod steps;

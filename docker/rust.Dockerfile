@@ -21,7 +21,9 @@ COPY . .
 RUN set -e; for d in crates/store/migrations config; do test -d "$d"; done; if grep -rlI "$(printf '\r')" crates/store/migrations config; then echo "CRLF found in files baked into the image (migration checksums / policies hash)"; exit 1; fi
 ARG GIT_SHA=dev
 ENV SCANNER_VERSION=${GIT_SHA} SOURCE_DATE_EPOCH=0
-RUN cargo build --release --package scanner --package api --package analyze --package compact && mkdir -p /data /archive && chown 65532:65532 /data /archive
+# /var/lib/ct-public: the api's public snapshot dir (7b §4), owned by the distroless nonroot uid so
+# the named volume mounted there first copies that owner.
+RUN cargo build --release --package scanner --package api --package analyze --package compact && mkdir -p /data /archive /var/lib/ct-public && chown 65532:65532 /data /archive /var/lib/ct-public
 
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=builder /src/target/release/scanner /usr/local/bin/scanner
@@ -30,6 +32,7 @@ COPY --from=builder /src/target/release/analyze /usr/local/bin/analyze
 COPY --from=builder /src/target/release/compact /usr/local/bin/compact
 COPY --from=builder --chown=65532:65532 /data /data
 COPY --from=builder --chown=65532:65532 /archive /archive
+COPY --from=builder --chown=65532:65532 /var/lib/ct-public /var/lib/ct-public
 COPY config/scanner.toml /etc/cute-trading/scanner.toml
 COPY config/policies.toml /etc/cute-trading/policies.toml
 COPY config/compact.toml /etc/cute-trading/compact.toml
