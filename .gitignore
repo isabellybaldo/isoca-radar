@@ -219,6 +219,7 @@ spikes/probe/results/
 
 web/node_modules/
 web/dist/
+web/src/wasm/pkg/
 !web/src/lib/
 
 # brainstorming companion scratch

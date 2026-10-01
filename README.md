@@ -28,6 +28,7 @@ the published papers. **Paper only: there is no code path to an exchange.**
 | `crates/sim` | Pure paper trader |
 | `crates/cards` | Paper-replication card math |
 | `crates/tape` | Raw capture format, shared by the scanner and the compactor |
+| `crates/arb-wasm` | The public playground's engine: arb-core/sim behind six JSON functions, built to WASM for `web/` |
 | `bins/scanner` | `run` · `census` · `replay` · `migrate` |
 | `bins/api` · `bins/analyze` · `bins/compact` | HTTP api · card/sweet-spot jobs · raw hours → Parquet (`run` · `verify` · `bench`) |
 | `web/` | React 19 + Vite + TypeScript dashboard |
@@ -40,6 +41,12 @@ the published papers. **Paper only: there is no code path to an exchange.**
 ```bash
 cargo test --workspace               # Rust tests (the store/compact/api/analyze DB tests need a Postgres)
 cd web && npm ci && npm test         # dashboard tests
+
+# The /math page runs arb-wasm in the browser. One-time setup, then build the package into web/src/wasm/pkg:
+rustup target add wasm32-unknown-unknown
+cargo install --locked --version "$(sh scripts/wasm-bindgen-version.sh)" wasm-bindgen-cli   # must match Cargo.lock
+PROFILE=dev sh scripts/build-wasm.sh   # the test loop; without PROFILE it builds release (what `npm run build` needs)
+cd web && WASM_REQUIRED=1 npm test     # also runs the native = WASM parity test (skipped when pkg is missing)
 docker compose --profile core up -d  # postgres, migrate, scanner, analyze, compact
 ```
 
