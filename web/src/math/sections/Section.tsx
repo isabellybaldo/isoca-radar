@@ -29,9 +29,10 @@ export function Section({ id, title, quip, caption, controls, onReset, children,
   );
 }
 
-/** The engine's model, or its one sentence in place of the drawing's numbers. */
+/** The engine's model, or its one sentence in place of the drawing's numbers. The sentence is a polite status,
+ *  not an alert: it is redrawn while a slider moves, and an alert would be read out again on every step. */
 export function Out<T>({ out, children }: { out: T | EngineError; children: (m: T) => ReactNode }) {
-  return isError(out) ? <p className="error" role="alert">{out.error}</p> : <>{children(out)}</>;
+  return isError(out) ? <p className="error" role="status">{out.error}</p> : <>{children(out)}</>;
 }
 
 /** `label` is the slider's full accessible name. Inside a group whose legend already says the first words

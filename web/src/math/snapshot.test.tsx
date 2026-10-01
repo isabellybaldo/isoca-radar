@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { ladderModel } from '../lib/ladder';
+import { ladderModel, usText } from '../lib/ladder';
 import { LatencyLadder } from '../schematics/LatencyLadder';
 import sampleText from './__fixtures__/public.sample.json?raw';
 import { snapshotFixture } from './fixtures';
@@ -98,6 +98,17 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
     expect(s?.today).toEqual(b.today);
   });
 
+  it('a negative or fractional measured latency (clock skew) reads as not measured; the rest of the snapshot is kept', () => {
+    const b = snapshotFixture();
+    const L = b.ladder;
+    expect(L.measured).not.toBeNull(); // the fixture carries a measurement, so null below is the parser's doing
+    for (const latency_ms of [-1, -153, 1.5, -0.5]) {
+      const s = parseSnapshot(json({ ...b, ladder: { ...L, measured: { latency_ms } } }));
+      expect(s, String(latency_ms)).toEqual({ ...b, ladder: { ...L, measured: null } });
+    }
+    expect(parseSnapshot(json({ ...b, ladder: { ...L, measured: { latency_ms: 0 } } }))?.ladder.measured).toEqual({ latency_ms: 0 });
+  });
+
   it('keeps at most 126 market rows', () => {
     const b = snapshotFixture();
     const rows = Array.from({ length: 130 }, (_, i) => ({ ...b.ladder.markets[0], bucket: `b${i}` }));
@@ -143,7 +154,11 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
       ['break_even at with an unknown direction', { ...b, ladder: { ...L, break_even: { kind: 'at', latency_ms: 70, direction: 'sideways' } } }],
       ['break_even at with a fractional latency', { ...b, ladder: { ...L, break_even: { kind: 'at', latency_ms: 70.5, direction: 'loses_beyond' } } }],
       ['break_even at with a non-boolean not_monotone', { ...b, ladder: { ...L, break_even: { kind: 'at', latency_ms: 70, direction: 'loses_beyond', not_monotone: 'yes' } } }],
-      ['a fractional measured latency', { ...b, ladder: { ...L, measured: { latency_ms: 1.5 } } }],
+      ['a measured that is not an object', { ...b, ladder: { ...L, measured: 'soon' } }],
+      ['a measured that is a list', { ...b, ladder: { ...L, measured: [155] } }],
+      ['a measured without a latency', { ...b, ladder: { ...L, measured: {} } }],
+      ['a measured latency as a string', { ...b, ladder: { ...L, measured: { latency_ms: '155' } } }],
+      ['a measured latency that is null', { ...b, ladder: { ...L, measured: { latency_ms: null } } }],
       ['an unknown markets_status', { ...b, ladder: { ...L, markets_status: 'busy' } }],
       ['hourly not a list', { ...b, today: { ...b.today, hourly: {} } }],
       ['an hourly entry with a fractional hour', { ...b, today: { ...b.today, hourly: [{ hour: 0.5, arb: 1 }] } }],
@@ -183,5 +198,18 @@ describe('publicToLadder (spec 7b §7.2)', () => {
     expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
     expect(screen.getByText('us (measured ≈155 + matching)')).toBeInTheDocument();
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it('a snapshot whose measured latency is negative draws the ladder with no us-band and says it is not measured', () => {
+    const b = snapshotFixture();
+    const s = parseSnapshot(json({ ...b, ladder: { ...b.ladder, measured: { latency_ms: -153 } } }));
+    if (s === null) throw new Error('a negative measured latency must not refuse the snapshot');
+    const { container } = render(<LatencyLadder model={ladderModel(publicToLadder(s.ladder))} />);
+    expect(container.querySelector('rect.ll-us')).toBeNull();
+    expect(screen.getByText(usText(null))).toBeInTheDocument();
+    expect(usText(null)).toBe('us: not measured yet');
+    expect(container.textContent).not.toMatch(/153|measured ≈/);
+    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big'); // the rest of the ladder stands
+    expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
   });
 });

@@ -34,7 +34,7 @@ describe('DepthStairs (parent §5.7 d)', () => {
     expect(Number(container.querySelector('line.ds-qstar')?.getAttribute('x1'))).toBeCloseTo((geo(m.q_star) / geo(last(m))) * 300);
     expect(container.querySelector('.ds-big')).toHaveTextContent(/^Π \+\$1\.00/); // pi "1" through <Money cents>
     expect(screen.getByText(`Q* ${formatDecimal(m.q_star)}`)).toBeInTheDocument();
-    expect(container.querySelector('.ds-gross')).toHaveTextContent('before fees +$1.00');
+    expect(container.querySelector('.ds-gross')).toHaveTextContent(/^these baskets before fees \+\$1\.00$/);
     expect(screen.getByText(`${formatDecimal(last(m))} shares`)).toBeInTheDocument();
   });
 
@@ -42,7 +42,7 @@ describe('DepthStairs (parent §5.7 d)', () => {
     const { container } = render(<DepthStairs model={walk('fees-on')} />);
     expect(container.textContent).toContain('on the table');
     expect(container.querySelector('.ds-big')).toHaveTextContent(/^Π \+\$0\.69/); // pi 0.685 rounds to the cent
-    expect(container.querySelector('.ds-gross')).toHaveTextContent('before fees +$1.00');
+    expect(container.querySelector('.ds-gross')).toHaveTextContent(/^these baskets before fees \+\$1\.00$/);
   });
 
   it('keeps its dollars in the figure whose caption says "on the table"', () => {

@@ -3,9 +3,9 @@ import { Money } from '../../components/Money';
 import { DurationBars } from '../../schematics/DurationBars';
 import { UpdateBars } from '../../schematics/UpdateBars';
 import { call } from '../../wasm/call';
-import type { Engine, EpisodeIn, EpisodeModel, LegIn } from '../../wasm/types';
+import { type Engine, type EngineError, type EpisodeIn, type EpisodeModel, type LegIn, isError } from '../../wasm/types';
 import { episodeRows } from '../adapt';
-import { SECTIONS } from '../copy';
+import { E_QUIPS, SECTIONS } from '../copy';
 import { EPISODE_BIDS, EPISODE_T, PRESETS, fromTick } from '../defaults';
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section, Seg } from './Section';
@@ -46,6 +46,13 @@ function timesLine(m: EpisodeModel): string | null {
   return `opened at ${m.open_ms} ms · our order lands at ${m.t_x} ms · ${close}`;
 }
 
+/** The closing line from the engine's own verdict, as f does: none on an engine error, and none while no episode
+ *  has opened (there is no edge yet to speak of). */
+function closing(out: EpisodeModel | EngineError): string | null {
+  if (isError(out) || out.open_ms === null) return null;
+  return out.caught ? E_QUIPS.caught : E_QUIPS.missed;
+}
+
 /** 09-27 §6.2 e: scrub updates, proc/net/match sliders with the LADDER presets, secondsDelay. */
 export function EpisodeSection({ engine }: { engine: Engine }) {
   const [st, setSt] = useState<EpisodeState>(START);
@@ -56,6 +63,7 @@ export function EpisodeSection({ engine }: { engine: Engine }) {
     <Section
       id="e"
       {...SECTIONS.e}
+      quip={closing(out)}
       onReset={() => setSt(START)}
       controls={
         <>

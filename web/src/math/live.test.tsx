@@ -6,9 +6,9 @@ import { settle } from '../test/settle';
 import sampleText from './__fixtures__/public.sample.json?raw';
 import { snapshotFixture } from './fixtures';
 import { LiveLadder } from './LiveLadder';
-import { BEHIND, LIVE_UNAVAILABLE, LiveStrip, LiveUnavailable, asOfLine } from './LiveStrip';
+import { BEHIND, LIVE_UNAVAILABLE, LiveStrip, LiveUnavailable, STRIP_TITLE, asOfLine } from './LiveStrip';
 import { FRESH_MS, MAX_MS, REFETCH_MS, SNAPSHOT_URL, freshness, parseSnapshot } from './snapshot';
-import { NO_RUNGS } from '../schematics/LatencyLadder';
+import { NO_ACCOUNT_LEGEND, NO_RUNGS } from '../schematics/LatencyLadder';
 import { FIRST_TIMEOUT_MS, MAX_BODY_BYTES, type SnapshotState, useSnapshot } from './useSnapshot';
 
 const T0 = 1_790_000_000_000;
@@ -317,6 +317,11 @@ describe('LiveStrip (spec 7b §6.1)', () => {
     expect(screen.getByText('3')).toHaveClass('m-big');
     expect(screen.getByText('$41.37')).toBeInTheDocument();
     expect(screen.getByText('edge on the table today, $100 per episode at most')).toBeInTheDocument();
+    // "today" is the UTC day (the api's day_start_ms), and the strip's heading and accessible name say so
+    expect(STRIP_TITLE).toBe('today (UTC) on the live scanner');
+    expect(new Date(s.today.day_start_ms).toISOString()).toMatch(/T00:00:00\.000Z$/);
+    expect(screen.getByText(STRIP_TITLE)).toHaveClass('m-live-k');
+    expect(screen.getByRole('region', { name: STRIP_TITLE })).toBe(container.querySelector('section.m-live'));
     expect(screen.getByText('as of 14:05 UTC')).toHaveClass('dim');
     expect(container.querySelectorAll('rect.spark-bar')).toHaveLength(24);
     expect(container.querySelector('svg.spark')).toHaveAttribute('preserveAspectRatio', 'none');
@@ -394,10 +399,24 @@ describe('the page cannot be blanked by a stamp (fix round 1)', () => {
     const base = snapshotFixture({}, T0);
     const snap = {
       ...base,
-      ladder: { ...base.ladder, epoch: 0, start_ms: null, as_of_ms: null, rungs: [], markets: [], markets_status: 'missing' as const, measured: null },
+      ladder: { ...base.ladder, epoch: 0, start_ms: null, as_of_ms: null, rungs: [], markets: [], markets_status: 'missing' as const, measured: null, break_even: { kind: 'thin' as const } },
     };
-    render(<LiveLadder snap={snap} stale={false} />);
+    const { container } = render(<LiveLadder snap={snap} stale={false} />);
     expect(screen.getByText(NO_RUNGS)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /^on the live scanner/ })).toBeInTheDocument();
+    // no epoch yet: six empty slots, and the legend does not say "no account at this latency" of the whole ladder
+    expect(screen.getByText('no epoch yet')).toHaveClass('ll-big');
+    expect(container.querySelectorAll('rect.ll-missing')).toHaveLength(6);
+    expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
+  });
+
+  it('LiveLadder explains the dashed box when one rung has an account and another has none', () => {
+    const base = snapshotFixture({}, T0);
+    const cut = base.ladder.rungs.filter((r) => r.scenario !== 'rung-100');
+    expect(cut).toHaveLength(base.ladder.rungs.length - 1);
+    const snap = { ...base, ladder: { ...base.ladder, rungs: cut, break_even: { kind: 'thin' as const } } };
+    const { container } = render(<LiveLadder snap={snap} stale={false} />);
+    expect(container.querySelectorAll('rect.ll-missing')).toHaveLength(1);
+    expect(screen.getByText(NO_ACCOUNT_LEGEND)).toBeInTheDocument();
   });
 });

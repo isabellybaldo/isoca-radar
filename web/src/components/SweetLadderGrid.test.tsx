@@ -22,7 +22,7 @@ describe('SweetLadderGrid', () => {
     expect(screen.getByText(GRID_HINT)).toBeInTheDocument();
     fireEvent.focus(b);
     expect(b).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByText('crypto · rung-0 · n 40 · C 33 · captured at 0 ms, per $100: +$0.20 [+$0.05, +$0.35] · survives here; worth a real small-order test.')).toBeInTheDocument();
+    expect(screen.getByText('crypto · rung-0 · n 40 · C 33 · captured on paper at 0 ms, per $100: +$0.20 [+$0.05, +$0.35] · survives here; worth a real small-order test.')).toBeInTheDocument();
   });
 
   it('shows the legend beside the grid, in words', () => {

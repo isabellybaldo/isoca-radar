@@ -213,7 +213,7 @@ export function ladderGrid(rows: GridRow[], side: SweetSide, dim: SweetDim, only
 export function cellDetail(row: LadderGridRow, col: { scenario: string; latency_ms: number }, r: GridRow | undefined): string {
   const head = `${bucketText(row.dim, row.bucket)} · ${col.scenario}`;
   if (!r) return `${head} · no attempts in this slice`;
-  return `${head} · n ${r.n_exec} · C ${r.clusters} · captured at ${col.latency_ms} ms, per $100: ${interval(r)} · ${LABEL_TEXT[r.label]}`;
+  return `${head} · n ${r.n_exec} · C ${r.clusters} · captured on paper at ${col.latency_ms} ms, per $100: ${interval(r)} · ${LABEL_TEXT[r.label]}`;
 }
 
 /** Spec 7a §3: the ladder grows m, so z is stricter; the grid's footnote says so. */

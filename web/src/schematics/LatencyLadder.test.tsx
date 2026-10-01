@@ -169,9 +169,31 @@ describe('LatencyLadder', () => {
       }
       unmount();
     }
-    render(<LatencyLadder model={ladderModel(epoch0)} />);
+    const { container } = render(<LatencyLadder model={ladderModel(epoch0)} />);
     expect(screen.getByText('no epoch yet')).toHaveClass('ll-big');
     expect(screen.getAllByText('no account')).toHaveLength(6);
+    expect(container.querySelectorAll('rect.ll-missing')).toHaveLength(6);
+    // the big line already says there is no epoch: the legend does not add "no account at this latency" for every slot
+    expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
+  });
+
+  it('the dashed-box legend needs a rung with an account and one without: none drawn, all drawn and no rung at all leave it out', () => {
+    const all = ladderFixture().rungs;
+    const ladderOnly = all.filter((r) => !r.extra);
+    const cases: [string, LadderRung[], number, boolean][] = [
+      ['every rung has an account', all, 0, false],
+      ['one rung has none', all.filter((r) => r.scenario !== 'rung-100'), 1, true],
+      ['one rung has an account', ladderOnly.slice(0, 1), 5, true],
+      ['only the extras have accounts', all.filter((r) => r.extra), 6, false],
+      ['no rung at all', [], 6, false],
+    ];
+    for (const [name, rungs, boxes, legend] of cases) {
+      const cut: Ladder = rungs.length === all.length ? ladderFixture() : ladderFixture({ rungs, break_even: { kind: 'thin' } });
+      const { container, unmount } = render(<LatencyLadder model={ladderModel(cut)} />);
+      expect(container.querySelectorAll('rect.ll-missing'), name).toHaveLength(boxes);
+      expect(screen.queryAllByText(NO_ACCOUNT_LEGEND), name).toHaveLength(legend ? 1 : 0);
+      unmount();
+    }
   });
 
   it('which markets: the compact grid for live and warming, words for under_review and missing; the time frame is named', () => {

@@ -6,9 +6,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { formatDecimal } from '../lib/money';
 import { CROSSED } from '../schematics/MirrorBooks';
-import { endText } from '../schematics/ClassifyTree';
-import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine, skipReason } from '../wasm/testEngine';
-import type { ClassifyModel, Engine, MirrorModel, PayoffMatrix } from '../wasm/types';
+import { NOT_RISK_FREE, endText } from '../schematics/ClassifyTree';
+import { describeWasm, fixtureCase, loadTestEngine } from '../wasm/testEngine';
+import type { ClassifyIn, ClassifyModel, Engine, MirrorModel, PayoffIn, PayoffMatrix } from '../wasm/types';
 import { IMPLICATION_PRICE_USE } from './adapt';
 import { B_QUIPS, SECTIONS } from './copy';
 import { toTick } from './defaults';
@@ -18,8 +18,8 @@ import { PAYOFF_START, PayoffSection, payoffInput } from './sections/PayoffSecti
 
 declare const process: { cwd(): string };
 
-if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('sections a–c'));
-
+/** The engine's one sentence in place of a drawing (Section's Out): a polite status with the error class, or null. */
+const engineError = () => document.querySelector('p.error');
 const lit = (c: HTMLElement) => [...c.querySelectorAll('li.cl-node.lit')].map((li) => li.getAttribute('data-node'));
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
 
@@ -45,15 +45,15 @@ describe('captions name functions that exist in the Rust code (R7)', () => {
   });
 });
 
-describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine (09-27 §8)', () => {
+describeWasm('sections a–c on the real engine (09-27 §8)', () => {
   let engine: Engine;
   beforeAll(async () => {
     engine = await loadTestEngine();
   });
-  /** The engine with every mirror_json request recorded, to inspect what the page really sent. */
-  const spied = () => {
+  /** The engine with every request to `fn` (mirror_json unless named) recorded, to inspect what the page really sent. */
+  const spied = (fn: 'mirror_json' | 'payoff_json' | 'classify_json' = 'mirror_json') => {
     const sent: string[] = [];
-    return { sent, engine: { ...engine, mirror_json: (i: string) => (sent.push(i), engine.mirror_json(i)) } as Engine };
+    return { sent, engine: { ...engine, [fn]: (i: string) => (sent.push(i), engine[fn](i)) } as Engine };
   };
   const lastBook = (sent: string[]) => JSON.parse(sent.at(-1) ?? '{}') as { bids: { p: string }[]; asks: { p: string }[] };
   const ticks = (rows: { p: string }[]) => rows.map((l) => toTick(l.p));
@@ -136,7 +136,9 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     const sentence = (JSON.parse(fixtureCase('mirror_json', 'size-zero').output) as { error: string }).error;
     const { container } = render(<MirrorSection engine={engine} />);
     change('YES bid 1 size', '0');
-    expect(await screen.findByRole('alert')).toHaveTextContent(sentence);
+    expect(await screen.findByRole('status')).toHaveTextContent(sentence);
+    expect(engineError()).toHaveTextContent(sentence); // what the "no engine error" checks in this file look for
+    expect(screen.queryByRole('alert')).toBeNull(); // a status, so a slider does not make it read out again on every step
     expect(container.querySelector('svg.mb-svg')).toBeNull();
     change('YES bid 1 size', '100');
     await waitFor(() => expect(container.querySelector('svg.mb-svg')).not.toBeNull());
@@ -157,12 +159,12 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     render(<MirrorSection engine={spy} />);
     change('YES bid 3 price', '60'); // bids were 54 53 52 51
     await waitFor(() => expect(ticks(lastBook(sent).bids)).toEqual([62, 61, 60, 51]));
-    expect(screen.queryByRole('alert')).toBeNull();
+    expect(engineError()).toBeNull();
     change('YES bid 2 price', '40'); // pushes the levels behind it down
     await waitFor(() => expect(ticks(lastBook(sent).bids)).toEqual([62, 40, 39, 38]));
     change('YES ask 2 price', '70'); // asks were 55 56 57 58
     await waitFor(() => expect(ticks(lastBook(sent).asks)).toEqual([55, 70, 71, 72]));
-    expect(screen.queryByRole('alert')).toBeNull();
+    expect(engineError()).toBeNull();
     for (const raw of sent) {
       const b = JSON.parse(raw) as { bids: { p: string }[]; asks: { p: string }[] };
       const bt = ticks(b.bids);
@@ -183,7 +185,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     await waitFor(() => expect(ticks(lastBook(sent).asks)).toEqual([1, 2, 3, 4]));
     change('YES ask 1 price', '99');
     await waitFor(() => expect(ticks(lastBook(sent).asks)).toEqual([96, 97, 98, 99]));
-    expect(screen.queryByRole('alert')).toBeNull();
+    expect(engineError()).toBeNull();
   });
 
   it('b: the YES basket with Other unlisted breaks on Other; the NO basket never does; the implication has an impossible column', async () => {
@@ -205,7 +207,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     for (const k of [2, 4, 5, 6, 3]) {
       fireEvent.click(screen.getByRole('button', { name: `S ${k}` }));
       await waitFor(() => expect(screen.getAllByRole('columnheader').filter((h) => /^[A-F]$|^Other/.test(h.textContent ?? ''))).toHaveLength(k + 1));
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
     }
     expect(screen.queryByRole('button', { name: 'S 7' })).toBeNull();
   });
@@ -260,13 +262,26 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
   });
 
   it('b: reset restores YES, S 3, Other unlisted, no prices', async () => {
-    render(<PayoffSection engine={engine} />);
+    const { sent, engine: spy } = spied('payoff_json');
+    render(<PayoffSection engine={spy} />);
+    const last = () => JSON.parse(sent.at(-1) ?? '{}') as PayoffIn;
+    const legs = () => screen.getAllByRole('columnheader').filter((h) => /^[A-F]$/.test(h.textContent ?? ''));
+    expect(legs()).toHaveLength(3);
     fireEvent.click(screen.getByRole('button', { name: 'NO basket' }));
     fireEvent.click(screen.getByRole('button', { name: 'S 5' }));
+    // the changed state is drawn before reset: a reset in the same frame would leave nothing to restore
+    await waitFor(() => expect(last()).toEqual(payoffInput({ ...PAYOFF_START, kind: 'no', s: 5 })));
+    await waitFor(() => expect(legs()).toHaveLength(5));
+    expect(screen.getByRole('table', { name: 'payoff of the NO basket' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: /✗/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'reset' }));
-    await waitFor(() => expect(screen.getByRole('columnheader', { name: 'Other ✗' })).toBeInTheDocument());
+    await waitFor(() => expect(last()).toEqual(payoffInput(PAYOFF_START)));
+    await waitFor(() => expect(legs()).toHaveLength(3));
+    expect(screen.getByRole('table', { name: 'payoff of the YES basket' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Other ✗' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'YES basket' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'S 3' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('with prices')).not.toBeChecked();
   });
 
   it('b: range inputs carry the shown decimal as aria-valuetext', async () => {
@@ -308,6 +323,35 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     expect(screen.getByText('not live: its book is ignored')).toBeInTheDocument();
   });
 
+  it('c: a halted leg leaves a YES basket that is not arbitrage, and the money line says not risk-free (b says the same)', async () => {
+    const { container } = render(<ClassifySection engine={engine} />);
+    expect(container.querySelector('.cl-net')).toHaveTextContent(/on the table · gross/); // the start is an arbitrage: no qualifier
+    expect(container.querySelector('.cl-net')).not.toHaveTextContent(NOT_RISK_FREE);
+    change('leg A status', 'halted');
+    const legs = [{ ...CLASSIFY_START.legs[0], status: 'halted' as const }, ...CLASSIFY_START.legs.slice(1)];
+    const m = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ ...CLASSIFY_START, legs })))) as ClassifyModel;
+    expect(m).toMatchObject({ kind: 'yes_basket_incomplete', realization: 'not_arbitrage' });
+    expect(m.net).not.toBeNull();
+    await waitFor(() => expect(container.querySelector('.cl-end')).toHaveTextContent(endText(m)));
+    expect(endText(m)).toMatch(/not arbitrage$/);
+    expect(container.querySelector('.cl-net')).toHaveTextContent(`on the table, ${NOT_RISK_FREE} · gross`);
+  });
+
+  it('c: on every state the controls reach, only an incomplete YES basket is not_arbitrage (so "not risk-free" is true of it)', () => {
+    let risky = 0;
+    for (const status of ['live', 'placeholder', 'other', 'halted', 'closed_no', 'closed_yes'] as const) {
+      for (let i = 0; i < CLASSIFY_START.legs.length; i++) {
+        const legs = CLASSIFY_START.legs.map((l, k) => (k === i ? { ...l, status } : l));
+        for (const augmented of [false, true]) {
+          const m = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ legs, augmented })))) as ClassifyModel;
+          expect(m.realization === 'not_arbitrage', `${status} ${i} ${augmented}`).toBe(m.kind === 'yes_basket_incomplete');
+          if (m.realization === 'not_arbitrage') risky += 1;
+        }
+      }
+    }
+    expect(risky).toBeGreaterThan(0);
+  });
+
   it('c: every status offered is one the engine accepts, on every leg', () => {
     for (const status of ['live', 'placeholder', 'other', 'halted', 'closed_no', 'closed_yes'] as const) {
       for (let i = 0; i < CLASSIFY_START.legs.length; i++) {
@@ -320,14 +364,27 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
   });
 
   it('c: augmented reaches the engine, and reset restores the start', async () => {
-    const { container } = render(<ClassifySection engine={engine} />);
+    const { sent, engine: spy } = spied('classify_json');
+    const { container } = render(<ClassifySection engine={spy} />);
+    const last = () => JSON.parse(sent.at(-1) ?? '{}') as ClassifyIn;
+    const start = JSON.parse(fixtureCase('classify_json', 'no-edge-3').output) as ClassifyModel;
+    expect(last().augmented).toBe(false);
     fireEvent.click(screen.getByLabelText(/augmented/));
-    const aug = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ ...CLASSIFY_START, augmented: true })))) as ClassifyModel;
-    await waitFor(() => expect(lit(container)).toEqual(aug.path));
+    // the path is the same with and without "augmented" here (the NO basket pays either way), so the drawing
+    // cannot show that the flag arrived: the request does
+    await waitFor(() => expect(last()).toEqual(classifyInput({ ...CLASSIFY_START, augmented: true })));
     change('leg A best bid', '10');
+    const legs = [{ ...CLASSIFY_START.legs[0], bid: 10 }, ...CLASSIFY_START.legs.slice(1)];
+    const moved = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ legs, augmented: true })))) as ClassifyModel;
+    expect(moved.path).not.toEqual(start.path); // the changed state is one the drawing can tell from the start
+    await waitFor(() => expect(last()).toEqual(classifyInput({ legs, augmented: true })));
+    await waitFor(() => expect(lit(container)).toEqual(moved.path)); // drawn before reset, so reset has something to restore
+    expect(container.querySelector('.cl-end')).toHaveTextContent(endText(moved));
     fireEvent.click(screen.getByRole('button', { name: 'reset' }));
-    const m = JSON.parse(fixtureCase('classify_json', 'no-edge-3').output) as ClassifyModel;
-    await waitFor(() => expect(lit(container)).toEqual(m.path));
+    await waitFor(() => expect(last()).toEqual(classifyInput(CLASSIFY_START)));
+    await waitFor(() => expect(lit(container)).toEqual(start.path));
+    expect(container.querySelector('.cl-end')).toHaveTextContent(endText(start));
     expect(screen.getByLabelText(/augmented/)).not.toBeChecked();
+    expect(screen.getByLabelText('leg A best bid')).toHaveValue(String(CLASSIFY_START.legs[0].bid));
   });
 });

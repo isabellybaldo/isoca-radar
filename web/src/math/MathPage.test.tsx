@@ -6,6 +6,7 @@ import { StrictMode } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { checkHonesty } from '../explain/honesty';
 import { breakEvenText, ladderModel } from '../lib/ladder';
+import { bucketText, cellDetail } from '../lib/sweet';
 import { CROSSED } from '../schematics/MirrorBooks';
 import { mockApi } from '../test/mockApi';
 import { settle } from '../test/settle';
@@ -16,7 +17,7 @@ import { basketInput } from './basket';
 import { ENGINE_FAILED, FOOTER, LOADING, SECTIONS, TAGLINE, TITLE } from './copy';
 import { F_BOOKS, F_BURST } from './defaults';
 import { snapshotFixture } from './fixtures';
-import { BEHIND, LIVE_UNAVAILABLE } from './LiveStrip';
+import { BEHIND, LIVE_UNAVAILABLE, STRIP_TITLE } from './LiveStrip';
 import { MathPage } from './MathPage';
 import { DEPTH_START, depthInput } from './sections/DepthSection';
 import { FRESH_MS, REFETCH_MS, SNAPSHOT_URL, parseSnapshot, publicToLadder } from './snapshot';
@@ -50,7 +51,7 @@ const now = () => clock;
 const never = new Promise<Engine>(() => {});
 const IDS = ['a', 'b', 'c', 'd', 'e', 'f'] as const;
 const TITLES = IDS.map((k) => SECTIONS[k].title);
-const STRIP = { name: 'today on the live scanner' };
+const STRIP = { name: STRIP_TITLE };
 
 function setVisible(v: 'visible' | 'hidden') {
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v });
@@ -82,6 +83,12 @@ const unavailableShown = () => expect(screen.getAllByText(LIVE_UNAVAILABLE)).toH
 const behindShown = (n: number) => () => expect(screen.getAllByText(new RegExp(`: ${BEHIND}$`))).toHaveLength(n);
 const sectionsShown = () => expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
 const ladderShown = () => screen.getByRole('heading', { level: 3 });
+/** Nothing went wrong on screen: no alert (the engine did not load) and no engine sentence in place of a drawing
+ *  (Section's Out: a polite status with the error class). */
+const noErrors = () => {
+  expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  expect(document.querySelectorAll('.error')).toHaveLength(0);
+};
 
 beforeEach(() => {
   clock = T0;
@@ -116,6 +123,8 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
     await landed(f, stripShown);
     expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual([TITLE]);
     expect(TITLE).toBe('isoca-radar · math');
+    expect(STRIP_TITLE).toBe('today (UTC) on the live scanner'); // the api's day starts at 00:00 UTC, and the strip says so
+    expect(within(screen.getByRole('region', STRIP)).getByText(STRIP_TITLE)).toHaveClass('m-live-k');
     expect(screen.getByText(TAGLINE)).toBeInTheDocument();
     expect(screen.getByRole('contentinfo')).toHaveTextContent(FOOTER); // a footer landmark,
     expect(screen.getByRole('main')).not.toHaveTextContent(FOOTER); // after main, not in it
@@ -300,6 +309,7 @@ function expectHonest(root: HTMLElement, state: string): void {
   expect(root.querySelectorAll('svg text'), `${state}: svg text`).toHaveLength(0);
   expect(root.innerHTML, state).not.toContain('NaN');
   expect(screen.queryAllByRole('alert'), `${state}: alerts`).toHaveLength(0);
+  expect([...root.querySelectorAll('.error')].map((e) => e.textContent), `${state}: engine sentences`).toEqual([]);
 }
 
 async function openEveryFold(root: HTMLElement, f: { mock: { calls: unknown[] } }): Promise<number> {
@@ -353,7 +363,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(1);
     expect(screen.queryByText(LIVE_UNAVAILABLE)).toBeNull();
     expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+    noErrors();
     expect(container.querySelectorAll('[style]')).toHaveLength(0); // the math CSP has no 'unsafe-inline' for styles
     expect(container.querySelectorAll('svg text')).toHaveLength(0);
     expect(container.innerHTML).not.toContain('NaN');
@@ -377,7 +387,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
     expect(screen.queryAllByRole('heading', { level: 3 })).toHaveLength(0);
     expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
-    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+    noErrors();
     for (const k of IDS) expect(screen.getByText(SECTIONS[k].caption)).toBeInTheDocument();
   });
 
@@ -393,7 +403,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     expect(screen.queryAllByRole('heading', { level: 3 })).toHaveLength(0);
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(TITLES);
     for (const k of IDS) expect(screen.getByText(SECTIONS[k].caption)).toBeInTheDocument();
-    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+    noErrors();
   });
 
   it('the whole page, every fold open, on the sample the api writes: honest words, framed dollars, no /api/', async () => {
@@ -432,6 +442,17 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     await waitFor(() => expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6));
     for (const s of container.querySelectorAll('details:not([open]) > summary')) fireEvent.click(s);
     await waitFor(() => expect(container.querySelectorAll('details:not([open])')).toHaveLength(0));
+
+    // f's live ladder, "which markets": a tapped cell with a mean writes a $ line under the grid
+    const row = sample.ladder.markets.find((r) => r.mean !== null);
+    if (row === undefined) throw new Error('the sample must carry a market row with a mean');
+    const cell = sec('f').getByRole('button', { name: new RegExp(`^${bucketText(row.dimension, row.bucket)} at ${row.scenario} `) });
+    fireEvent.click(cell);
+    expect(cell).toHaveAttribute('aria-pressed', 'true');
+    const detail = cellDetail({ dim: row.dimension, bucket: row.bucket }, { scenario: row.scenario, latency_ms: row.latency_ms ?? 0 }, row);
+    expect(detail).toMatch(/\$\d/); // the line carries a real figure
+    expect(sec('f').getByText(detail)).toHaveClass('lg-detail');
+    expectHonest(container, 'f: a market cell with a mean');
 
     fireEvent.click(sec('a').getByRole('button', { name: 'cross the book' }));
     expect(await sec('a').findByText(CROSSED)).toBeInTheDocument();

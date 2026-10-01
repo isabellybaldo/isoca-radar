@@ -11,6 +11,7 @@ import { UpdateBars } from '../schematics/UpdateBars';
 import { FIXTURES, describeWasm, fixtureCase, fixtureCases, loadTestEngine } from '../wasm/testEngine';
 import { type EpisodeModel, type PayoffIn, type PayoffMatrix, isError } from '../wasm/types';
 import { IMPLICATION_PRICE_USE, episodeRows, matrixToPayoff } from './adapt';
+import { fromTick } from './ticks';
 
 /** Real engine outputs: the fixture's own output string for the case (never retyped). */
 const matrix = (name: string) => JSON.parse(fixtureCase('payoff_json', name).output) as PayoffMatrix;
@@ -168,9 +169,11 @@ describe('e reuses DurationBars and adds UpdateBars (spec 7b §6.2 e)', () => {
 describeWasm('implication shows only what the engine uses (ruling R10)', () => {
   it('top_edge_gross moves with exactly the sides IMPLICATION_PRICE_USE names, and with no others', async () => {
     const eng = await loadTestEngine();
-    type Px = { bid: string; ask: string };
-    const BASE: Px[] = [{ bid: '0.70', ask: '0.72' }, { bid: '0.40', ask: '0.42' }];
-    const edge = (prices: Px[]) => {
+    /** Prices in whole ticks of 0.01; the engine gets decimal strings built from them (R12), never float text. */
+    type Ticks = { bid: number; ask: number };
+    const BASE: Ticks[] = [{ bid: 70, ask: 72 }, { bid: 40, ask: 42 }];
+    const edge = (ticks: Ticks[]) => {
+      const prices = ticks.map((t) => ({ bid: fromTick(t.bid), ask: fromTick(t.ask) }));
       const input: PayoffIn = { kind: 'implication', s: 2, other_listed: true, prices };
       const o: unknown = JSON.parse(eng.payoff_json(JSON.stringify(input)));
       if (isError(o)) throw new Error(o.error);
@@ -180,7 +183,7 @@ describeWasm('implication shows only what the engine uses (ruling R10)', () => {
     for (const [leg, name] of ['A', 'B'].entries()) {
       for (const side of ['bid', 'ask'] as const) {
         const used = IMPLICATION_PRICE_USE.some((u) => u.leg === name && u.side === side);
-        const moved = BASE.map((p, i) => (i === leg ? { ...p, [side]: (Number(p[side]) + (side === 'ask' ? 0.05 : -0.05)).toFixed(2) } : p));
+        const moved = BASE.map((p, i) => (i === leg ? { ...p, [side]: p[side] + (side === 'ask' ? 5 : -5) } : p));
         if (used) expect(edge(moved), `${name} ${side}`).not.toBe(base);
         else expect(edge(moved), `${name} ${side}`).toBe(base);
       }

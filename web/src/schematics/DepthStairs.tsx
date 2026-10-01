@@ -8,7 +8,8 @@ import { along, costDomain, geoPos, PLOT_H as H, PLOT_W as W, tickText } from '.
  * YES rule; active legs - 1 for the nested NO rule, so the payoff is read per step). Between cost and payoff
  * each step is shaded: teal where it pays (up to Q*), salmon past Q* where it costs more than it pays
  * (walk_steps keeps those). The cost axis is zoomed onto the costs and payoffs drawn (costDomain), its two ends
- * written beside the drawing. Π, Π before fees and Q* are the engine's own figures, in HTML; the step costs
+ * written beside the drawing. Π, Π before fees (pi_gross: the gross of the baskets the net walk took, not of a
+ * walk without fees) and Q* are the engine's own figures, in HTML; the step costs
  * are for drawing only (7b-B R19), so no total is ever summed from them.
  */
 export function DepthStairs({ model }: { model: WalkModel }) {
@@ -27,7 +28,7 @@ export function DepthStairs({ model }: { model: WalkModel }) {
         <span>{`Q* ${formatDecimal(model.q_star)}`}</span>
       </p>
       <figcaption className="dim">
-        on the table, if every level stayed put · <span className="ds-gross">before fees <Money value={model.pi_gross} signed cents /></span>
+        on the table, if every level stayed put · <span className="ds-gross">these baskets before fees <Money value={model.pi_gross} signed cents /></span>
       </figcaption>
       <div className="ds-plot">
         {model.steps.length > 0 && (

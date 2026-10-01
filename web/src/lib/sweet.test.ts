@@ -138,7 +138,7 @@ describe('ladder grid (spec 7a §8)', () => {
       dimension: 'category', bucket: 'crypto', scenario: 'rung-25', latency_ms: 25, label: 'thin', mean: '0.3', lo: '-0.1', hi: '0.7', n_exec: 12, clusters: 9,
     });
     expect(cellDetail({ dim: 'category', bucket: 'crypto' }, { scenario: 'rung-25', latency_ms: 25 }, r)).toBe(
-      'crypto · rung-25 · n 12 · C 9 · captured at 25 ms, per $100: +$0.30 [−$0.10, +$0.70] · too few trades or events to say anything.',
+      'crypto · rung-25 · n 12 · C 9 · captured on paper at 25 ms, per $100: +$0.30 [−$0.10, +$0.70] · too few trades or events to say anything.',
     );
     expect(cellDetail({ dim: 'all', bucket: 'all' }, { scenario: 'rung-0', latency_ms: 0 }, undefined)).toBe('all · rung-0 · no attempts in this slice');
     expect(gridNote({ m: 364, z: '3.62' })).toBe('z = 3.62 across 364 rows tested: the more rows, the wider each interval.');

@@ -1,7 +1,8 @@
 // Spec 7b §5.1 and §6.3: the public snapshot the api writes every 5 minutes (plan 7b-A) and nginx serves
 // as a static file. The types copy 7b-A's "Contract for 7b-B" (the fields the page reads, bins/api/src/public.rs);
 // parseSnapshot is strict (R15): bad JSON, v != 1, a missing, mistyped or fractional field, an unknown enum value
-// all give null, which the page shows as "live numbers unavailable". It returns a fresh object built from the
+// all give null, which the page shows as "live numbers unavailable". The one exception is the measured latency
+// (readMeasured): a number the page cannot use reads as "not measured" and the rest is kept. It returns a fresh object built from the
 // whitelisted fields, so a key the api never promised is not passed on. Decimals stay strings (R12).
 // Type-only imports from src/api are erased (spec 7b §7.2).
 import type { BreakEven, MarketsStatus, SweetLabel } from '../api/types';
@@ -156,13 +157,22 @@ function readHour(x: unknown): { hour: number; arb: number } | null {
   return isObj(x) && isInt(x.hour) && x.hour < 24 && isInt(x.arb) ? { hour: x.hour, arb: x.arb } : null;
 }
 
+/** `measured` is null or `{ latency_ms: <number> }`; any other shape is refused (undefined). The api's
+ *  latency is a signed integer (bins/api/src/public.rs, i64) built from the feed lag, our clock against the
+ *  exchange's stamp, so clock skew can make it negative. A negative or fractional number is no measurement the ladder can place: it reads
+ *  as null ("us: not measured yet", no band) instead of costing the visitor the whole snapshot. */
+function readMeasured(m: unknown): { latency_ms: number } | null | undefined {
+  if (m === null) return null;
+  if (!isObj(m) || typeof m.latency_ms !== 'number') return undefined;
+  return isInt(m.latency_ms) ? { latency_ms: m.latency_ms } : null;
+}
+
 function readLadder(l: unknown): PublicLadder | null {
   if (!isObj(l)) return null;
   const breakEven = readBreakEven(l.break_even);
   const rungs = Array.isArray(l.rungs) && l.rungs.length <= MAX_RUNGS ? readAll(l.rungs, readRung) : null;
   const markets = readRows(l.markets);
-  const m = l.measured;
-  const measured = m === null ? null : isObj(m) && isInt(m.latency_ms) ? { latency_ms: m.latency_ms } : undefined;
+  const measured = readMeasured(l.measured);
   if (!isInt(l.epoch) || !isMsOrNull(l.start_ms) || !isMsOrNull(l.as_of_ms) || !oneOf(MARKETS_STATUS, l.markets_status)) return null;
   if (rungs !== null && new Set(rungs.map((r) => r.scenario)).size !== rungs.length) return null;
   if (breakEven === null || rungs === null || markets === null || measured === undefined) return null;

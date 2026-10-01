@@ -418,7 +418,7 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 .bl-big.neg { color: var(--bad); }
 .ds-svg, .bl-svg { display: block; width: 100%; height: 140px; background: var(--bg); }
 .ds-svg .ds-pi { fill: var(--teal); opacity: 0.7; }
-.ds-svg .ds-loss { fill: var(--rose); opacity: 0.6; stroke: var(--rose); stroke-width: 1px; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
+.ds-svg .ds-loss { fill: var(--rose); fill-opacity: 0.6; stroke: var(--fg); stroke-width: 1px; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
 .ds-svg .ds-cost { stroke: var(--fg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
 .ds-svg .ds-pay { stroke: var(--mint); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .ds-svg .ds-qstar { stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
@@ -432,7 +432,7 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .ds-sw, .bl-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
 .ds-sw.pi { background: var(--teal); }
-.ds-sw.loss { background: var(--rose); border: 1px dashed var(--rose); }
+.ds-sw.loss { background: var(--rose); border: 1px dashed var(--fg); }
 /* The cost line and the pays line share a colour: the swatches differ as the lines do, solid against dashed 4 3. */
 .ds-sw.cost, .ds-sw.pay { width: 18px; height: 2px; }
 .ds-sw.cost { background: var(--fg); }

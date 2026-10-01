@@ -99,7 +99,21 @@ describe('theme', () => {
     expect(rule('.bl-axis li span')).toMatch(/overflow-wrap:\s*anywhere/); // a long figure splits rather than overflow 360 px
     expect(rule('.ub-axis li span')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
-    expect(rule('.ds-svg .ds-loss')).toMatch(/stroke-dasharray/); // the loss area differs from the profit area by more than colour
+    // The loss area differs from the profit area by more than colour: a dashed outline. It only shows when the
+    // stroke is not the fill's own colour and is not faded with it (fill-opacity, never opacity on the element).
+    const loss = rule('.ds-svg .ds-loss');
+    const paint = (prop: string, r: string) => new RegExp(`[;{ ]${prop}:\\s*([^;]+);`).exec(r)?.[1];
+    expect(loss).toMatch(/stroke-dasharray/);
+    expect(paint('fill', loss)).toBe('var(--rose)');
+    expect(paint('stroke', loss)).toBe('var(--fg)');
+    expect(paint('stroke', loss)).not.toBe(paint('fill', loss));
+    expect(paint('opacity', loss)).toBeUndefined();
+    expect(paint('fill-opacity', loss)).toBe('0.6');
+    expect(rule('.ds-svg .ds-pi')).not.toMatch(/stroke/); // the profit area has no outline
+    // the legend swatch is drawn the same way: a dashed border in a colour that is not its background
+    const sw = rule('.ds-sw.loss');
+    expect(paint('background', sw)).toBe('var(--rose)');
+    expect(paint('border', sw)).toBe('1px dashed var(--fg)');
   });
 
   it('keeps the zoomed drawings readable: join band, cost axis beside the stairs, dashed swatches, one peak line (7b-B Task 16)', () => {

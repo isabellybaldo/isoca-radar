@@ -24,6 +24,12 @@ export const F_QUIPS: Record<BasketWord, string> = {
   'nothing filled': 'Nothing filled, so there is nothing to sell back.',
 };
 
+/** Section e's closing line per engine verdict (`caught`), so it never mourns an edge the drawing shows as caught. */
+export const E_QUIPS = {
+  caught: 'Caught on paper. Whether it fills is section f.',
+  missed: 'The edge was real. It just did not wait.',
+} as const;
+
 export const SECTIONS = {
   a: {
     title: 'a · one book, twice',
@@ -48,7 +54,7 @@ export const SECTIONS = {
   },
   e: {
     title: 'e · episode and latency',
-    quip: 'The edge was real. It just did not wait.',
+    quip: E_QUIPS.caught,
     caption:
       'Teaching model: one taker at t_x gets the edge of the latest update, or nothing once the episode closed; no queue, no consumed liquidity, no unwinds, so caught is not filled: see f. Computed by arb_core::classify::classify, arb_core::episode::EpisodeTracker and sim::latency::exec_delay_ms.',
   },

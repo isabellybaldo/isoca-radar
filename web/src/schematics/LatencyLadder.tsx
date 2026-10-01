@@ -100,6 +100,9 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
   const thin = model.breakEven.kind === 'thin';
   const band = model.measured ? usBand(model.measured) : null;
   const beX = model.breakEven.kind === 'at' ? latencyX(model.breakEven.latency_ms) * W : null;
+  // The dashed box needs its legend only beside a drawn rung. With no rung at all (no epoch yet) the big line
+  // already says why, and "no account at this latency" under every slot would say it of the whole ladder.
+  const someMissing = present.length > 0 && model.columns.some((c) => c.kind === 'missing');
   return (
     <figure className="ladder" aria-label="at what latency would this pay">
       <p className="ll-kicker">break-even</p>
@@ -177,7 +180,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           <span className="ll-sw us" aria-hidden="true" />
           {usText(model.measured)}
         </li>
-        {model.columns.some((c) => c.kind === 'missing') && (
+        {someMissing && (
           <li>
             <span className="ll-sw missing" aria-hidden="true" />
             {NO_ACCOUNT_LEGEND}

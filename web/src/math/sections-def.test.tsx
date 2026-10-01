@@ -6,17 +6,17 @@ import { formatAvg, formatDecimal, formatMoneyCents, signOf } from '../lib/money
 import { basketVerdict } from '../schematics/BasketLegs';
 import { DepthStairs } from '../schematics/DepthStairs';
 import { costDomain, tickText } from '../schematics/geo';
-import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine, skipReason } from '../wasm/testEngine';
+import { describeWasm, fixtureCase, loadTestEngine } from '../wasm/testEngine';
 import type { BasketIn, BasketModel, DepthWalkIn, Engine, EpisodeIn, EpisodeModel, WalkModel } from '../wasm/types';
 import { basketInput } from './basket';
-import { F_QUIPS, SECTIONS } from './copy';
+import { E_QUIPS, F_QUIPS, SECTIONS } from './copy';
 import { F_BOOKS, F_BURST, F_START, PRESETS, exactlyOne, toTick } from './defaults';
 import { DEPTH_START, DepthSection, type DepthState, depthInput } from './sections/DepthSection';
 import { EPISODE_START, EpisodeSection, episodeInput } from './sections/EpisodeSection';
 import { LegMissSection } from './sections/LegMissSection';
 
-if (!HAVE_PKG && !WASM_REQUIRED) console.info(skipReason('sections d–f'));
-
+/** The engine's one sentence in place of a drawing (Section's Out): a polite status with the error class, or null. */
+const engineError = () => document.querySelector('p.error');
 const legItems = () => within(screen.getByRole('list', { name: 'legs' })).getAllByRole('listitem');
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
 /** What BasketLegs prints for leg i from the engine's own model (same formatters), never a retyped figure. */
@@ -29,7 +29,7 @@ const slider = (name: string) => {
 };
 const ascending = (levels: { p: string }[]) => levels.every((x, k) => k === 0 || toTick(x.p) > toTick(levels[k - 1].p));
 
-describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine (7b §8)', () => {
+describeWasm('sections d–f on the real engine (7b §8)', () => {
   let engine: Engine;
   beforeAll(async () => {
     engine = await loadTestEngine();
@@ -71,7 +71,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       const best = () => allSent<DepthWalkIn>(sent).at(-1)?.legs.reduce((a, l) => a + toTick(l.levels[0].p), 0);
       await waitFor(() => expect(best()).toBe(100));
       for (const l of (allSent<DepthWalkIn>(sent).at(-1) as DepthWalkIn).legs) expect(ascending(l.levels)).toBe(true);
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
     });
 
     it('dragging a level past its neighbour pushes the neighbours: the request stays strictly ascending (R8)', async () => {
@@ -84,7 +84,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       await waitFor(() => expect(ticks(1)).toEqual([3, 4, 5]));
       change('leg C level 2 price', '99'); // the top clamps, the first keeps its place
       await waitFor(() => expect(ticks(2)).toEqual([33, 98, 99]));
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
       for (const i of allSent<DepthWalkIn>(sent)) for (const l of i.legs) expect(ascending(l.levels), JSON.stringify(l)).toBe(true);
     });
 
@@ -152,13 +152,15 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       fireEvent.click(screen.getByRole('button', { name: 'remove a leg' }));
       await waitFor(() => expect(last().legs).toHaveLength(2));
       expect(screen.getByRole('button', { name: 'remove a leg' })).toBeDisabled();
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
       expect(last().legs.every((l) => ascending(l.levels))).toBe(true);
     });
   });
 
   describe('e', () => {
     const model = (i: EpisodeIn) => JSON.parse(engine.episode_json(JSON.stringify(i))) as EpisodeModel;
+    /** The caught line starts with these words; a miss must not have it. */
+    const CAPTURED = /^captured [0-9]+ ms after/;
     const times = (m: EpisodeModel) => `opened at ${m.open_ms} ms · our order lands at ${m.t_x} ms · closed at ${m.close_ms} ms`;
 
     it('starts from the five updates with no basket, at sp-idle', () => {
@@ -178,11 +180,40 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       const line = screen.getByText((_, el) => el?.tagName === 'P' && (el.textContent ?? '').startsWith(after));
       expect(within(line).getByText(formatMoneyCents(m.captured, { signed: true }))).toBeInTheDocument();
       expect(line).toHaveClass("m-verdict-line");
+      expect(screen.getByText(CAPTURED)).toBe(line); // the query the miss test uses finds the line when it is there
       expect(line).toHaveTextContent("on the table");
       expect(screen.getByText(times(m))).toBeInTheDocument();
       expect(screen.getByText(/caught is not filled/)).toBeInTheDocument();
       expect(container.querySelector('rect.db-bar.order')).not.toBeNull();
       expect(container.querySelector('figure.ubars')).not.toBeNull();
+    });
+
+    it('its closing line follows the engine: caught says caught on paper and points at f', () => {
+      expect(model(episodeInput(EPISODE_START)).caught).toBe(true);
+      render(<EpisodeSection engine={engine} />);
+      expect(screen.getByText('caught')).toHaveClass('m-verdict');
+      expect(screen.getByText(E_QUIPS.caught)).toHaveClass('quip');
+      expect(E_QUIPS.caught).toBe('Caught on paper. Whether it fills is section f.');
+      expect(screen.queryByText(E_QUIPS.missed)).toBeNull();
+    });
+
+    it('its closing line follows the engine: a miss says the edge did not wait', async () => {
+      render(<EpisodeSection engine={engine} />);
+      change('net ms', '1000');
+      change('match ms', '1000');
+      expect(model(episodeInput({ ...EPISODE_START, sc: { proc_ms: 5, net_ms: 1000, match_ms: 1000 } })).caught).toBe(false);
+      expect(await screen.findByText('missed')).toHaveClass('m-verdict');
+      expect(screen.getByText(E_QUIPS.missed)).toHaveClass('quip');
+      expect(E_QUIPS.missed).toBe('The edge was real. It just did not wait.');
+      expect(screen.queryByText(E_QUIPS.caught)).toBeNull();
+    });
+
+    it('an engine error shows its one sentence and no closing line', async () => {
+      const broken = { ...engine, episode_json: () => JSON.stringify({ error: 'no updates today' }) } as Engine;
+      const { container } = render(<EpisodeSection engine={broken} />);
+      expect(await screen.findByRole('status')).toHaveTextContent('no updates today');
+      expect(engineError()).toHaveTextContent('no updates today');
+      expect(container.querySelector('p.quip')).toBeNull();
     });
 
     it('1,000 ms of net and match misses it, and the exact ms say why', async () => {
@@ -193,7 +224,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       expect(m.caught).toBe(false);
       expect(await screen.findByText('missed')).toHaveClass('m-verdict');
       expect(screen.getByText(times(m))).toBeInTheDocument();
-      expect(screen.queryByText(/^captured at/)).toBeNull();
+      expect(screen.queryByText(CAPTURED)).toBeNull();
     });
 
     it('the presets are the ladder rungs: picking one moves the three sliders to its values', async () => {
@@ -216,7 +247,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       change('updates so far', '3');
       await waitFor(() => expect(last().updates).toHaveLength(3));
       for (const i of allSent<EpisodeIn>(sent)) expect(Object.keys(i)).not.toContain('gap_ms');
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
     });
   });
 
@@ -281,14 +312,16 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       await waitFor(() => expect(last().q_request).toBe('80'));
       fireEvent.click(screen.getByLabelText(/taker fees on/));
       await waitFor(() => expect(last().legs.every((l) => l.fee?.rate === '0.07')).toBe(true));
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
       expect(Object.keys(last()).sort()).toEqual(['kind', 'legs', 'q_request']);
     });
 
     it('an engine error shows its one sentence and no deadpan line', async () => {
       const broken = { ...engine, basket_json: () => JSON.stringify({ error: 'no books today' }) } as Engine;
       const { container } = render(<LegMissSection engine={broken} />);
-      expect(await screen.findByRole('alert')).toHaveTextContent('no books today');
+      expect(await screen.findByRole('status')).toHaveTextContent('no books today');
+      expect(engineError()).toHaveTextContent('no books today'); // what the "no engine error" checks in this file look for
+      expect(screen.queryByRole('alert')).toBeNull(); // a status, so a slider does not make it read out again on every step
       expect(container.querySelector('p.quip')).toBeNull();
     });
 
@@ -298,7 +331,7 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       change('leg A depth left at t_x', '0');
       const m = JSON.parse(engine.basket_json(JSON.stringify(basketInput(F_BOOKS, { ...F_START, depth: [0, 100, 100], against: [20, 20, 20] })))) as BasketModel;
       await waitFor(() => expect(legItems()[0]).toHaveTextContent(bought(m, 0, 'A')));
-      expect(screen.queryByRole('alert')).toBeNull();
+      expect(engineError()).toBeNull();
     });
   });
 });

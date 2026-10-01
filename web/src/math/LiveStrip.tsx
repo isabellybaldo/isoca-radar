@@ -6,6 +6,8 @@ import { type PublicToday, hourlyValues } from './snapshot';
 
 export const BEHIND = 'the live writer is behind';
 export const LIVE_UNAVAILABLE = 'live numbers unavailable';
+/** The strip's heading and its accessible name. "today" is the api's day, which starts at 00:00 UTC. */
+export const STRIP_TITLE = 'today (UTC) on the live scanner';
 
 /** "as of HH:MM UTC"; stale: the day too, and that the writer is behind. */
 export function asOfLine(writtenMs: number, stale: boolean): string {
@@ -20,8 +22,8 @@ export function LiveUnavailable() {
 /** Today's arbitrage episodes (NO / YES), the edge on the table, the day by UTC hour, and when it was written. */
 export function LiveStrip({ today, writtenMs, stale }: { today: PublicToday; writtenMs: number; stale: boolean }) {
   return (
-    <section className="m-live" aria-label="today on the live scanner">
-      <p className="m-live-k dim">today on the live scanner</p>
+    <section className="m-live" aria-label={STRIP_TITLE}>
+      <p className="m-live-k dim">{STRIP_TITLE}</p>
       <p className="m-live-n">
         <span className="m-big">{today.no}</span> NO · <span className="m-big">{today.yes}</span> YES <span className="dim">arbitrage episodes</span>
       </p>

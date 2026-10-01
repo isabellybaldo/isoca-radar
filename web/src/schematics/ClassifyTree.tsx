@@ -23,6 +23,10 @@ const KIND: Record<string, string> = {
   yes_basket: 'YES basket', yes_basket_incomplete: 'YES basket, incomplete set', no_basket: 'NO basket', implication: 'implication',
 };
 const REALIZATION: Record<string, string> = { settlement: 'held to settlement', converter: 'via the converter', not_arbitrage: 'not arbitrage' };
+/** The words on the money line when the engine's realization is `not_arbitrage`. Only an incomplete YES basket
+ *  gets there (arb_core::detect: the set is augmented, or a leg is halted, placeholder or other): an outcome
+ *  outside the set can win and the basket then pays nothing. Section b says the same in the same words. */
+export const NOT_RISK_FREE = 'not risk-free';
 
 /** Where the path ends: the kind and how it is realized, or "nothing". */
 export function endText(m: ClassifyModel): string {
@@ -56,7 +60,8 @@ export function ClassifyTree({ model }: { model: ClassifyModel }) {
       <p className="cl-end">{endText(model)}</p>
       {model.net !== null && (
         <p className="cl-net">
-          net Π <Money value={model.net} signed cents /> on the table · gross <Money value={model.gross} signed cents />
+          net Π <Money value={model.net} signed cents /> on the table
+          {model.realization === 'not_arbitrage' && `, ${NOT_RISK_FREE}`} · gross <Money value={model.gross} signed cents />
           {model.q_star !== null && ` · Q* ${model.q_star}`}
         </p>
       )}
