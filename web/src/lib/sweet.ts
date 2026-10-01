@@ -68,9 +68,10 @@ const BUCKET_ORDER: Partial<Record<SweetDim, string[]>> = {
 
 /** "sports", "2 legs", "1–7 days", "00–04 UTC". */
 export function bucketText(dim: string, bucket: string): string {
-  if (dim === 's') return BUCKET_TEXT[bucket] ?? `${bucket.replace('-', '–')} legs`;
+  const known = Object.hasOwn(BUCKET_TEXT, bucket) ? BUCKET_TEXT[bucket] : undefined;
+  if (dim === 's') return known ?? `${bucket.replace('-', '–')} legs`;
   if (dim === 'hour') return `${bucket.replace('-', '–')} UTC`;
-  return BUCKET_TEXT[bucket] ?? bucket;
+  return known ?? bucket;
 }
 
 export function footnote(m: number): string {

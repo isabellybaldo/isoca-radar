@@ -1,3 +1,6 @@
+// Vitest runs on Node: node:fs exists at runtime (no @types/node installed), as in theme.test.ts.
+// @ts-ignore
+import { readFileSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { ladderModel } from '../lib/ladder';
@@ -9,18 +12,11 @@ import { FRESH_MS, freshness, hourlyValues, parseSnapshot, publicToLadder } from
 /** What fetch().json() hands over: plain JSON (undefined fields gone). */
 const json = (x: unknown): unknown => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
 
-/** Copied from `bins/api/src/public.rs` (`WHITELIST`): every key path the public file may carry. */
-const WHITELIST = [
-  'v', 'written_ms', 'ladder', 'ladder.epoch', 'ladder.start_ms', 'ladder.as_of_ms', 'ladder.break_even', 'ladder.break_even.kind',
-  'ladder.break_even.latency_ms', 'ladder.break_even.direction', 'ladder.break_even.not_monotone', 'ladder.measured',
-  'ladder.measured.latency_ms', 'ladder.markets_status', 'ladder.rungs', 'ladder.rungs[].scenario', 'ladder.rungs[].latency_ms',
-  'ladder.rungs[].extra', 'ladder.rungs[].n_exec', 'ladder.rungs[].n_leg_risk', 'ladder.rungs[].n_missed', 'ladder.rungs[].gains',
-  'ladder.rungs[].leg_risk', 'ladder.rungs[].settle', 'ladder.rungs[].unrealized', 'ladder.rungs[].net', 'ladder.markets',
-  'ladder.markets[].side', 'ladder.markets[].scenario', 'ladder.markets[].fee_bips', 'ladder.markets[].latency_ms',
-  'ladder.markets[].dimension', 'ladder.markets[].bucket', 'ladder.markets[].label', 'ladder.markets[].n_exec',
-  'ladder.markets[].clusters', 'ladder.markets[].mean', 'ladder.markets[].lo', 'ladder.markets[].hi', 'today', 'today.day_start_ms',
-  'today.arb', 'today.no', 'today.yes', 'today.edge_budget100', 'today.hourly', 'today.hourly[].hour', 'today.hourly[].arb',
-];
+declare const process: { cwd(): string };
+
+/** `WHITELIST` read from `bins/api/src/public.rs` itself (every key path the public file may carry), not a hand copy. */
+const rust: string = readFileSync(`${process.cwd()}/../bins/api/src/public.rs`, 'utf8');
+const WHITELIST: string[] = [...(/const WHITELIST: \[&str; \d+\] = \[([\s\S]*?)\n {4}\];/.exec(rust)?.[1] ?? '').matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 
 /** The same walk as public.rs `paths`: objects join with ".", array elements with "[]". */
 function keyPaths(v: unknown, at: string, out: Set<string>): Set<string> {
@@ -44,6 +40,7 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
 
   it('accepts the realistic sample, whose key paths are exactly the 48 of the api whitelist (R18)', () => {
     expect(WHITELIST).toHaveLength(48);
+    expect(new Set(WHITELIST).size).toBe(48);
     const raw: unknown = JSON.parse(sampleText);
     expect([...keyPaths(raw, '', new Set())].sort()).toEqual([...WHITELIST].sort());
     const s = parseSnapshot(raw);
@@ -62,6 +59,51 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
     expect(JSON.stringify(s)).not.toMatch(/account_id|host|vps-kvm2/);
   });
 
+  it('accepts every legal value on the accept side', () => {
+    const b = snapshotFixture();
+    const L = b.ladder;
+    const ok = (x: unknown) => expect(parseSnapshot(json(x))).not.toBeNull();
+    ok({ ...b, ladder: { ...L, measured: null, start_ms: null, as_of_ms: null } });
+    ok({ ...b, today: { ...b.today, edge_budget100: null, hourly: [] } });
+    ok({ ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], latency_ms: null }] } });
+    for (const be of [{ kind: 'thin' }, { kind: 'all' }, { kind: 'none' }, { kind: 'at', latency_ms: 0, direction: 'pays_beyond' },
+      { kind: 'at', latency_ms: 70, direction: 'loses_beyond', not_monotone: true }, { kind: 'at', latency_ms: 70, direction: 'loses_beyond', not_monotone: false }]) {
+      ok({ ...b, ladder: { ...L, break_even: be } });
+    }
+    for (const label of ['candidate', 'negative', 'inconclusive', 'thin', 'not_tested', 'dead_on_paper']) {
+      ok({ ...b, ladder: { ...L, markets: [{ ...L.markets[0], label }] } });
+    }
+    for (const markets_status of ['live', 'warming', 'under_review', 'missing']) ok({ ...b, ladder: { ...L, markets_status } });
+    for (const bucket of ['all', 'untagged', 'other', '1-7', '30-90', '90-365', 'lt1', 'ge365', '00-04']) {
+      ok({ ...b, ladder: { ...L, markets: [{ ...L.markets[0], bucket }] } });
+    }
+    for (const scenario of ['rung-0', 'colo-idle', 'sp-idle-nodelay', 'sp-burst']) {
+      ok({ ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], scenario }] } });
+    }
+  });
+
+  it('drops a market row that does not validate and keeps the snapshot (the writer does the same)', () => {
+    const b = snapshotFixture();
+    const L = b.ladder;
+    const good = L.markets[0];
+    const badRows = [
+      { ...good, label: undefined }, { ...good, label: 'great' }, { ...good, dimension: 'days' }, { ...good, clusters: 1.5 },
+      { ...good, mean: 0.4 }, { ...good, side: 'yes' }, { ...good, fee_bips: 10 }, { ...good, bucket: '__proto__' },
+      { ...good, bucket: 'Constructor' }, { ...good, bucket: 'x'.repeat(50_000) }, { ...good, scenario: '__proto__' }, 'junk', null,
+    ];
+    const s = parseSnapshot(json({ ...b, ladder: { ...L, markets: [...badRows, good] } }));
+    expect(s).not.toBeNull();
+    expect(s?.ladder.markets).toEqual([good]);
+    expect(s?.ladder.rungs).toEqual(L.rungs);
+    expect(s?.today).toEqual(b.today);
+  });
+
+  it('keeps at most 126 market rows', () => {
+    const b = snapshotFixture();
+    const rows = Array.from({ length: 130 }, (_, i) => ({ ...b.ladder.markets[0], bucket: `b${i}` }));
+    expect(parseSnapshot(json({ ...b, ladder: { ...b.ladder, markets: rows } }))?.ladder.markets).toEqual(rows.slice(0, 126));
+  });
+
   it('rejects every shape the page cannot draw (review focus 1, R15)', () => {
     const b = snapshotFixture();
     const L = b.ladder;
@@ -77,6 +119,18 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
       ['a rung whose gains is a JSON number', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], gains: 3.8 }] } }],
       ['a rung whose net is not a decimal', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], net: '1e3' }] } }],
       ['a rung without a scenario', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], scenario: undefined }] } }],
+      ['a rung with a __proto__ scenario', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], scenario: '__proto__' }] } }],
+      ['a rung with a 50,000-char scenario', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], scenario: 'a'.repeat(50_000) }] } }],
+      ['a negative n_exec', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], n_exec: -1 }] } }],
+      ['a negative latency', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], latency_ms: -1 }] } }],
+      ['an unsafe integer', { ...b, ladder: { ...L, epoch: 2 ** 53 } }],
+      ['a negative start_ms', { ...b, ladder: { ...L, start_ms: -1 } }],
+      ['a decimal of 41 chars', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], net: `1.${'0'.repeat(39)}` }] } }],
+      ['duplicate rung scenarios', { ...b, ladder: { ...L, rungs: [L.rungs[0], L.rungs[0]] } }],
+      ['17 rungs', { ...b, ladder: { ...L, rungs: Array.from({ length: 17 }, (_, i) => ({ ...L.rungs[0], scenario: `r${i}` })) } }],
+      ['25 hourly entries', { ...b, today: { ...b.today, hourly: Array.from({ length: 25 }, () => ({ hour: 0, arb: 1 })) } }],
+      ['an hourly entry at hour 24', { ...b, today: { ...b.today, hourly: [{ hour: 24, arb: 1 }] } }],
+      ['markets not a list', { ...b, ladder: { ...L, markets: {} } }],
       ['a rung with 1.5 executed', { ...b, ladder: { ...L, rungs: [{ ...L.rungs[0], n_exec: 1.5 }] } }],
       ['a fractional epoch', { ...b, ladder: { ...L, epoch: 1.5 } }],
       ['an unknown break_even', { ...b, ladder: { ...L, break_even: { kind: 'maybe' } } }],
@@ -87,13 +141,6 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
       ['break_even at with a non-boolean not_monotone', { ...b, ladder: { ...L, break_even: { kind: 'at', latency_ms: 70, direction: 'loses_beyond', not_monotone: 'yes' } } }],
       ['a fractional measured latency', { ...b, ladder: { ...L, measured: { latency_ms: 1.5 } } }],
       ['an unknown markets_status', { ...b, ladder: { ...L, markets_status: 'busy' } }],
-      ['a market row without a label', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], label: undefined }] } }],
-      ['a market row with an unknown label', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], label: 'great' }] } }],
-      ['a market row of another dimension', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], dimension: 'days' }] } }],
-      ['a market row with 1.5 clusters', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], clusters: 1.5 }] } }],
-      ['a market row whose mean is a number', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], mean: 0.4 }] } }],
-      ['a YES-side market row', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], side: 'yes' }] } }],
-      ['a market row with a fee', { ...b, ladder: { ...L, markets: [{ ...L.markets[0], fee_bips: 10 }] } }],
       ['hourly not a list', { ...b, today: { ...b.today, hourly: {} } }],
       ['an hourly entry with a fractional hour', { ...b, today: { ...b.today, hourly: [{ hour: 0.5, arb: 1 }] } }],
       ['edge as a JSON number', { ...b, today: { ...b.today, edge_budget100: 41.37 } }],
@@ -101,9 +148,11 @@ describe('parseSnapshot (spec 7b §5.1, §6.3)', () => {
     for (const [name, x] of bad) expect(parseSnapshot(json(x)), name).toBeNull();
   });
 
-  it('a written_ms in the future is fresh; exactly 30 min is fresh, one ms more is stale (review focus 1)', () => {
+  it('a few minutes of clock skew is fresh; more than 30 min either way is stale (review focus 1)', () => {
     const now = 1_790_000_000_000;
     expect(freshness({ written_ms: now + 60_000 }, now)).toBe('fresh');
+    expect(freshness({ written_ms: now + FRESH_MS }, now)).toBe('fresh');
+    expect(freshness({ written_ms: now + FRESH_MS + 1 }, now)).toBe('stale');
     expect(freshness({ written_ms: now - FRESH_MS }, now)).toBe('fresh');
     expect(freshness({ written_ms: now - FRESH_MS - 1 }, now)).toBe('stale');
   });

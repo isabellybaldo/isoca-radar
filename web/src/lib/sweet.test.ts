@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { sweetFixture, sweetRow } from '../test/fixtures';
 import type { SweetRow, SweetSeries } from '../api/types';
 import {
-  FEW_TRADES, GLYPHS, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, candidateCount, cellDetail, feeLine, footnote, glyphKey, grid,
+  FEW_TRADES, GLYPHS, LABEL_TEXT, NOTHING_PAYS, SWEET_CAVEAT, bestCandidate, bucketText, candidateCount, cellDetail, feeLine, footnote, glyphKey, grid,
   gridNote, interval, ladderGrid, nothingPays, recomputingText, rowName, rowsFor,
 } from './sweet';
 
@@ -142,5 +142,15 @@ describe('ladder grid (spec 7a §8)', () => {
     );
     expect(cellDetail({ dim: 'all', bucket: 'all' }, { scenario: 'rung-0', latency_ms: 0 }, undefined)).toBe('all · rung-0 · no attempts in this slice');
     expect(gridNote({ m: 364, z: '3.62' })).toBe('z = 3.62 across 364 rows tested: the more rows, the wider each interval.');
+  });
+});
+
+describe('bucketText', () => {
+  it('never returns an inherited Object property for a bucket named like one', () => {
+    for (const b of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      for (const dim of ['category', 'days', 's']) expect(typeof bucketText(dim, b)).toBe('string');
+      expect(bucketText('category', b)).toBe(b);
+    }
+    expect(bucketText('days', '1-7')).toBe('1–7 days');
   });
 });
