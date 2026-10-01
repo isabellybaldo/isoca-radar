@@ -1,4 +1,4 @@
-import { type DurationRow, durationText } from '../explain/models';
+import { type DurationRow, durationText } from './models';
 
 const W = 300;
 const H = 10;

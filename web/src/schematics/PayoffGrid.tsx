@@ -1,4 +1,4 @@
-import type { PayoffModel } from '../explain/models';
+import type { PayoffModel } from './models';
 
 /** Parent spec §5.7 (b) as an HTML table (no SVG, nothing to distort): 1 where a token pays $1, the
  *  basket row, and ✗ on a column where the basket pays less than it guarantees. */

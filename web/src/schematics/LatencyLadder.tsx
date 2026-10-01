@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import type { LadderRung } from '../api/types';
-import { EmptyState } from '../components/EmptyState';
+import { Empty } from './Empty';
 import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
@@ -41,8 +41,8 @@ const geo = (v: string) => {
 
 function Markets({ model }: { model: LadderModel }) {
   const { status, rows } = model.markets;
-  if (status === 'under_review') return <EmptyState text={MARKETS_RECOMPUTING} />;
-  if (status === 'missing') return <EmptyState text={MARKETS_MISSING} />;
+  if (status === 'under_review') return <Empty text={MARKETS_RECOMPUTING} />;
+  if (status === 'missing') return <Empty text={MARKETS_MISSING} />;
   return (
     <>
       <p className="dim">{MARKETS_CAPTION}</p>
@@ -53,7 +53,7 @@ function Markets({ model }: { model: LadderModel }) {
 }
 
 function LadderTable({ rungs }: { rungs: LadderRung[] }) {
-  if (rungs.length === 0) return <EmptyState text={NO_RUNGS} />;
+  if (rungs.length === 0) return <Empty text={NO_RUNGS} />;
   return (
     <div className="scroll">
       <table>
