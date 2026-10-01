@@ -152,6 +152,11 @@ As 09-27 §4, with one more function. **All book inputs are YES-book levels**, a
   ``Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))``
 
   Its middlewares (per-IP rate and in-flight limits, `ct-sec`, the math CSP) and priority 1000 apply as in 09-27. `connect-src 'self'` allows the fetch.
+  - **In-flight limit 8, not 4 (amended 2026-10-01, overrides 09-27 §5.3's `inflightreq.amount=4`).** A cold load fetches the js and css together, then the wasm and `public.json` together, so 4 sits right at the cap (plus a retry or the next tab). 8 clears a normal load and still holds one IP to 8 concurrent requests. The rate limit (5/s, burst 20) is unchanged.
+  - **Headers before limits (amended 2026-10-01, overrides 09-27 §5.3's middleware order).** The order is `ct-sec`, `ct-math-csp`, `ct-math-rl`, `ct-math-if`, so the 429 that Traefik's own limiters write also carries the security headers and the CSP.
+- **Fonts are the one third party (stated 2026-10-01).**
+  - The public page loads its fonts from Google Fonts (`fonts.googleapis.com` for the stylesheet, `fonts.gstatic.com` for the files), so a visitor's IP address and user agent reach Google. No `Referer` goes with them: `ct-sec` sets `Referrer-Policy: same-origin`. There is no other third party.
+  - This is accepted for now. Self-hosting the three font families (IBM Plex Mono, Press Start 2P, VT323; the CSP then becomes `style-src 'self'; font-src 'self'`) is an open owner decision.
 - **A separate nginx server for the public router (amended 2026-10-01, overrides 09-27 §5.3's `service = ct-web`).**
   - The public paths are served by their own nginx `server` on port 8081. It holds only the three locations (`= /math`, `/math-assets/`, `= /math-data/public.json`) and `location / { return 404; }`.
   - The `ct-math` router points at its own Traefik service, `ct-math`, on that port. The login-gated server has no math locations.

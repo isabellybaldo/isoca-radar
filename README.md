@@ -48,9 +48,12 @@ cargo install --locked --version "$(sh scripts/wasm-bindgen-version.sh)" wasm-bi
 # Build the package into web/src/wasm/pkg (PROFILE=dev for the test loop; the default is release, for the /math build):
 PROFILE=dev sh scripts/build-wasm.sh
 (cd web && WASM_REQUIRED=1 npm test)   # also runs the native = WASM parity test (skipped when pkg is missing)
+
+docker compose --profile core up -d  # postgres, migrate, scanner, analyze, compact
 ```
 
 The dashboard (`compose.web.yml`: api, web, oauth2-proxy) is VPS-only, behind Traefik and a login.
+Only `/math` (with its assets and its snapshot file) is public, with no login; everything else stays behind the login.
 Deploys follow the runbooks in `docs/superpowers/runbooks/`.
 
 Copy `.env.example` to `.env` first. See [PROJECT.md](PROJECT.md) for status and roadmap.
