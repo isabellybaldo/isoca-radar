@@ -3,9 +3,9 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { checkHonesty } from '../../explain/honesty';
 import { CROSSED } from '../../schematics/MirrorBooks';
 import { describeWasm, loadTestEngine } from '../../wasm/testEngine';
-import type { Engine } from '../../wasm/types';
+import type { Engine, EngineFn } from '../../wasm/types';
 import { CH3_COUNT, CH7_EXTRAS, CHAPTERS, TAKE } from './copy';
-import { CH3_LABELS } from './presets';
+import { CH1, CH2, CH3, CH3_LABELS, CH5, CH6 } from './presets';
 import { Story } from './Story';
 
 const sec = (c: HTMLElement, id: string) => c.querySelector(`section#${id}`) as HTMLElement;
@@ -41,8 +41,10 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
   });
   const draw = () => render(<Story engine={engine} strip={<p>STRIP</p>} ladder={<p>LADDER</p>} ladderDrawn />).container;
 
-  it('chapters 1 to 6 each have a named two-option switch on its first option, a drawing and a takeaway; chapter 7 has no switch', () => {
+  it('chapters 1 to 6 each have their heading and lead, a named two-option switch on its first option, a drawing and a takeaway; chapter 7 has no switch', () => {
     const c = draw();
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(CHAPTERS.map((ch) => `${ch.n} ${ch.question}`));
+    for (const ch of CHAPTERS) expect(within(sec(c, ch.id)).getByText(ch.lead), ch.id).toBeInTheDocument();
     for (const ch of CHAPTERS.slice(0, 6)) {
       const s = sec(c, ch.id);
       expect(within(s).getByRole('group', { name: ch.switchLabel }), ch.id).toBeInTheDocument();
@@ -50,6 +52,9 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
       if (ch.options !== null) expect(switchOf(s).map((b) => b.textContent), ch.id).toEqual([...ch.options]);
       expect(s.querySelector('figure, svg'), ch.id).not.toBeNull();
       expect(take(s), ch.id).not.toBeNull();
+      second(s);
+      expect(switchOf(s).map((b) => b.getAttribute('aria-pressed')), ch.id).toEqual(['false', 'true']);
+      expect(within(s).getByText(ch.lead), ch.id).toBeInTheDocument();
     }
     expect(within(sec(c, 's7')).queryByRole('group')).toBeNull();
   });
@@ -107,10 +112,13 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
     expect(take(s)).toBe(TAKE.ch5(false));
   });
 
-  it('chapter 6: filled, then caught, each with the matching line', () => {
+  it('chapter 6: filled, then caught, each with the matching line, and the drawing changes', () => {
     const s = sec(draw(), 's6');
+    const before = s.querySelector('figure')?.outerHTML;
+    expect(before).toBeDefined();
     expect(take(s)).toBe(TAKE.ch6('filled'));
     second(s);
+    expect(s.querySelector('figure')?.outerHTML).not.toBe(before);
     expect(take(s)).toBe(TAKE.ch6('caught'));
   });
 
@@ -153,14 +161,43 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
     expect(c.querySelectorAll('a, nav, [style], svg text')).toHaveLength(0);
   });
 
-  it('review focus 3: switching one chapter moves no other', () => {
+  it('review focus 3: switching one chapter moves no other, for each of the six', () => {
     const c = draw();
-    const others = () => ['s1', 's2', 's4', 's5', 's6', 's7'].map((id) => sec(c, id).innerHTML);
-    const before = others();
-    const own = sec(c, 's3').innerHTML;
-    second(sec(c, 's3'));
-    expect(sec(c, 's3').innerHTML).not.toBe(own);
-    expect(others()).toEqual(before);
+    const ids = CHAPTERS.map((ch) => ch.id);
+    for (const id of ids.slice(0, 6)) {
+      const others = () => ids.filter((x) => x !== id).map((x) => sec(c, x).innerHTML);
+      const before = others();
+      const own = sec(c, id).innerHTML;
+      second(sec(c, id));
+      expect(sec(c, id).innerHTML, id).not.toBe(own);
+      expect(others(), id).toEqual(before);
+    }
+  });
+
+  it('the takeaway follows the answer of the engine, not the switch: an engine that always answers for the second state', () => {
+    // each export ignores what it is asked and answers for its chapter's second preset, so the switch (on its
+    // first option) and the engine's flag disagree
+    const fixed = (fn: EngineFn, input: unknown) => () => engine[fn](JSON.stringify(input));
+    const swapped: Engine = {
+      ...engine,
+      mirror_json: fixed('mirror_json', CH1[1]),
+      payoff_json: fixed('payoff_json', CH2[1]),
+      classify_json: fixed('classify_json', CH3[1]),
+      episode_json: fixed('episode_json', CH5[1]),
+      basket_json: fixed('basket_json', CH6[1]),
+    };
+    const { container } = render(<Story engine={swapped} strip={null} ladder={null} ladderDrawn={false} />);
+    const want: [string, string][] = [
+      ['s1', TAKE.ch1(true)], ['s2', TAKE.ch2(true)], ['s3', TAKE.ch3(true)], ['s5', TAKE.ch5(false)], ['s6', TAKE.ch6('caught')],
+    ];
+    for (const [id, line] of want) {
+      const s = sec(container, id);
+      expect(switchOf(s).map((b) => b.getAttribute('aria-pressed')), id).toEqual(['true', 'false']);
+      expect(take(s), id).toBe(line);
+      second(s); // the switch moves, the engine's answer does not: the same line stays
+      expect(switchOf(s).map((b) => b.getAttribute('aria-pressed')), id).toEqual(['false', 'true']);
+      expect(take(s), id).toBe(line);
+    }
   });
 
   it('review focus 1: an engine that answers with an error shows its sentence and no takeaway', () => {
