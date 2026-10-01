@@ -42,12 +42,12 @@ the published papers. **Paper only: there is no code path to an exchange.**
 cargo test --workspace               # Rust tests (the store/compact/api/analyze DB tests need a Postgres)
 cd web && npm ci && npm test         # dashboard tests
 
-# The /math page runs arb-wasm in the browser. One-time setup, then build the package into web/src/wasm/pkg:
+# The /math page runs arb-wasm in the browser (run from the repo root). One-time setup:
 rustup target add wasm32-unknown-unknown
 cargo install --locked --version "$(sh scripts/wasm-bindgen-version.sh)" wasm-bindgen-cli   # must match Cargo.lock
-PROFILE=dev sh scripts/build-wasm.sh   # the test loop; without PROFILE it builds release (what `npm run build` needs)
-cd web && WASM_REQUIRED=1 npm test     # also runs the native = WASM parity test (skipped when pkg is missing)
-docker compose --profile core up -d  # postgres, migrate, scanner, analyze, compact
+# Build the package into web/src/wasm/pkg (PROFILE=dev for the test loop; the default is release, for the /math build):
+PROFILE=dev sh scripts/build-wasm.sh
+(cd web && WASM_REQUIRED=1 npm test)   # also runs the native = WASM parity test (skipped when pkg is missing)
 ```
 
 The dashboard (`compose.web.yml`: api, web, oauth2-proxy) is VPS-only, behind Traefik and a login.

@@ -6,17 +6,17 @@
 # It checks the wasm-bindgen CLI against Cargo.lock and never installs anything.
 set -eu
 cd "$(dirname "$0")/.."
-WANT=$(sh scripts/wasm-bindgen-version.sh)
-if [ -z "$WANT" ]; then
-  echo "build-wasm: no wasm-bindgen in Cargo.lock (is 7b-A merged?)" >&2
-  exit 1
-fi
+WANT=$(sh scripts/wasm-bindgen-version.sh) || exit 1
 HAVE=$(wasm-bindgen --version 2>/dev/null | awk '{ print $2 }')
 if [ "$HAVE" != "$WANT" ]; then
   echo "build-wasm: the wasm-bindgen CLI is '${HAVE:-missing}', Cargo.lock pins $WANT: cargo install wasm-bindgen-cli --locked --version $WANT" >&2
   exit 1
 fi
 PROFILE="${PROFILE:-release}"
+if [ "$PROFILE" != release ] && [ "$PROFILE" != dev ]; then
+  echo "build-wasm: PROFILE must be release or dev, got '$PROFILE'" >&2
+  exit 1
+fi
 if [ "$PROFILE" = release ]; then
   export CARGO_PROFILE_RELEASE_OPT_LEVEL="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-s}"
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-true}"

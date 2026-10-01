@@ -53,6 +53,7 @@ export interface ClassifyModel {
   q_star: Dec | null;
 }
 
+/** levels: the asks of the outcome being bought, cheapest first (not YES-book levels). */
 export interface DepthWalkIn { rule: 'yes' | 'no'; legs: { levels: Level[]; fee: Fee | null }[] }
 /** payoff per step: 1 for the YES rule; for the nested NO rule, active legs − 1. */
 export interface WalkStep { q_from: Dec; q_to: Dec; cost: Dec; payoff: Dec; profitable: boolean }
@@ -61,7 +62,8 @@ export interface WalkModel { steps: WalkStep[]; q_star: Dec; pi: Dec; pi_gross: 
 export interface ScenarioIn { proc_ms: number; net_ms: number; match_ms: number; honor_seconds_delay: boolean }
 export interface EpisodeIn {
   kind: 'yes' | 'no';
-  gap_ms: number;
+  /** Optional in Rust (default 30000); it changes no output today, so the page omits it. */
+  gap_ms?: number;
   updates: { t_ms: number; legs: LegIn[] }[];
   scenario: ScenarioIn;
   /** 0–10 s, or null. */
