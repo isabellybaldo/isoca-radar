@@ -80,6 +80,32 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     await waitFor(() => expect(screen.queryByText(CROSSED)).toBeNull());
   });
 
+  it('a: the price axis is zoomed onto the book at the start and when crossed, and follows a level dragged far away (Task 16 V1)', async () => {
+    const { container } = render(<MirrorSection engine={engine} />);
+    const axis = () => [...container.querySelectorAll('.mb-axis li')].map((li) => li.textContent);
+    expect(axis()).toEqual(['0.40', '0.50', '0.60']); // levels 0.51–0.58 and their mirrors 0.42–0.49, two ticks of room
+    fireEvent.click(screen.getByRole('button', { name: 'cross the book' }));
+    expect(await screen.findByText(CROSSED)).toBeInTheDocument();
+    expect(axis()).toEqual(['0.40', '0.50', '0.60']);
+    change('YES bid 4 price', '5');
+    await waitFor(() => expect(axis()).toEqual(['0.03', '0.50', '0.97']));
+    expect(container.querySelectorAll('g.mb-yes rect')).toHaveLength(8);
+  });
+
+  it('a and c: a slider under a legend does not repeat it; the full name stays the accessible one (Task 16 V5)', () => {
+    const shown = (name: string) => {
+      const el = screen.getByLabelText(name);
+      return { text: el.closest('label')?.querySelector('span')?.textContent, group: el.closest('fieldset')?.querySelector('legend')?.textContent };
+    };
+    const a = render(<MirrorSection engine={engine} />);
+    expect(shown('YES bid 1 price')).toEqual({ text: 'price', group: 'YES bid 1' });
+    expect(shown('YES ask 4 price')).toEqual({ text: 'price', group: 'YES ask 4' });
+    a.unmount();
+    render(<ClassifySection engine={engine} />);
+    expect(shown('leg A best bid')).toEqual({ text: 'best bid', group: 'leg A' });
+    expect(shown('leg C best ask')).toEqual({ text: 'best ask', group: 'leg C' });
+  });
+
   it("a: a size of 0 is the engine's sentence (fixture size-zero), and the page keeps working (review focus 2)", async () => {
     const sentence = (JSON.parse(fixtureCase('mirror_json', 'size-zero').output) as { error: string }).error;
     const { container } = render(<MirrorSection engine={engine} />);

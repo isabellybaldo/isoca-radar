@@ -31,8 +31,8 @@ export function LegMissSection({ engine, children }: { engine: Engine; children?
           {names.map((n, i) => (
             <fieldset key={n} className="m-leg">
               <legend>{`leg ${n}`}</legend>
-              <Range label={`leg ${n} depth left at t_x`} min={0} max={100} step={5} value={st.depth[i]} show={`${st.depth[i]}%`} onChange={(v) => setSt((s) => ({ ...s, depth: upd(s.depth, i, v) }))} />
-              <Range label={`leg ${n} unwind book against us`} min={0} max={20} value={st.against[i]} show={`${st.against[i]} ticks`} onChange={(v) => setSt((s) => ({ ...s, against: upd(s.against, i, v) }))} />
+              <Range label={`leg ${n} depth left at t_x`} text="depth left at t_x" min={0} max={100} step={5} value={st.depth[i]} show={`${st.depth[i]}%`} onChange={(v) => setSt((s) => ({ ...s, depth: upd(s.depth, i, v) }))} />
+              <Range label={`leg ${n} unwind book against us`} text="unwind book against us" min={0} max={20} value={st.against[i]} show={`${st.against[i]} ticks`} onChange={(v) => setSt((s) => ({ ...s, against: upd(s.against, i, v) }))} />
             </fieldset>
           ))}
           <Range label="shares to buy" min={5} max={200} step={5} value={st.q} onChange={(q) => setSt((s) => ({ ...s, q }))} />

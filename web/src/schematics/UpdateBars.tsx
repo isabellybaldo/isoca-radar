@@ -4,7 +4,8 @@ import { PLOT_W, geoPos } from './geo';
 const H = 48;
 
 /** Parent 5.7 (e): the net edge classify found at each update (none: no bar), the first peak marked. The update
- *  names, times and amounts are HTML under the drawing (the SVG stretches). */
+ *  names, times and amounts are HTML under the drawing (the SVG stretches). "peak" has a line of its own that
+ *  every column keeps, so the names, times and amounts of all the updates sit on the same lines. */
 export function UpdateBars({ updates, peakMs }: { updates: { t_ms: number; net: string | null }[]; peakMs: number | null }) {
   const vals = updates.map((u) => geoPos(u.net ?? '0'));
   const max = Math.max(0, ...vals) || 1;
@@ -23,7 +24,8 @@ export function UpdateBars({ updates, peakMs }: { updates: { t_ms: number; net: 
       <ol className="ub-axis" aria-label="updates">
         {updates.map((u, i) => (
           <li key={`${i}|${u.t_ms}`}>
-            <b>{i === peak ? `u${i + 1} · peak` : `u${i + 1}`}</b>
+            <span className="ub-mark">{i === peak ? 'peak' : ''}</span>
+            <b>{`u${i + 1}`}</b>
             <span>{`${u.t_ms} ms`}</span>
             <span>{u.net === null ? 'no edge' : <Money value={u.net} signed cents />}</span>
           </li>

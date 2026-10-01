@@ -34,8 +34,11 @@ export function Out<T>({ out, children }: { out: T | EngineError; children: (m: 
   return isError(out) ? <p className="error" role="alert">{out.error}</p> : <>{children(out)}</>;
 }
 
-export function Range({ label, min, max, step = 1, value, show, disabled, onChange }: {
+/** `label` is the slider's full accessible name. Inside a group whose legend already says the first words
+ *  ("leg A"), `text` is the shorter text shown beside it. */
+export function Range({ label, text, min, max, step = 1, value, show, disabled, onChange }: {
   label: string;
+  text?: string;
   min: number;
   max: number;
   step?: number;
@@ -46,7 +49,7 @@ export function Range({ label, min, max, step = 1, value, show, disabled, onChan
 }) {
   return (
     <label className="m-range">
-      <span>{label}</span>
+      <span>{text ?? label}</span>
       <input type="range" aria-label={label} aria-valuetext={show ?? String(value)} disabled={disabled} min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
       <span className="num">{show ?? String(value)}</span>
     </label>

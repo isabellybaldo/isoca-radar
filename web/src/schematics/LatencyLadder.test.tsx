@@ -4,12 +4,14 @@ import type { Ladder, LadderRung, SweetRow } from '../api/types';
 import { LADDER, type LadderIn, NOT_MONOTONE, type Rung, SLOTS, ladderModel, slotX } from '../lib/ladder';
 import type { GridRow } from '../lib/sweet';
 import { ladderFixture, ladderLiveFixture } from '../test/fixtures';
-import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING } from './LatencyLadder';
+import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING, NO_ACCOUNT_LEGEND, NO_ACCOUNT_MARK } from './LatencyLadder';
 
 const W = 700;
 const draw = (o: Partial<Ladder> = {}) => render(<LatencyLadder model={ladderModel(ladderFixture(o))} />);
 const num = (el: Element | null, a: string) => Number(el?.getAttribute(a));
 const rungItems = () => within(screen.getByRole('list', { name: 'rungs' })).getAllByRole('listitem');
+/** What a sighted reader gets under a rung: the text of every line that is not for screen readers only. */
+const shown = (li: HTMLElement) => [...li.children].filter((c) => !c.classList.contains('ll-sr')).map((c) => c.textContent ?? '');
 
 describe('LatencyLadder', () => {
   it('says the break-even big, marks it between its two rungs, and labels every rung in HTML', () => {
@@ -108,10 +110,51 @@ describe('LatencyLadder', () => {
     const { container } = draw({ rungs: ladderFixture().rungs.filter((r) => r.scenario !== 'rung-100'), break_even: { kind: 'thin' } });
     expect(container.querySelector('rect.ll-missing[data-scenario="rung-100"]')).not.toBeNull();
     expect(container.querySelector('g[data-scenario="rung-100"]')).toBeNull();
-    expect(screen.getByText('no account')).toBeInTheDocument();
     expect(screen.getByText('a rung has no account yet')).toHaveClass('ll-big');
     expect(screen.queryByText('too few trades yet')).toBeNull();
     expect(rungItems()).toHaveLength(7);
+  });
+
+  it('a rung with no account shows a short mark under its dashed box; the legend and the accessible text keep the words (Task 16 V3)', () => {
+    draw({ rungs: ladderFixture().rungs.filter((r) => r.scenario !== 'rung-100'), break_even: { kind: 'thin' } });
+    const li = rungItems()[3];
+    expect(NO_ACCOUNT_MARK).toBe('–');
+    expect(shown(li)).toEqual(['100', NO_ACCOUNT_MARK]);
+    expect(within(li).getByText(NO_ACCOUNT_MARK)).toHaveAttribute('aria-hidden', 'true');
+    expect(within(li).getByText('no account')).toHaveClass('ll-sr'); // read out, not drawn
+    const row = within(screen.getByRole('list', { name: 'legend' })).getByText(NO_ACCOUNT_LEGEND);
+    expect(NO_ACCOUNT_LEGEND).toBe('dashed box: no account at this latency');
+    expect(row.querySelector('.ll-sw')).toHaveClass('missing');
+  });
+
+  it('the legend explains the dashed box only when one is drawn', () => {
+    draw();
+    expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
+    expect(screen.queryByText('no account')).toBeNull();
+  });
+
+  it('no axis label can run into its neighbour at 360 px: every visible word fits a 6-character slot, for any mix of rungs (Task 16 V3)', () => {
+    // 7 slots share about 314 px (360 less the page and box frames): 44.9 px each; at 12 px a character is 7.2 px, so 6 fit.
+    const mixes: ((r: LadderRung, i: number) => boolean)[] = [
+      () => true,
+      () => false,
+      (_, i) => i % 2 === 0,
+      (_, i) => i % 2 === 1,
+      (r) => !['rung-100', 'rung-200', 'sp-idle'].includes(r.scenario), // the three neighbours that collided on the page
+    ];
+    for (const [k, keep] of mixes.entries()) {
+      // the settled ladder (plain counts) and the live one (thin: "n / 30" under every rung)
+      for (const l of [ladderFixture(), ladderLiveFixture()]) {
+        const rungs = l.rungs.filter(keep);
+        const cut: Ladder = rungs.length === l.rungs.length ? l : { ...l, rungs, break_even: { kind: 'thin' } };
+        const { unmount } = render(<LatencyLadder model={ladderModel(cut)} />);
+        expect(rungItems(), `mix ${k}`).toHaveLength(7);
+        for (const li of rungItems()) {
+          for (const word of shown(li).join(' ').split(/\s+/)) expect(word.length, `mix ${k}: "${word}"`).toBeLessThanOrEqual(6);
+        }
+        unmount();
+      }
+    }
   });
 
   it('a fresh epoch and epoch 0 draw no NaN (review focus 3)', () => {

@@ -298,6 +298,7 @@ ul.plain.ll-legend { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15
 .ll-sw.net { background: var(--fg); border-radius: 50%; }
 .ll-sw.extra { background: var(--dim); }
 .ll-sw.us { background: var(--rose); opacity: 0.6; }
+.ll-sw.missing { border: 1px dashed var(--line2); }
 ul.plain.ll-extras { gap: 2px; font-size: 13px; }
 
 /* Spec 7a §6: since when the paper accounts count. */
@@ -392,10 +393,10 @@ ul.plain.cb-legend { gap: 2px; }
 .mb-alert { color: var(--bad); font-weight: 600; }
 .mb-row { display: grid; grid-template-columns: 4ch minmax(0, 1fr); gap: 6px; }
 ul.plain.mb-lab { display: grid; grid-template-rows: 1fr 1fr; gap: 0; align-items: center; font-size: 13px; }
-.mb-svg { display: block; width: 100%; height: 96px; background: var(--bg); }
+.mb-svg { display: block; width: 100%; height: 112px; background: var(--bg); }
 .mb-svg .mb-bid { fill: var(--teal); }
 .mb-svg .mb-ask { fill: var(--salmon); }
-.mb-svg .mb-link { stroke: var(--line2); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.mb-svg .mb-link { stroke: var(--dim); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 .mb-svg .mb-mid { stroke: var(--dim); stroke-width: 1px; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
 .mb-axis { list-style: none; display: flex; justify-content: space-between; margin-left: calc(4ch + 6px); color: var(--dim); }
 .mb-axis li { font-size: 13px; overflow-wrap: normal; }
@@ -407,7 +408,7 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 .cl-node .cl-dot { flex: none; width: 10px; height: 10px; border: 2px solid var(--line2); }
 .cl-node.lit { color: var(--fg); font-weight: 600; }
 .cl-node.lit .cl-dot { background: var(--accent); border-color: var(--accent); }
-.cl-ran { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.cl-ran, .ll-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .cl-end { font-family: var(--big); font-size: 32px; line-height: 1; }
 
 /* Spec 7b §6: schematics d (ds-*) and f (bl-*). Every SVG part has its own class; labels are HTML. */
@@ -421,15 +422,21 @@ ul.plain.mb-levels { gap: 2px; font-size: 13px; }
 .ds-svg .ds-cost { stroke: var(--fg); stroke-width: 2px; vector-effect: non-scaling-stroke; }
 .ds-svg .ds-pay { stroke: var(--mint); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .ds-svg .ds-qstar { stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
-.ds-axis { list-style: none; display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); }
+/* d's cost axis: its two ends beside the drawing, in a column as wide as the labels; the shares axis under the plot. */
+.ds-plot { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 6px; min-width: 0; }
+.ds-yaxis { list-style: none; display: flex; flex-direction: column; justify-content: space-between; text-align: right; font-size: 13px; line-height: 1; color: var(--dim); }
+.ds-yaxis li { overflow-wrap: normal; white-space: nowrap; }
+.ds-axis { list-style: none; display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); grid-column: 2; }
 .ds-axis li { overflow-wrap: normal; }
 ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .ds-sw, .bl-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
 .ds-sw.pi { background: var(--teal); }
 .ds-sw.loss { background: var(--rose); border: 1px dashed var(--rose); }
-.ds-sw.cost { border-top: 2px solid var(--fg); height: 0; }
+/* The cost line and the pays line share a colour: the swatches differ as the lines do, solid against dashed 4 3. */
+.ds-sw.cost, .ds-sw.pay { width: 18px; height: 2px; }
+.ds-sw.cost { background: var(--fg); }
 .ds-sw.qstar { background: var(--accent); width: 3px; }
-.ds-sw.pay { border-top: 2px dashed var(--mint); height: 0; }
+.ds-sw.pay { background: repeating-linear-gradient(90deg, var(--mint) 0 4px, transparent 4px 7px); }
 .bl-svg .bl-plan { fill: none; stroke: var(--dim); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .bl-svg .bl-fill { fill: var(--teal); }
 .bl-svg .bl-sold { fill: var(--salmon); }
@@ -457,3 +464,4 @@ ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .ub-axis { list-style: none; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; text-align: center; font-size: 13px; line-height: 1.3; }
 .ub-axis li { display: grid; min-width: 0; overflow-wrap: normal; }
 .ub-axis li span { overflow-wrap: anywhere; } /* 8 updates at 360 px: a long figure splits rather than overflow */
+.ub-axis li .ub-mark { min-height: 1.3em; } /* the line where the peak says so: every column keeps it, so the rows align */

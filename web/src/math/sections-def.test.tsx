@@ -4,12 +4,14 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeAll, describe, expect, it } from 'vitest';
 import { formatAvg, formatDecimal, formatMoneyCents, signOf } from '../lib/money';
 import { basketVerdict } from '../schematics/BasketLegs';
+import { DepthStairs } from '../schematics/DepthStairs';
+import { costDomain, tickText } from '../schematics/geo';
 import { HAVE_PKG, WASM_REQUIRED, fixtureCase, loadTestEngine, skipReason } from '../wasm/testEngine';
 import type { BasketIn, BasketModel, DepthWalkIn, Engine, EpisodeIn, EpisodeModel, WalkModel } from '../wasm/types';
 import { basketInput } from './basket';
 import { F_QUIPS, SECTIONS } from './copy';
 import { F_BOOKS, F_BURST, F_START, PRESETS, exactlyOne, toTick } from './defaults';
-import { DEPTH_START, DepthSection, depthInput } from './sections/DepthSection';
+import { DEPTH_START, DepthSection, type DepthState, depthInput } from './sections/DepthSection';
 import { EPISODE_START, EpisodeSection, episodeInput } from './sections/EpisodeSection';
 import { LegMissSection } from './sections/LegMissSection';
 
@@ -20,6 +22,11 @@ const change = (label: string, value: string) => fireEvent.change(screen.getByLa
 /** What BasketLegs prints for leg i from the engine's own model (same formatters), never a retyped figure. */
 const bought = (m: BasketModel, i: number, name: string) => `leg ${name}${formatDecimal(m.legs[i].buy.filled)} of ${formatDecimal(m.legs[i].buy.requested)}`;
 const sold = (m: BasketModel, i: number) => `sold ${formatDecimal(m.legs[i].unwind.filled)} at ${formatAvg(m.legs[i].unwind.vwap)}`;
+/** A slider by its full accessible name: the text shown beside it, and the legend of the group it sits in. */
+const slider = (name: string) => {
+  const el = screen.getByLabelText(name);
+  return { text: el.closest('label')?.querySelector('span')?.textContent, group: el.closest('fieldset')?.querySelector('legend')?.textContent };
+};
 const ascending = (levels: { p: string }[]) => levels.every((x, k) => k === 0 || toTick(x.p) > toTick(levels[k - 1].p));
 
 describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine (7b §8)', () => {
@@ -88,6 +95,37 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       change('leg C level 1 price', '97');
       await waitFor(() => expect(screen.getByRole('button', { name: 'exactly 1.00' })).toBeDisabled());
       expect(screen.getByText(/out of reach.*nearest the grid allows is Σ 1\.95/)).toBeInTheDocument();
+    });
+
+    it('zooms the cost axis for the start, "exactly 1.00", one step only and fees on: every line inside, most of the height used (Task 16 V2)', () => {
+      const cases: [string, DepthState][] = [
+        ['start', DEPTH_START],
+        ['exactly 1.00', { ...DEPTH_START, legs: exactlyOne(DEPTH_START.legs) }],
+        ['one step', { ...DEPTH_START, legs: DEPTH_START.legs.map((l) => l.slice(0, 1)) }],
+        ['fees on', { ...DEPTH_START, fees: true }],
+      ];
+      for (const [name, st] of cases) {
+        const m = walk(depthInput(st));
+        expect(m.steps.length, name).toBeGreaterThan(0);
+        if (name === 'one step') expect(m.steps, name).toHaveLength(1);
+        const d = costDomain(m.steps.flatMap((s) => [s.cost, s.payoff]));
+        const { container, unmount } = render(<DepthStairs model={m} />);
+        expect([...container.querySelectorAll('.ds-yaxis li')].map((li) => li.textContent), name).toEqual([tickText(d.hi), tickText(d.lo)]);
+        const ys = [...container.querySelectorAll('line.ds-cost, line.ds-pay')].map((l) => Number(l.getAttribute('y1')));
+        expect(ys, name).toHaveLength(2 * m.steps.length);
+        for (const y of ys) {
+          expect(y, name).toBeGreaterThan(0);
+          expect(y, name).toBeLessThan(120);
+        }
+        expect(Math.max(...ys) - Math.min(...ys), name).toBeGreaterThanOrEqual(0.6 * 120); // the old axis from 0 left it about a tenth
+        unmount();
+      }
+    });
+
+    it('groups the level sliders by leg: the legend says the leg once, each slider shows the rest, the full name stays accessible (Task 16 V5)', () => {
+      render(<DepthSection engine={engine} />);
+      expect(slider('leg A level 1 price')).toEqual({ text: 'level 1 price', group: 'leg A' });
+      expect(slider('leg C level 3 price')).toEqual({ text: 'level 3 price', group: 'leg C' });
     });
 
     it('every level slider has room to move', () => {
@@ -201,6 +239,13 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections d–f on the real engine 
       expect(legItems()[1]).toHaveTextContent(bought(b, 1, 'B'));
       expect(legItems()[0]).toHaveTextContent(sold(b, 0));
       expect(legItems()[2]).toHaveTextContent(sold(b, 2));
+    });
+
+    it('a slider under the legend "leg A" does not repeat it; the full name stays the accessible one (Task 16 V5)', () => {
+      render(<LegMissSection engine={engine} />);
+      expect(slider('leg A depth left at t_x')).toEqual({ text: 'depth left at t_x', group: 'leg A' });
+      expect(slider('leg B unwind book against us')).toEqual({ text: 'unwind book against us', group: 'leg B' });
+      expect(slider('shares to buy')).toEqual({ text: 'shares to buy', group: undefined }); // no group, nothing to drop
     });
 
     it('leg C at 20 % at t_x (fixture no-one-leg-partial) fills 20 of 50', async () => {

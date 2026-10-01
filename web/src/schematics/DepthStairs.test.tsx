@@ -4,7 +4,7 @@ import { describeWasm, fixtureCase, fixtureCases, loadTestEngine } from '../wasm
 import type { WalkModel } from '../wasm/types';
 import { DepthStairs } from './DepthStairs';
 import { formatDecimal } from '../lib/money';
-import { geo } from './geo';
+import { costDomain, geo, tickText } from './geo';
 
 /** A real depth_walk_json fixture: the engine's own output for its input (never retyped). */
 const walk = (name: string) => JSON.parse(fixtureCase('depth_walk_json', name).output) as WalkModel;
@@ -15,6 +15,10 @@ const okCases = (): { name: string; model: WalkModel }[] =>
   });
 const last = (m: WalkModel) => (m.steps.length > 0 ? m.steps[m.steps.length - 1].q_to : '0');
 const yOf = (el: Element | undefined) => Number(el?.getAttribute('y1'));
+const H = 120;
+/** Every horizontal line of the drawing: the step costs and what each step pays. */
+const lineYs = (c: HTMLElement) => [...c.querySelectorAll('line.ds-cost, line.ds-pay')].map(yOf);
+const yLabels = (c: HTMLElement) => [...c.querySelectorAll('.ds-yaxis li')].map((li) => li.textContent);
 
 describe('DepthStairs (parent §5.7 d)', () => {
   it('shades Π up to Q*, draws the steps past it, marks Q*, and says Π and Q* in HTML', () => {
@@ -56,6 +60,29 @@ describe('DepthStairs (parent §5.7 d)', () => {
       ['ds-sw pay', 'what a basket pays'],
       ['ds-sw qstar', 'Q*: the last basket worth buying'],
     ]);
+  });
+
+  it('zooms the cost axis onto the stairs and labels both ends in HTML beside the drawing (Task 16 V2)', () => {
+    for (const { name, model } of okCases()) {
+      const { container, unmount } = render(<DepthStairs model={model} />);
+      const d = costDomain(model.steps.flatMap((s) => [s.cost, s.payoff]));
+      expect(yLabels(container), name).toEqual([tickText(d.hi), tickText(d.lo)]); // top first
+      expect(container.querySelector('.ds-yaxis'), name).toHaveAttribute('aria-hidden', 'true');
+      for (const y of lineYs(container)) {
+        expect(y, name).toBeGreaterThan(0); // no line on the frame
+        expect(y, name).toBeLessThan(H);
+      }
+      unmount();
+    }
+  });
+
+  it('the stairs and the pays line use most of the height, so a step can be told from what it pays (Task 16 V2)', () => {
+    for (const name of ['yes-two-legs', 'fees-on', 'no-nested-three']) {
+      const { container, unmount } = render(<DepthStairs model={walk(name)} />);
+      const ys = lineYs(container);
+      expect(Math.max(...ys) - Math.min(...ys), name).toBeGreaterThanOrEqual(0.6 * H);
+      unmount();
+    }
   });
 
   it('draws each step against its own payoff (the nested NO rule, fixture no-nested-three)', () => {

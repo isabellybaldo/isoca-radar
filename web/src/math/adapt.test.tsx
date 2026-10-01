@@ -92,6 +92,20 @@ describe('e reuses DurationBars and adds UpdateBars (spec 7b §6.2 e)', () => {
     expect(container.textContent).not.toContain('peak');
   });
 
+  it('every update column has the same lines, so the times and amounts align: "peak" has its own line, kept empty elsewhere (Task 16 V4)', () => {
+    const { container } = draw(MISS);
+    const items = [...container.querySelectorAll('.ub-axis li')];
+    expect(items).toHaveLength(MISS.updates.length);
+    const peak = MISS.updates.findIndex((u) => u.t_ms === MISS.peak_ms);
+    expect(peak).toBeGreaterThanOrEqual(0);
+    for (const [i, li] of items.entries()) {
+      expect([...li.children].map((c) => `${c.tagName.toLowerCase()}${c.className === '' ? '' : `.${c.className}`}`), `u${i + 1}`).toEqual(['span.ub-mark', 'b', 'span', 'span']);
+      expect(li.children[0].textContent, `u${i + 1}`).toBe(i === peak ? 'peak' : '');
+      expect(li.children[1].textContent).toBe(`u${i + 1}`); // the name never widens: no "u3 · peak"
+      expect(li.children[2].textContent).toBe(`${MISS.updates[i].t_ms} ms`);
+    }
+  });
+
   it('the dashboard label of DurationBars is unchanged without an order row', () => {
     render(<DurationBars rows={[{ kind: 'row', label: 'x', ms: 10, open: false, ticks: [] }]} />);
     expect(screen.getByRole('figure', { name: 'how long each stayed on the table' })).toBeInTheDocument();

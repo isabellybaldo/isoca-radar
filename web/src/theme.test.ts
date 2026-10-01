@@ -88,7 +88,7 @@ describe('theme', () => {
 
   it("wraps the panel's axis labels between words, never inside one: `extras` stays whole, `in time` cells keep a gap", () => {
     // The body's overflow-wrap: anywhere split `extras` into extra/s and let six `in time` labels touch (7a-B Chrome check).
-    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.bl-axis li', '.ub-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
+    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.ds-yaxis li', '.bl-axis li', '.ub-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
     // 7 slots in a 360 px panel leave ~44 px each: `extras` (6 ch) fits at 12 px (43.2 px), not at 13 px.
     expect(Number(/font-size:\s*(\d+)px/.exec(rule('.ll-axis'))?.[1])).toBeLessThanOrEqual(12);
     // A gap narrower than `in time` forces the two words onto two lines instead of into the next cell.
@@ -100,6 +100,25 @@ describe('theme', () => {
     expect(rule('.ub-axis li span')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
     expect(rule('.ds-svg .ds-loss')).toMatch(/stroke-dasharray/); // the loss area differs from the profit area by more than colour
+  });
+
+  it('keeps the zoomed drawings readable: join band, cost axis beside the stairs, dashed swatches, one peak line (7b-B Task 16)', () => {
+    // a: the join lines are drawn in a readable colour, across a plot tall enough for the band between the rows
+    expect(rule('.mb-svg .mb-link')).toMatch(/stroke:\s*var\(--dim\)/);
+    expect(Number(/height:\s*(\d+)px/.exec(rule('.mb-svg'))?.[1])).toBeGreaterThanOrEqual(112);
+    // d: the cost axis is a column beside the SVG that only takes the width of its labels; the shares axis sits under the plot
+    expect(rule('.ds-plot')).toMatch(/grid-template-columns:\s*auto minmax\(0, 1fr\)/);
+    expect(rule('.ds-yaxis')).toMatch(/justify-content:\s*space-between/);
+    expect(rule('.ds-axis')).toMatch(/grid-column:\s*2/);
+    // d's legend: cost is a solid line, pays a dashed one (they share a colour, so the dash is the difference)
+    expect(rule('.ds-sw.cost, .ds-sw.pay')).toMatch(/width:\s*18px/);
+    expect(rule('.ds-sw.cost')).toMatch(/background:\s*var\(--fg\)/);
+    expect(rule('.ds-sw.pay')).toMatch(/repeating-linear-gradient\(90deg, var\(--mint\) 0 4px, transparent 4px 7px\)/);
+    // the ladder: a rung with no account is a dashed box in the legend as in the drawing; its words stay for screen readers
+    expect(rule('.ll-sw.missing')).toMatch(/border:\s*1px dashed/);
+    expect(rule('.cl-ran, .ll-sr')).toMatch(/clip:\s*rect\(0, 0, 0, 0\)/);
+    // e: every update column reserves the line where one of them says "peak", so the five columns align
+    expect(rule('.ub-axis li .ub-mark')).toMatch(/min-height:\s*1\.3em/);
   });
 
   it('gives the public page its own entry: same fonts, no inline script or style, nothing of the dashboard (spec 7b §6.1, the math CSP)', () => {

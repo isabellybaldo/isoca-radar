@@ -46,12 +46,16 @@ export function DepthSection({ engine }: { engine: Engine }) {
           <button type="button" className="m-btn" disabled={st.legs.length <= 2} onClick={() => setSt((s) => ({ ...s, legs: s.legs.slice(0, -1) }))}>remove a leg</button>
           <Check label="taker fees on (crypto: rate 0.07, exponent 1)" checked={st.fees} onChange={(fees) => setSt((s) => ({ ...s, fees }))} />
           <Fold id="math:d:levels" label="move the levels">
-            {st.legs.map((l, li) =>
-              l.map((x, i) => {
-                const [lo, hi] = room('asks', l.length, i);
-                return <Range key={`${li}-${i}`} label={`leg ${LEGS[li]} level ${i + 1} price`} min={lo} max={hi} value={toTick(x.p)} show={x.p} onChange={(t) => setP(li, i, t)} />;
-              }),
-            )}
+            {st.legs.map((l, li) => (
+              <fieldset key={LEGS[li]} className="m-leg">
+                <legend>{`leg ${LEGS[li]}`}</legend>
+                {l.map((x, i) => {
+                  const [lo, hi] = room('asks', l.length, i);
+                  const text = `level ${i + 1} price`;
+                  return <Range key={i} label={`leg ${LEGS[li]} ${text}`} text={text} min={lo} max={hi} value={toTick(x.p)} show={x.p} onChange={(t) => setP(li, i, t)} />;
+                })}
+              </fieldset>
+            ))}
           </Fold>
         </>
       }

@@ -47,8 +47,8 @@ export function ClassifySection({ engine }: { engine: Engine }) {
                   ))}
                 </select>
               </label>
-              <Range label={`leg ${LEGS[i]} best bid`} min={1} max={99} value={l.bid} show={fromTick(l.bid)} disabled={l.status !== 'live'} onChange={(bid) => setLeg(i, { bid })} />
-              <Range label={`leg ${LEGS[i]} best ask`} min={1} max={99} value={l.ask} show={fromTick(l.ask)} disabled={l.status !== 'live'} onChange={(ask) => setLeg(i, { ask })} />
+              <Range label={`leg ${LEGS[i]} best bid`} text="best bid" min={1} max={99} value={l.bid} show={fromTick(l.bid)} disabled={l.status !== 'live'} onChange={(bid) => setLeg(i, { bid })} />
+              <Range label={`leg ${LEGS[i]} best ask`} text="best ask" min={1} max={99} value={l.ask} show={fromTick(l.ask)} disabled={l.status !== 'live'} onChange={(ask) => setLeg(i, { ask })} />
               {l.status !== 'live' && <p className="dim m-note">not live: its book is ignored</p>}
             </fieldset>
           ))}

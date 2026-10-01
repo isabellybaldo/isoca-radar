@@ -46,7 +46,7 @@ export function MirrorSection({ engine }: { engine: Engine }) {
                 return (
                   <fieldset key={`${side}${i}`} className="m-level">
                     <legend>{name}</legend>
-                    <Range label={`${name} price`} min={lo} max={hi} value={toTick(l.p)} show={l.p} onChange={(t) => setLevel(side, i, { p: fromTick(t) })} />
+                    <Range label={`${name} price`} text="price" min={lo} max={hi} value={toTick(l.p)} show={l.p} onChange={(t) => setLevel(side, i, { p: fromTick(t) })} />
                     <label className="m-size">
                       size
                       <input type="number" aria-label={`${name} size`} min={0} step="0.01" value={l.s} onChange={(e) => setLevel(side, i, { s: e.target.value })} />

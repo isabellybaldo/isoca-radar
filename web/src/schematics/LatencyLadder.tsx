@@ -18,6 +18,10 @@ export const MARKETS_WARMING = 'warming: part of the 30 days is still being fill
 export const MARKETS_RECOMPUTING = 'recomputing after the ladder';
 export const MARKETS_MISSING = 'no markets data';
 export const NO_RUNGS = 'No ladder account has a mark in this epoch yet.';
+/** Under a rung with no account the axis shows this mark: the words would run into the next rung at 360 px. The
+ *  dashed box above it is the drawing; the legend and the screen-reader text carry the words. */
+export const NO_ACCOUNT_MARK = '–';
+export const NO_ACCOUNT_LEGEND = 'dashed box: no account at this latency';
 export const TABLE_CAPTION = 'on paper, since the epoch start, every sum cut at the same mark';
 
 const W = 700;
@@ -146,7 +150,14 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
         {model.columns.map((c) => (
           <li key={c.scenario} className={c.kind === 'missing' ? 'missing' : undefined} title={c.scenario}>
             <span className="num">{rungMsText(c)}</span>
-            <span>{rungCountText(c, thin)}</span>
+            {c.kind === 'missing' ? (
+              <>
+                <span aria-hidden="true">{NO_ACCOUNT_MARK}</span>
+                <span className="ll-sr">{rungCountText(c, thin)}</span>
+              </>
+            ) : (
+              <span>{rungCountText(c, thin)}</span>
+            )}
           </li>
         ))}
         <li>
@@ -166,6 +177,12 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           <span className="ll-sw us" aria-hidden="true" />
           {usText(model.measured)}
         </li>
+        {model.columns.some((c) => c.kind === 'missing') && (
+          <li>
+            <span className="ll-sw missing" aria-hidden="true" />
+            {NO_ACCOUNT_LEGEND}
+          </li>
+        )}
       </ul>
       {model.extras.length > 0 && (
         <ul className="plain ll-extras" aria-label="extras">
