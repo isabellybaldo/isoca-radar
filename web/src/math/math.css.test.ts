@@ -13,7 +13,7 @@ const rule = (sel: string): string => {
 
 describe('math.css', () => {
   it('gives every control a 44 px tap height', () => {
-    for (const sel of [".m-range input[type='range']", '.m-btn', '.m-sec .seg button', '.m-ch .seg button', '.m-size input, .m-select select', '.m-sec .fold summary', '.m-ch .fold summary', '.m-check']) {
+    for (const sel of [".m-range input[type='range']", '.m-btn', '.m-sec .seg button', '.m-ch .seg button', '.m-size input, .m-select select', '.m-sec .fold summary', '.m-ch .fold summary', '.m-play > .fold summary', '.m-check']) {
       expect(rule(sel), sel).toMatch(/min-height:\s*44px/);
     }
   });
@@ -51,7 +51,10 @@ describe('math.css', () => {
     expect(rule('.m-ch .ll-svg {')).toMatch(/border:\s*0/);
     expect(css).not.toMatch(/\.m-sec \.ll-svg/); // no ladder is left in a section
     expect(rule('.m-sec .fold {')).toMatch(/border:\s*0;\s*border-top:\s*1px dashed var\(--line2\)/);
-    expect(rule('.m-ch .fold, .m-sec .fold {')).toMatch(/border:\s*0;\s*border-top:\s*1px dashed var\(--line2\)/);
+    expect(rule('.m-ch .fold, .m-play > .fold, .m-sec .fold {')).toMatch(/border:\s*0;\s*border-top:\s*1px dashed var\(--line2\)/);
+    // the word list's fold, a child of the playground, looks like every other fold on the page
+    expect(rule('.m-ch .fold > summary, .m-play > .fold > summary, .m-sec .fold > summary {')).toMatch(/padding:\s*0/);
+    expect(rule('.m-ch .fold-body, .m-play > .fold > .fold-body, .m-sec .fold-body {')).toMatch(/padding:\s*0 0 8px/);
     // the ladder was "under f's caption, behind a dashed rule": under a chapter's lead that rule would double the chapter's own
     expect(rule('.m-liveladder {')).not.toMatch(/border|padding|margin/);
   });
@@ -66,7 +69,7 @@ describe('math.css', () => {
     expect(rule('\n.m-play {')).toMatch(/border-top:\s*3px solid var\(--line\)/); // the story ends, the playground starts
     for (const sel of ['.m-ch, .m-play {', '\n.m-ch {', '\n.m-play {']) expect(rule(sel), sel).not.toMatch(/background|box-shadow|border:/);
     // with no card behind them, a chapter's plots take the card colour (out-specifying theme.css's .dbars .db-svg)
-    expect(rule('section.m-ch :is(.mb-svg, .ds-svg, .bl-svg, .ub-svg, .db-svg, .ll-svg) {')).toMatch(/background:\s*var\(--card\)/);
+    expect(rule('section.m-ch :is(.mb-svg, .ps-svg, .ds-svg, .bl-svg, .ub-svg, .db-svg, .ll-svg) {')).toMatch(/background:\s*var\(--card\)/);
     const h = rule('.m-ch > h2, .m-play > h2 {');
     expect(h).toMatch(/font-size:\s*20px/);
     expect(h).toMatch(/overflow-wrap:\s*anywhere/);
@@ -87,6 +90,8 @@ describe('math.css', () => {
     const first = rule('.m-liveladder .scroll th:first-child, .m-liveladder .scroll td:first-child {');
     expect(first).toMatch(/white-space:\s*nowrap/);
     expect(first).toMatch(/overflow-wrap:\s*normal/);
+    // and its caption starts at the visible edge, not in the middle of a table wider than the screen
+    expect(rule('.m-liveladder .scroll caption {')).toMatch(/text-align:\s*left/);
   });
   it('keeps the fold marker apart from its label and dims a disabled slider once (Task 9 review)', () => {
     expect(rule('.m-sec .fold summary')).toMatch(/(?<![-\w])gap:\s*\d+px/);

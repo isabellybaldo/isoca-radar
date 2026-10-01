@@ -19,7 +19,7 @@ import { ENGINE_FAILED, FOOTER, LOADING, SECTIONS, TITLE } from './copy';
 import { F_BOOKS, F_BURST } from './defaults';
 import { snapshotFixture } from './fixtures';
 import { BEHIND, LIVE_UNAVAILABLE, STRIP_TITLE } from './LiveStrip';
-import { MathPage } from './MathPage';
+import { MathPage, WORDS_LABEL } from './MathPage';
 import { DEPTH_START, depthInput } from './sections/DepthSection';
 import { FRESH_MS, REFETCH_MS, SNAPSHOT_URL, type PublicSnapshot, parseSnapshot, publicToLadder } from './snapshot';
 import { CH3_COUNT, CH7_EXTRAS, CHAPTERS, HOOK, PLAY, TAKE, WORDS } from './story/copy';
@@ -371,7 +371,7 @@ function expectHonest(root: HTMLElement, state: string): void {
   expect(root.querySelectorAll('[style]'), `${state}: style attributes`).toHaveLength(0);
   expect(root.querySelectorAll('svg text'), `${state}: svg text`).toHaveLength(0);
   expect(root.innerHTML, state).not.toContain('NaN');
-  expect(document.querySelectorAll('[role="alert"]'), `${state}: alerts`).toHaveLength(0); // by attribute: a role query walks the whole page
+  expect(document.querySelectorAll('[role~="alert"]'), `${state}: alerts`).toHaveLength(0); // by attribute: a role query walks the whole page
   expect([...root.querySelectorAll('.error')].map((e) => e.textContent), `${state}: engine sentences`).toEqual([]);
 }
 
@@ -416,7 +416,18 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
     const kids = (el: Element) => [...el.children].map((k) => `${k.tagName.toLowerCase()}${k.id !== '' ? `#${k.id}` : k.className !== '' ? `.${k.className}` : ''}`);
     expect(kids(screen.getByRole('main'))).toEqual(['p.m-tag', ...STORY.map((id) => `section#${id}`), 'section#play']);
-    expect(kids(part('play'))).toEqual(['h2#m-play', 'p.m-ch-lead', 'dl.m-words', ...IDS.map((id) => `section#${id}`)]);
+    expect(kids(part('play'))).toEqual(['h2#m-play', 'p.m-ch-lead', 'details.fold', ...IDS.map((id) => `section#${id}`)]);
+    // the word list waits in a closed fold: its twelve terms are on the page, in order, one tap away
+    const words = within(part('play')).getByText(WORDS_LABEL).closest('details') as HTMLDetailsElement;
+    expect(words.parentElement).toBe(part('play'));
+    expect(words.open).toBe(false);
+    expect(words.querySelector('.fold-body')?.firstElementChild).toBe(part('play').querySelector('dl.m-words'));
+    expect(WORDS_LABEL).toBe('the words used on this page');
+    // chapter 3 draws the prices against the dollar line; the decision tree is section c's
+    expect(part('s3').querySelectorAll('svg.ps-svg')).toHaveLength(1);
+    expect(part('s3').querySelectorAll('.cl-path, .cl-node')).toHaveLength(0);
+    expect(part('c').querySelectorAll('ol.cl-path > li.cl-node')).toHaveLength(14);
+    expect(part('c').querySelector('.pstack')).toBeNull();
     expect(screen.getByRole('region', { name: PLAY.title })).toBe(part('play'));
     expect(within(part('play')).getByText(PLAY.line)).toHaveClass('m-ch-lead');
     expect([...part('play').querySelectorAll('dl.m-words dt')].map((t) => t.textContent)).toEqual(WORDS.map(([term]) => term));
@@ -497,7 +508,9 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const f = mockApi({ [SNAPSHOT_URL]: () => new Response(sampleText, { status: 200 }) });
     const { container } = render(<MathPage engine={Promise.resolve(engine)} now={now} />);
     await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
-    expect(await openEveryFold(container, f)).toBeGreaterThanOrEqual(6); // chapter 1's levels, the ladder's two, a's two, d's levels
+    expect(await openEveryFold(container, f)).toBeGreaterThanOrEqual(7); // chapter 1's levels, the ladder's two, the word list, a's two, d's levels
+    expect((within(part('play')).getByText(WORDS_LABEL).closest('details') as HTMLDetailsElement).open).toBe(true);
+    expect(localStorage.getItem('fold:math:words')).toBe('1');
     expect(sectionHeads()).toHaveLength(6);
     expect(screen.getByRole('region', STRIP)).toBeInTheDocument();
     expect(ladderHeads()).toHaveLength(1);

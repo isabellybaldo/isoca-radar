@@ -14,7 +14,7 @@ const STORY = ['src/math/story/Story.tsx', 'src/math/story/Chapter.tsx', 'src/ma
 /** The public schematics; Tasks 6–8 add theirs. */
 const ENTRIES = [
   'src/schematics/LatencyLadder.tsx', 'src/schematics/DurationBars.tsx', 'src/schematics/PayoffGrid.tsx',
-  'src/schematics/MirrorBooks.tsx', 'src/schematics/ClassifyTree.tsx',
+  'src/schematics/MirrorBooks.tsx', 'src/schematics/ClassifyTree.tsx', 'src/schematics/PriceStack.tsx',
   'src/schematics/DepthStairs.tsx', 'src/schematics/BasketLegs.tsx', 'src/schematics/UpdateBars.tsx',
   'src/math/sections/MirrorSection.tsx', 'src/math/sections/PayoffSection.tsx', 'src/math/sections/ClassifySection.tsx',
   'src/math/sections/DepthSection.tsx', 'src/math/sections/EpisodeSection.tsx', 'src/math/sections/LegMissSection.tsx',
@@ -74,7 +74,7 @@ describe('public-safe schematics (spec 7b §7.2)', () => {
   it('no file reachable from the math entry sets a style attribute (the math CSP)', () => {
     const files = reach(['src/math/main.tsx']).filter((f) => /\.tsx?$/.test(f));
     expect(files).toContain('src/schematics/LatencyLadder.tsx'); // the walk really leaves src/math
-    for (const f of STORY) expect(files, f).toContain(f); // and reaches the story from the entry, through MathPage
+    for (const f of [...STORY, 'src/schematics/PriceStack.tsx']) expect(files, f).toContain(f); // and reaches the story from the entry, through MathPage
     expect(files.filter((f) => STYLE_PROP.test(readFileSync(ROOT + f, 'utf8')))).toEqual([]);
   });
 

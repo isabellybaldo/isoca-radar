@@ -80,13 +80,32 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
     expect(take(s)).toBe(TAKE.ch2(true));
   });
 
-  it('chapter 3: the labels are the tick sums; 1.00 has nothing, the second state has a framed edge; then the count line and the strip', () => {
+  it('chapter 3: the labels are the tick sums; the prices are stacked against the dollar line: no gap at 1.00, a gap and the engine\'s framed edge in the second state; then the count line and the strip', () => {
     const s = sec(draw(), 's3');
+    const asks = (v: 0 | 1) => CH3[v].legs.map((l) => l.asks[0].p);
+    const stack = () => ({
+      segs: s.querySelectorAll('svg.ps-svg rect.ps-leg').length,
+      gap: s.querySelectorAll('svg.ps-svg rect.ps-gap').length,
+      over: s.querySelectorAll('svg.ps-svg rect.ps-over').length,
+      labels: [...s.querySelectorAll('td.ps-leg-l')].map((td) => td.textContent),
+    });
     expect(switchOf(s).map((b) => b.textContent)).toEqual([...CH3_LABELS]);
     expect(take(s)).toBe(TAKE.ch3(false));
     expect(s.textContent).not.toContain('$');
+    expect(stack()).toEqual({ segs: 3, gap: 0, over: 0, labels: asks(0).map((p, i) => `${'ABC'[i]}${p}`) });
+    expect(within(s).queryByText('the gap')).toBeNull();
+    // the decision tree is the playground's: here only where it ends
+    expect(s.querySelectorAll('.cl-path, .cl-node')).toHaveLength(0);
+    expect(s.querySelector('.cl-end')).toHaveTextContent('nothing');
+    // the drawing, then the engine's answer, between the switch and the takeaway
+    expect([...s.children].map((k) => k.className)).toEqual(['', 'm-ch-lead', 'seg', 'pstack', 'ctree', 'm-ch-take', 'm-ch-lead', '']);
     second(s);
     expect(take(s)).toBe(TAKE.ch3(true));
+    expect(stack()).toEqual({ segs: 3, gap: 1, over: 0, labels: asks(1).map((p, i) => `${'ABC'[i]}${p}`) });
+    expect(within(s).getByText('the gap')).toBeInTheDocument();
+    expect(s.querySelectorAll('.cl-path, .cl-node')).toHaveLength(0);
+    expect(s.querySelector('.pstack')?.textContent).not.toContain('$'); // the amount is the engine's, in its own framed line
+    expect(s.querySelector('.cl-net')?.textContent).toMatch(/\$\d[\d.,]* on the table/);
     expect(s.textContent).toMatch(/\$\d[\d.,]* on the table/);
     const order = [...s.children].map((k) => k.textContent);
     expect(order.indexOf(CH3_COUNT)).toBeGreaterThan(order.indexOf(TAKE.ch3(true)));
@@ -172,6 +191,16 @@ describeWasm('Story on the real engine (spec §3.1, §5.1)', () => {
       expect(sec(c, id).innerHTML, id).not.toBe(own);
       expect(others(), id).toEqual(before);
     }
+  });
+
+  it('chapter 3 with an engine error: the engine\'s sentence, and no price stack', () => {
+    const broken: Engine = { ...engine, classify_json: () => JSON.stringify({ error: 'the engine said no' }) };
+    const { container } = render(<Story engine={broken} strip={null} ladder={null} ladderDrawn={false} />);
+    const s = sec(container, 's3');
+    expect(within(s).getByText('the engine said no')).toHaveClass('error');
+    expect(s.querySelector('.pstack, svg, .ctree')).toBeNull();
+    expect(take(s)).toBeNull();
+    expect(switchOf(s)).toHaveLength(2);
   });
 
   it('the takeaway follows the answer of the engine, not the switch: an engine that always answers for the second state', () => {

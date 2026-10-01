@@ -3,6 +3,7 @@ import { BasketLegs, basketWord } from '../../schematics/BasketLegs';
 import { ClassifyTree } from '../../schematics/ClassifyTree';
 import { DepthStairs } from '../../schematics/DepthStairs';
 import { MirrorBooks } from '../../schematics/MirrorBooks';
+import { PriceStack } from '../../schematics/PriceStack';
 import { call } from '../../wasm/call';
 import {
   type BasketIn, type BasketModel, type ClassifyIn, type ClassifyModel, type DepthWalkIn, type Engine, type EngineFn, type EpisodeIn,
@@ -61,7 +62,12 @@ export function Story({ engine, strip, ladder, ladderDrawn }: { engine: Engine |
       />
       <Preset<ClassifyIn, ClassifyModel>
         engine={engine} copy={C3} fn="classify_json" inputs={CH3} options={CH3_LABELS}
-        draw={(m) => <ClassifyTree model={m} />}
+        draw={(m, i) => (
+          <>
+            <PriceStack legs={i.legs.map((l, k) => ({ name: LEGS[k] ?? String(k + 1), price: l.asks[0]?.p ?? '' }))} />
+            <ClassifyTree model={m} path={false} />
+          </>
+        )}
         take={(m) => TAKE.ch3(m.kind !== null)}
         after={strip !== null && (
           <>

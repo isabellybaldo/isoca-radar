@@ -38,25 +38,29 @@ export function endText(m: ClassifyModel): string {
 /**
  * Parent §5.7 (c): every test classify can run, top to bottom, the ones it ran lit. HTML only (no SVG to
  * stretch). A node the page does not know is shown under its own name, never dropped (contract drift shows).
+ * `path={false}` leaves the list of tests out and keeps where they end and the money line (the story's
+ * chapter 3 draws the prices instead; the list is the playground's).
  */
-export function ClassifyTree({ model }: { model: ClassifyModel }) {
+export function ClassifyTree({ model, path = true }: { model: ClassifyModel; path?: boolean }) {
   const known = new Set<string>(NODES.map(([id]) => id));
   const last = model.path[model.path.length - 1];
   const extra = [...new Set(model.path.filter((n) => !known.has(n)))].map((n): [string, string] => [n, n]);
   return (
     <figure className="ctree" aria-label="classify one update">
-      <ol className="cl-path" aria-label="the tests classify runs">
-        {[...(NODES as [string, string][]), ...extra].map(([id, text]) => {
-          const on = model.path.includes(id);
-          return (
-            <li key={id} className={on ? 'cl-node lit' : 'cl-node'} data-node={id} aria-current={on && id === last ? 'step' : undefined}>
-              <span className="cl-dot" aria-hidden="true" />
-              <span>{text}</span>
-              {on && id !== last && <span className="cl-ran">ran</span>}
-            </li>
-          );
-        })}
-      </ol>
+      {path && (
+        <ol className="cl-path" aria-label="the tests classify runs">
+          {[...(NODES as [string, string][]), ...extra].map(([id, text]) => {
+            const on = model.path.includes(id);
+            return (
+              <li key={id} className={on ? 'cl-node lit' : 'cl-node'} data-node={id} aria-current={on && id === last ? 'step' : undefined}>
+                <span className="cl-dot" aria-hidden="true" />
+                <span>{text}</span>
+                {on && id !== last && <span className="cl-ran">ran</span>}
+              </li>
+            );
+          })}
+        </ol>
+      )}
       <p className="cl-end">{endText(model)}</p>
       {model.net !== null && (
         <p className="cl-net">

@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { Fold } from '../components/Fold';
 import type { Engine } from '../wasm/types';
 import { ENGINE_FAILED, FOOTER, LOADING, TITLE } from './copy';
 import { LiveBoundary } from './LiveBoundary';
@@ -16,6 +17,9 @@ import { HOOK, PLAY } from './story/copy';
 import { Story } from './story/Story';
 import { Words } from './story/Words';
 import { useSnapshot } from './useSnapshot';
+
+/** The fold the word list waits in, at the top of the playground: closed until asked for. */
+export const WORDS_LABEL = 'the words used on this page';
 
 type EngineLoad = { kind: 'loading' } | { kind: 'failed' } | { kind: 'ok'; engine: Engine };
 
@@ -56,7 +60,7 @@ function useSectionLink(ready: boolean): void {
 
 /**
  * Spec 2026-10-01 §3 (on 09-27 §6.1 and 7b §6.1): one column: the header, the hook, the story's seven
- * chapters, the playground (its word list, then sections a to f) and a line saying the dashboard is private.
+ * chapters, the playground (its word list in a fold, then sections a to f) and a line saying the dashboard is private.
  * No router, no api client, no help.ts, no link out. The snapshot and the engine are independent, and each says
  * so on its own when it is missing:
  * - the snapshot (one request, `useSnapshot`, called here only): loading draws nothing live; ok draws the strip
@@ -106,7 +110,9 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
         <section id="play" className="m-play" aria-labelledby="m-play">
           <h2 id="m-play">{PLAY.title}</h2>
           <p className="m-ch-lead">{PLAY.line}</p>
-          <Words />
+          <Fold id="math:words" label={WORDS_LABEL}>
+            <Words />
+          </Fold>
           {eng.kind === 'ok' && (
             <>
               <MirrorSection engine={eng.engine} />

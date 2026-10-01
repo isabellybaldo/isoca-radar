@@ -1,6 +1,7 @@
 // The story's engine inputs (spec 2026-10-01 §4): two per chapter, built from the playground's own starting
 // states and input builders, so a chapter and its playground section can never disagree. presets.test.ts runs
 // each through the real engine and pins what the chapter's words rely on.
+import { tickText } from '../../schematics/geo';
 import type { BasketIn, ClassifyIn, DepthWalkIn, EpisodeIn, MirrorIn, PayoffIn } from '../../wasm/types';
 import { basketInput, drain } from '../basket';
 import { F_BOOKS, F_BURST, F_START } from '../defaults';
@@ -27,11 +28,8 @@ const ch3State = (asks: number[]): ClassifyState => ({
   legs: asks.map((ask) => ({ status: 'live', bid: ask - 1, ask })),
 });
 export const CH3: Pair<ClassifyIn> = [classifyInput(ch3State(CH3_ASKS[0])), classifyInput(ch3State(CH3_ASKS[1]))];
-const sumText = (ticks: number[]) => fromTickSum(ticks.reduce((a, t) => a + t, 0));
-/** A tick count as a decimal string, integer maths only (100 → "1.00"). */
-function fromTickSum(n: number): string {
-  return `${Math.floor(n / 100)}.${String(n % 100).padStart(2, '0')}`;
-}
+/** The sum of whole ticks as a decimal string, integer maths only (100 → "1.00"). */
+const sumText = (ticks: number[]) => tickText(ticks.reduce((a, t) => a + t, 0));
 export const CH3_LABELS: Pair<string> = [`prices add to ${sumText(CH3_ASKS[0])}`, `prices add to ${sumText(CH3_ASKS[1])}`];
 
 /** The thin book: each leg's two cheapest levels at a quarter of their size, the third as it is. (Quartering

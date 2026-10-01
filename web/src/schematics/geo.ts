@@ -43,6 +43,26 @@ const placed = (values: string[]): number[] => values.flatMap((v) => ticksOf(v) 
 /** Where a value in ticks falls in a domain, from 0 at `lo` to 1 at `hi`. */
 export const along = (d: TickDomain, v: string): number => (inTicks(v) - d.lo) / (d.hi - d.lo);
 
+/** What a complete basket pays, in ticks: one dollar. */
+export const STACK_FULL = 100;
+
+/** Prices laid end to end, in ticks, against the `STACK_FULL` a basket pays (the story's price stack). Each
+ *  span runs from where the one before ended; a price that cannot be placed (malformed, empty, negative, too
+ *  large) takes no width, so nothing here is ever NaN. The sums are made on whole millionths of a tick, so
+ *  0.33 + 0.33 + 0.34 ends exactly on the line. `hi` is the axis' end: a tenth past the farther of the stack's
+ *  end and the line, so neither sits on the frame. */
+export function stackSpans(prices: string[]): { spans: { from: number; to: number }[]; end: number; hi: number } {
+  let at = 0;
+  const spans = prices.map((p) => {
+    const from = at;
+    at += Math.round(inTicks(p) * 1e6);
+    return { from: from / 1e6, to: at / 1e6 };
+  });
+  const end = at / 1e6;
+  const far = Math.max(STACK_FULL, end);
+  return { spans, end, hi: far + far / 10 };
+}
+
 const MIRROR_PAD = 2;
 const MIRROR_MIN_HALF = 5;
 
