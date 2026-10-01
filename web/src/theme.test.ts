@@ -83,6 +83,7 @@ describe('theme', () => {
 
   it('keeps the basket leg labels breakable inside a cell and the planned outline visible (7b-B review I4)', () => {
     expect(rule('.bl-axis li span')).toMatch(/overflow-wrap:\s*anywhere/); // a long figure splits rather than overflow 360 px
+    expect(rule('.ub-axis li span')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
     expect(rule('.ds-svg .ds-loss')).toMatch(/stroke-dasharray/); // the loss area differs from the profit area by more than colour
   });

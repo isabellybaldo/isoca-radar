@@ -23,12 +23,13 @@ export function UpdateBars({ updates, peakMs }: { updates: { t_ms: number; net: 
       <ol className="ub-axis" aria-label="updates">
         {updates.map((u, i) => (
           <li key={`${i}|${u.t_ms}`}>
-            <b>{`u${i + 1}`}</b>
+            <b>{i === peak ? `u${i + 1} · peak` : `u${i + 1}`}</b>
             <span>{`${u.t_ms} ms`}</span>
             <span>{u.net === null ? 'no edge' : <Money value={u.net} signed cents />}</span>
           </li>
         ))}
       </ol>
+      <figcaption className="dim">net edge on the table at each update</figcaption>
     </figure>
   );
 }

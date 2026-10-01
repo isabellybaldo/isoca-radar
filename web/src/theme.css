@@ -456,3 +456,4 @@ ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .ub-svg .ub-zero { stroke: var(--line2); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 .ub-axis { list-style: none; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; text-align: center; font-size: 13px; line-height: 1.3; }
 .ub-axis li { display: grid; min-width: 0; overflow-wrap: normal; }
+.ub-axis li span { overflow-wrap: anywhere; } /* 8 updates at 360 px: a long figure splits rather than overflow */

@@ -34,7 +34,7 @@ export function episodeRows(m: EpisodeModel): DurationRow[] {
   const last = m.updates.length > 0 ? m.updates[m.updates.length - 1].t_ms : open;
   const end = m.close_ms ?? Math.max(open, last);
   const rows: DurationRow[] = [
-    { kind: 'row', label: 'on the table', ms: Math.max(0, end - open), open: m.close_ms === null, ticks: m.updates.map((u) => u.t_ms - open).filter((t) => t > 0) },
+    { kind: 'row', label: 'on the table', ms: Math.max(0, end - open), open: m.close_ms === null, ticks: m.updates.map((u) => u.t_ms - open).filter((t) => t > 0 && t <= end - open) },
   ];
   if (m.t_x !== null) rows.push({ kind: 'order', label: 'our order lands', ms: Math.max(0, m.t_x - open), open: false, ticks: [] });
   return rows;
