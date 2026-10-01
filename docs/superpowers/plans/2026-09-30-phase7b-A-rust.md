@@ -6409,6 +6409,9 @@ out {"kind": "yes"|"no", "min_order": Dec, "q_open": Dec, "q_target": Dec,
 
 > **Contract note (controller, 2026-09-30, Task 11 review):** `basket_json`'s `cash.fees` = buy fees + unwind fees + the conversion fee (e.g. `no-convert-fee-50` → fees "0.5"; `no-convert-fee-10000` → fees "100", convert_back "0"). The facade plans exactly as `sim::policy::decide` for open books the page can produce; a crossed open book or an open leg without the side it buys is outside section f's controls.
 
+
+> **Contract notes (final review, 2026-10-01):** (1) `payoff_json`: `s` is a REQUIRED field even for `implication` (its value is ignored there); omitting it returns `not valid input: missing field `s``. (2) `episode_json`: `gap_ms` is validated but does not change any output field today — the page must not expose a gap control. (3) `basket_json.q_open` is the full-set size the net walk at open can fill (the smallest leg fill), not the same quantity as `depth_walk_json.q_star` / `classify_json.q_star` (`walk().q_max`); captions must not call both "Q*".
+
 **`/math-data/public.json`** (`PublicSnapshot`, written by the api every 300 s, at most 64 KiB):
 
 ```
