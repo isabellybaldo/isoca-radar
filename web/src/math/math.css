@@ -1,0 +1,17 @@
+/* The public /math page's own layout (the schematics' CSS lives in theme.css). Controls are touch-sized and
+   never force the page wider than 360 px. No inline styles anywhere (the page's CSP forbids them). */
+.m-sec { display: grid; gap: 8px; }
+.m-controls { display: grid; gap: 8px; min-width: 0; }
+.m-btn { font-family: var(--px); font-size: 8px; padding: 10px 12px; min-height: 44px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; justify-self: start; }
+.m-sec .seg button { min-height: 44px; padding: 8px 10px; }
+.m-range { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 5ch; gap: 8px; align-items: center; min-height: 44px; font-size: 13px; }
+.m-range input[type='range'] { width: 100%; min-width: 0; min-height: 32px; margin: 0; }
+.m-check { display: flex; gap: 8px; align-items: center; min-height: 44px; }
+.m-check input { width: 24px; height: 24px; flex: none; }
+.m-level, .m-leg { border: 2px solid var(--line2); padding: 4px 8px 8px; margin: 0 0 8px; min-width: 0; display: grid; gap: 4px; }
+.m-level legend, .m-leg legend { font-size: 13px; color: var(--dim); }
+.m-size, .m-select { display: flex; gap: 8px; align-items: center; min-height: 44px; font-size: 13px; }
+.m-size input, .m-select select { font: inherit; min-height: 40px; min-width: 0; flex: 1; background: var(--chip); color: var(--fg); border: 2px solid var(--line); padding: 0 6px; }
+.m-formula { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.m-big { font-family: var(--big); font-size: 28px; line-height: 1; }
+.m-cap, .m-note { font-size: 13px; }
