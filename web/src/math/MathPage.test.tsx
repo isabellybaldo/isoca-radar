@@ -10,7 +10,7 @@ import { CROSSED } from '../schematics/MirrorBooks';
 import { mockApi } from '../test/mockApi';
 import { settle } from '../test/settle';
 import { describeWasm, loadTestEngine } from '../wasm/testEngine';
-import { ENGINE_FNS, type BasketIn, type DepthWalkIn, type Engine, type EngineFn, type PayoffIn } from '../wasm/types';
+import { ENGINE_FNS, type BasketIn, type DepthWalkIn, type Engine, type EngineFn, type PayoffIn, type WalkModel } from '../wasm/types';
 import sampleText from './__fixtures__/public.sample.json?raw';
 import { basketInput } from './basket';
 import { ENGINE_FAILED, FOOTER, LOADING, SECTIONS, TAGLINE, TITLE } from './copy';
@@ -18,6 +18,7 @@ import { F_BOOKS, F_BURST } from './defaults';
 import { snapshotFixture } from './fixtures';
 import { BEHIND, LIVE_UNAVAILABLE } from './LiveStrip';
 import { MathPage } from './MathPage';
+import { DEPTH_START, depthInput } from './sections/DepthSection';
 import { FRESH_MS, REFETCH_MS, SNAPSHOT_URL, parseSnapshot, publicToLadder } from './snapshot';
 
 /** The live parts are the real ones unless a test sets a flag: then that part throws while rendering. */
@@ -57,6 +58,31 @@ function setVisible(v: 'visible' | 'hidden') {
 }
 const requested = (f: { mock: { calls: unknown[][] } }) => f.mock.calls.map((c) => String(c[0]));
 
+/** Under the fake timers: flush (never sleep) until `expectation` holds; if it never does, its own failure is thrown. */
+async function until(expectation: () => unknown): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    try {
+      expectation();
+      return;
+    } catch {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    }
+  }
+  expectation();
+}
+/** settle() only waits for the requests to stop; what a test reads next must be on screen, so wait for exactly that. */
+async function landed(f: { mock: { calls: unknown[] } }, expectation: () => unknown): Promise<void> {
+  await settle(f);
+  await until(expectation);
+}
+const stripShown = () => screen.getByRole('region', STRIP);
+const unavailableShown = () => expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
+const behindShown = (n: number) => () => expect(screen.getAllByText(new RegExp(`: ${BEHIND}$`))).toHaveLength(n);
+const sectionsShown = () => expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
+const ladderShown = () => screen.getByRole('heading', { level: 3 });
+
 beforeEach(() => {
   clock = T0;
   boom.strip = false;
@@ -87,7 +113,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
   it('is one page with the header, the tagline and the line saying the dashboard is private; no link leaves it', async () => {
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
     const { container } = render(<MathPage engine={never} now={now} />);
-    await settle(f);
+    await landed(f, stripShown);
     expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual([TITLE]);
     expect(TITLE).toBe('isoca-radar · math');
     expect(screen.getByText(TAGLINE)).toBeInTheDocument();
@@ -101,7 +127,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
   it('while the engine loads: one neutral line, no section, and the live strip already draws', async () => {
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
     render(<MathPage engine={never} now={now} />);
-    await settle(f);
+    await landed(f, stripShown);
     expect(screen.getByRole('status')).toHaveTextContent(LOADING);
     expect(screen.queryAllByRole('heading', { level: 2 })).toHaveLength(0);
     expect(screen.queryAllByRole('alert')).toHaveLength(0);
@@ -111,7 +137,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
   it('says one honest sentence when the engine does not load, draws no section, and the live strip still draws', async () => {
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
     render(<MathPage engine={Promise.reject(new Error('blocked'))} now={now} />);
-    await settle(f);
+    await landed(f, () => (stripShown(), screen.getByRole('alert')));
     expect(screen.getAllByRole('alert').map((a) => a.textContent)).toEqual([ENGINE_FAILED]);
     expect(ENGINE_FAILED).toMatch(/did not load: the drawings need WebAssembly/);
     expect(screen.queryByRole('status')).toBeNull();
@@ -125,7 +151,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
     window.history.replaceState(null, '', '/math#d');
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
     render(<MathPage engine={never} now={now} />);
-    await settle(f);
+    await landed(f, stripShown);
     expect(scrolled).toEqual([]);
   });
 
@@ -137,14 +163,14 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
     expect(screen.queryByText(LIVE_UNAVAILABLE)).toBeNull();
     expect(screen.queryByRole('region', STRIP)).toBeNull();
     unmount();
-    await settle(f);
+    await landed(f, () => expect(vi.getTimerCount()).toBe(0));
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('a missing snapshot is exactly one dim line, and the page asks for nothing but that file', async () => {
     const f = mockApi({});
     render(<MathPage engine={never} now={now} />);
-    await settle(f);
+    await landed(f, unavailableShown);
     expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
     expect(screen.getByText(LIVE_UNAVAILABLE)).toHaveClass('dim');
     expect(screen.queryByRole('region', STRIP)).toBeNull();
@@ -158,7 +184,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
         <MathPage engine={never} now={now} />
       </StrictMode>,
     );
-    await settle(f);
+    await landed(f, stripShown);
     expect(requested(f)).toEqual(['/math-data/public.json']);
     expect(screen.getAllByRole('region', STRIP)).toHaveLength(1);
   });
@@ -166,7 +192,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
   it('a snapshot older than 30 minutes says the writer is behind', async () => {
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0 - FRESH_MS - 1) });
     render(<MathPage engine={never} now={now} />);
-    await settle(f);
+    await landed(f, behindShown(1));
     expect(screen.getByText(new RegExp(`: ${BEHIND}$`))).toHaveClass('stale');
     expect(screen.queryByText(LIVE_UNAVAILABLE)).toBeNull();
   });
@@ -174,7 +200,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
   it('holds no interval timer: a fresh snapshot turns stale when the visitor returns to the tab, not before', async () => {
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
     render(<MathPage engine={never} now={now} />);
-    await settle(f);
+    await landed(f, stripShown);
     expect(vi.getTimerCount()).toBe(0);
     expect(screen.queryByText(new RegExp(BEHIND))).toBeNull();
     clock = T0 + FRESH_MS + 1;
@@ -183,7 +209,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
     });
     expect(screen.queryByText(new RegExp(BEHIND))).toBeNull(); // nothing ticks on its own
     act(() => setVisible('visible'));
-    await settle(f);
+    await landed(f, behindShown(1));
     expect(screen.getByText(new RegExp(`: ${BEHIND}$`))).toHaveClass('stale');
     expect(requested(f)).toEqual(['/math-data/public.json', '/math-data/public.json']);
     expect(vi.getTimerCount()).toBe(0);
@@ -199,7 +225,7 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
       boom.strip = true;
       const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
       render(<MathPage engine={never} now={now} />);
-      await settle(f);
+      await landed(f, unavailableShown);
       expect(errors).toHaveBeenCalled();
       expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
       expect(screen.queryByRole('region', STRIP)).toBeNull();
@@ -212,12 +238,12 @@ describe('MathPage, the engine aside (spec 7b §6.1, §6.3)', () => {
       boom.strip = true;
       const f = mockApi({ [SNAPSHOT_URL]: () => snapshotFixture({}, clock) });
       render(<MathPage engine={never} now={now} />);
-      await settle(f);
+      await landed(f, unavailableShown);
       expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
       boom.strip = false;
       clock = T0 + REFETCH_MS + 1;
       act(() => setVisible('visible'));
-      await settle(f);
+      await landed(f, stripShown);
       expect(screen.getByRole('region', STRIP)).toBeInTheDocument();
       expect(screen.queryByText(LIVE_UNAVAILABLE)).toBeNull();
     });
@@ -283,7 +309,7 @@ async function openEveryFold(root: HTMLElement, f: { mock: { calls: unknown[] } 
     if (closed.length === 0) break;
     for (const s of closed) fireEvent.click(s);
     opened += closed.length;
-    await settle(f);
+    await landed(f, () => expect(closed.every((x) => (x.parentElement as HTMLDetailsElement).open)).toBe(true));
   }
   expect(root.querySelectorAll('details:not([open])')).toHaveLength(0);
   return opened;
@@ -314,7 +340,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const snap = snapshotFixture({}, T0);
     const f = mockApi({ [SNAPSHOT_URL]: snap });
     const { container } = render(<MathPage engine={Promise.resolve(engine)} now={now} />);
-    await settle(f);
+    await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(TITLES);
     expect([...container.querySelectorAll('section.m-sec')].map((s) => s.id)).toEqual([...IDS]);
     const strip = screen.getByRole('region', STRIP);
@@ -337,7 +363,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
   it('a stale snapshot says so in the strip and above the ladder', async () => {
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0 - FRESH_MS - 1) });
     render(<MathPage engine={Promise.resolve(engine)} now={now} />);
-    await settle(f);
+    await landed(f, () => (sectionsShown(), behindShown(2)()));
     const behind = screen.getAllByText(new RegExp(`: ${BEHIND}$`));
     expect(behind).toHaveLength(2);
     expect(behind.some((el) => el.tagName === 'H3')).toBe(true);
@@ -347,7 +373,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
   it('without the snapshot, f has no live part and every section still works', async () => {
     const f = mockApi({});
     render(<MathPage engine={Promise.resolve(engine)} now={now} />);
-    await settle(f);
+    await landed(f, () => (sectionsShown(), unavailableShown()));
     expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
     expect(screen.queryAllByRole('heading', { level: 3 })).toHaveLength(0);
     expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
@@ -360,7 +386,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     boom.ladder = true;
     const f = mockApi({ [SNAPSHOT_URL]: snapshotFixture({}, T0) });
     render(<MathPage engine={Promise.resolve(engine)} now={now} />);
-    await settle(f);
+    await landed(f, () => (sectionsShown(), unavailableShown()));
     expect(errors).toHaveBeenCalled();
     expect(screen.getAllByText(LIVE_UNAVAILABLE)).toHaveLength(1);
     expect(screen.queryByRole('region', STRIP)).toBeNull();
@@ -376,7 +402,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     clock = sample.written_ms + 60_000;
     const f = mockApi({ [SNAPSHOT_URL]: () => new Response(sampleText, { status: 200 }) });
     const { container } = render(<MathPage engine={Promise.resolve(engine)} now={now} />);
-    await settle(f);
+    await landed(f, () => (stripShown(), sectionsShown(), ladderShown()));
     expect(await openEveryFold(container, f)).toBeGreaterThanOrEqual(4); // a and d's levels, the ladder's two
     expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
     expect(screen.getByRole('region', STRIP)).toBeInTheDocument();
@@ -389,6 +415,9 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
 
   it('stays honest in the states a visitor reaches: crossed book, each basket kind with prices, fees on, the usual burst', async () => {
     vi.useRealTimers(); // the controls redraw on an animation frame: every wait below is a waitFor/findBy on an exact expectation
+    // A slow frame (50 ms, like a busy CI runner): an assertion that reads the output before its frame has landed fails here, every time.
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 50));
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id));
     const sent: { fn: EngineFn; input: unknown }[] = [];
     const spied = Object.fromEntries(ENGINE_FNS.map((fn) => [fn, (i: string) => (sent.push({ fn, input: JSON.parse(i) }), engine[fn](i))])) as Engine;
     const last = <T,>(fn: EngineFn) => sent.filter((x) => x.fn === fn).at(-1)?.input as T;
@@ -399,7 +428,8 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     const { container } = render(<MathPage engine={Promise.resolve(spied)} now={now} />);
     await screen.findByRole('region', STRIP);
     const sec = (k: (typeof IDS)[number]) => within(screen.getByRole('region', { name: SECTIONS[k].title }));
-    await within(screen.getByRole('region', { name: SECTIONS.f.title })).findByRole('heading', { level: 3 });
+    await within(await screen.findByRole('region', { name: SECTIONS.f.title })).findByRole('heading', { level: 3 });
+    await waitFor(() => expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6));
     for (const s of container.querySelectorAll('details:not([open]) > summary')) fireEvent.click(s);
     await waitFor(() => expect(container.querySelectorAll('details:not([open])')).toHaveLength(0));
 
@@ -414,15 +444,18 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
       ['implication A ⇒ B', 'implication', 'payoff of the implication'],
     ] as const) {
       fireEvent.click(sec('b').getByRole('button', { name: button }));
-      await waitFor(() => expect(last<PayoffIn>('payoff_json')).toMatchObject({ kind }));
-      expect(last<PayoffIn>('payoff_json').prices).not.toBeNull();
+      // One expectation on the last request: the kind AND the prices. "YES basket" is already the kind at the start,
+      // so waiting for the kind alone is satisfied by the first, unpriced request (the CI race).
+      await waitFor(() => expect(last<PayoffIn>('payoff_json')).toMatchObject({ kind, prices: expect.any(Array) }));
       expect(await sec('b').findByRole('table', { name: table })).toBeInTheDocument();
-      expect(sec('b').getByText(/ =$/)).toBeInTheDocument(); // the formula line with the engine's edge is on screen
+      expect(await sec('b').findByText(/ =$/)).toBeInTheDocument(); // the formula line with the engine's edge is on screen
       expectHonest(container, `b: ${kind} with prices`);
     }
 
     fireEvent.click(sec('d').getByLabelText(/taker fees on/));
-    await waitFor(() => expect(last<DepthWalkIn>('depth_walk_json').legs.every((l) => l.fee !== null)).toBe(true));
+    const walked = JSON.parse(engine.depth_walk_json(JSON.stringify(depthInput({ ...DEPTH_START, fees: true })))) as WalkModel;
+    await waitFor(() => expect(last<DepthWalkIn>('depth_walk_json')).toEqual(depthInput({ ...DEPTH_START, fees: true })));
+    expect(await sec('d').findByText(`Q* ${walked.q_star}`)).toBeInTheDocument();
     expectHonest(container, 'd: fees on');
 
     fireEvent.click(sec('f').getByRole('button', { name: 'the usual burst' }));
@@ -442,11 +475,11 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
         <MathPage engine={Promise.resolve(engine)} now={now} />
       </StrictMode>,
     );
-    await settle(f);
+    await landed(f, () => expect(scrolled).toEqual(['d(0)']));
     expect(scrolled).toEqual(['d(0)']); // no argument: the browser's default, so reduced motion is the visitor's setting
     clock = T0 + FRESH_MS + 1;
     act(() => setVisible('visible')); // the page draws again
-    await settle(f);
+    await landed(f, behindShown(2));
     expect(scrolled).toEqual(['d(0)']);
   });
 
@@ -455,7 +488,7 @@ describeWasm('MathPage on the real engine (spec 7b §6, §8)', () => {
     window.history.replaceState(null, '', '/math#m-d');
     const f = mockApi({});
     render(<MathPage engine={Promise.resolve(engine)} now={now} />);
-    await settle(f);
+    await landed(f, () => (sectionsShown(), unavailableShown()));
     expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(6);
     expect(scrolled).toEqual([]);
   });

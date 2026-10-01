@@ -234,8 +234,10 @@ describe.skipIf(!HAVE_PKG && !WASM_REQUIRED)('sections a–c on the real engine 
     change('leg A status', 'closed_yes');
     const legs = [{ ...CLASSIFY_START.legs[0], status: 'closed_yes' as const }, ...CLASSIFY_START.legs.slice(1)];
     const closed = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ ...CLASSIFY_START, legs })))) as ClassifyModel;
-    await waitFor(() => expect(lit(container)).toEqual(closed.path));
-    expect(container.querySelector('.cl-end')).toHaveTextContent(endText(closed));
+    await waitFor(() => {
+      expect(lit(container)).toEqual(closed.path);
+      expect(container.querySelector('.cl-end')).toHaveTextContent(endText(closed)); // inside the wait: both come from the same output
+    });
   });
 
   it('c: the post_end note is on the page, static', () => {
