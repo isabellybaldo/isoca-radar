@@ -1,7 +1,9 @@
 import { ApiError, SESSION_EXPIRED_TEXT } from '../api/client';
+import { Empty } from '../schematics/Empty';
 
+/** The dashboard's empty line: the public view (spec 7b §7.2); the api error handling stays below. */
 export function EmptyState({ text }: { text: string }) {
-  return <p className="quip empty">{text}</p>;
+  return <Empty text={text} />;
 }
 
 export function Loading({ what = 'data' }: { what?: string }) {

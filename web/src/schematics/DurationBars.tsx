@@ -1,4 +1,4 @@
-import { type DurationRow, durationText } from '../explain/models';
+import { type DurationRow, durationText } from './models';
 
 const W = 300;
 const H = 10;
@@ -9,12 +9,12 @@ export function DurationBars({ rows }: { rows: DurationRow[] }) {
   const max = Math.max(1, ...rows.map((r) => r.ms));
   const sx = (ms: number) => (ms / max) * W;
   return (
-    <figure className="dbars" aria-label="how long each stayed on the table">
+    <figure className="dbars" aria-label={rows.some((r) => r.kind === 'order') ? 'how long the episode stayed on the table, and when our order landed' : 'how long each stayed on the table'}>
       {rows.map((r) => (
         <div key={`${r.kind}|${r.label}`} className="db-row">
           <svg className="db-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="presentation">
             <rect
-              className={['db-bar', r.kind === 'example' ? 'example' : null, r.open ? 'open' : null].filter(Boolean).join(' ')}
+              className={['db-bar', r.kind === 'example' ? 'example' : null, r.kind === 'order' ? 'order' : null, r.open ? 'open' : null].filter(Boolean).join(' ')}
               x={0}
               y={2}
               width={Math.max(1, sx(r.ms))}

@@ -3,6 +3,12 @@ import { LADDER, LADDER_YES } from './ladder';
 import { compareDecimal, formatMoney, signOf } from './money';
 import { fmtUtcHm } from './time';
 
+/** Spec 7b §5.1: the fields the grid reads, which is all the public snapshot's rows carry. */
+export type GridRow = Pick<
+  SweetRow,
+  'side' | 'scenario' | 'fee_bips' | 'latency_ms' | 'dimension' | 'bucket' | 'label' | 'n_exec' | 'clusters' | 'mean' | 'lo' | 'hi'
+>;
+
 /** Spec 5d §7.6, verbatim. */
 export const SWEET_CAVEAT =
   "Captured is paper: first in line at t_x against the recorded book, minus our own taken liquidity. Real bots compete for the same depth; a friend's bot filled 6 of 24 signals. A candidate is a question for real small orders, not an answer.";
@@ -62,9 +68,10 @@ const BUCKET_ORDER: Partial<Record<SweetDim, string[]>> = {
 
 /** "sports", "2 legs", "1–7 days", "00–04 UTC". */
 export function bucketText(dim: string, bucket: string): string {
-  if (dim === 's') return BUCKET_TEXT[bucket] ?? `${bucket.replace('-', '–')} legs`;
+  const known = Object.hasOwn(BUCKET_TEXT, bucket) ? BUCKET_TEXT[bucket] : undefined;
+  if (dim === 's') return known ?? `${bucket.replace('-', '–')} legs`;
   if (dim === 'hour') return `${bucket.replace('-', '–')} UTC`;
-  return BUCKET_TEXT[bucket] ?? bucket;
+  return known ?? bucket;
 }
 
 export function footnote(m: number): string {
@@ -89,15 +96,15 @@ export function nothingPays(s: SweetSeries): boolean {
   return rows.some(tested) && !rows.some((r) => r.label === 'candidate');
 }
 
-export interface Grid {
+export interface Grid<R extends GridRow = SweetRow> {
   scenarios: { name: string; latency_ms: number | null }[];
   buckets: string[];
-  cell: (bucket: string, scenario: string) => SweetRow | undefined;
+  cell: (bucket: string, scenario: string) => R | undefined;
 }
 
 /** Rows = buckets (sorted canonically per dimension), columns = scenarios by latency; fee rows are
  *  left out. */
-export function grid(s: Pick<SweetSeries, 'rows'>, side: SweetSide, dim: SweetDim): Grid {
+export function grid<R extends GridRow = SweetRow>(s: { rows: R[] }, side: SweetSide, dim: SweetDim): Grid<R> {
   const rows = s.rows.filter((r) => r.side === side && r.dimension === dim && r.fee_bips === 0);
   const buckets: string[] = [];
   const scen = new Map<string, number | null>();
@@ -115,7 +122,7 @@ export function grid(s: Pick<SweetSeries, 'rows'>, side: SweetSide, dim: SweetDi
 }
 
 /** "+$0.10 [−$0.02, +$0.22]"; "—" without a mean. Money through formatMoney only. */
-export function interval(r: SweetRow): string {
+export function interval(r: Pick<SweetRow, 'mean' | 'lo' | 'hi'>): string {
   if (r.mean === null) return '—';
   const m = formatMoney(r.mean, { signed: true });
   if (r.lo === null || r.hi === null) return m;
@@ -168,7 +175,7 @@ export const GLYPH_NAME: Record<GlyphKey, string> = {
 export const GLYPH_ORDER: GlyphKey[] = ['candidate', 'negative', 'inconclusive', 'thinUp', 'thinDown', 'none', 'dead_on_paper', 'not_tested'];
 export const GRID_HINT = 'Tap a cell for its numbers.';
 
-export function glyphKey(r: SweetRow | undefined): GlyphKey {
+export function glyphKey(r: Pick<SweetRow, 'label' | 'mean'> | undefined): GlyphKey {
   if (!r) return 'none';
   if (r.label === 'thin') return signOf(r.mean) > 0 ? 'thinUp' : 'thinDown';
   return r.label;
@@ -182,13 +189,13 @@ export interface LadderGridRow {
 export interface LadderGrid {
   columns: { scenario: string; latency_ms: number }[];
   rows: LadderGridRow[];
-  cell: (row: LadderGridRow, scenario: string) => SweetRow | undefined;
+  cell: (row: LadderGridRow, scenario: string) => GridRow | undefined;
 }
 
 /** Spec 7a §8: rows = the `all` row first, then the chosen dimension's buckets in canonical order (only
  *  the `only` ones when given); columns = the side's LADDER scenarios by latency (6 NO, 2 YES). Fee
  *  variants and the extras never get a column; they stay in the "all numbers" fold. */
-export function ladderGrid(rows: SweetRow[], side: SweetSide, dim: SweetDim, only?: string[]): LadderGrid {
+export function ladderGrid(rows: GridRow[], side: SweetSide, dim: SweetDim, only?: string[]): LadderGrid {
   const names = side === 'no' ? LADDER.map((l) => l.scenario) : LADDER_YES;
   const columns = LADDER.filter((l) => names.includes(l.scenario)).map((l) => ({ scenario: l.scenario, latency_ms: l.latency_ms }));
   const all = grid({ rows }, side, 'all');
@@ -203,10 +210,10 @@ export function ladderGrid(rows: SweetRow[], side: SweetSide, dim: SweetDim, onl
 
 /** The line under the grid for one cell (spec §8): bucket, scenario, n, clusters, captured at that
  *  latency per $100 with its interval, and the label sentence. */
-export function cellDetail(row: LadderGridRow, col: { scenario: string; latency_ms: number }, r: SweetRow | undefined): string {
+export function cellDetail(row: LadderGridRow, col: { scenario: string; latency_ms: number }, r: GridRow | undefined): string {
   const head = `${bucketText(row.dim, row.bucket)} · ${col.scenario}`;
   if (!r) return `${head} · no attempts in this slice`;
-  return `${head} · n ${r.n_exec} · C ${r.clusters} · captured at ${col.latency_ms} ms, per $100: ${interval(r)} · ${LABEL_TEXT[r.label]}`;
+  return `${head} · n ${r.n_exec} · C ${r.clusters} · captured on paper at ${col.latency_ms} ms, per $100: ${interval(r)} · ${LABEL_TEXT[r.label]}`;
 }
 
 /** Spec 7a §3: the ladder grows m, so z is stricter; the grid's footnote says so. */

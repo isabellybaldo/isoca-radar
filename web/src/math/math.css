@@ -1,0 +1,54 @@
+/* The public /math page's own layout (the schematics' CSS lives in theme.css). Controls are touch-sized and
+   never force the page wider than 360 px. No inline styles anywhere (the page's CSP forbids them). */
+.m-sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.m-controls { display: grid; gap: 8px; min-width: 0; }
+.m-btn { font-family: var(--px); font-size: 8px; padding: 10px 12px; min-height: 44px; border: 2px solid var(--line); background: var(--chip); cursor: pointer; justify-self: start; }
+.m-sec .seg button { min-height: 44px; padding: 8px 10px; }
+.m-range { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 8ch; gap: 8px; align-items: center; min-height: 44px; font-size: 13px; }
+.m-range input[type='range'] { width: 100%; min-width: 0; min-height: 44px; margin: 0; }
+.m-range:has(input:disabled) { opacity: 0.45; }
+.m-sec .fold summary { min-height: 44px; display: flex; align-items: center; gap: 6px; }
+.m-check { display: flex; gap: 8px; align-items: center; min-height: 44px; }
+.m-check input { width: 24px; height: 24px; flex: none; }
+.m-level, .m-leg { border: 0; border-top: 1px solid var(--line2); padding: 4px 0 8px; margin: 0; min-width: 0; display: grid; gap: 4px; }
+.m-level legend, .m-leg legend { font-size: 13px; color: var(--dim); }
+.m-size, .m-select { display: flex; gap: 8px; align-items: center; min-height: 44px; font-size: 13px; }
+.m-size input, .m-select select { font: inherit; min-height: 44px; min-width: 0; flex: 1; background: var(--chip); color: var(--fg); border: 2px solid var(--line); padding: 0 6px; }
+.m-formula { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.m-big { font-family: var(--big); font-size: 28px; line-height: 1; }
+.m-cap, .m-note { font-size: 13px; }
+.m-verdict { font-weight: 700; font-size: 20px; margin: 0; }
+.m-verdict.pos { color: var(--mint); }
+.m-verdict.neg { color: var(--salmon); }
+.m-verdict-line, .m-times { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.m-live { display: grid; gap: 4px; min-width: 0; }
+.m-live-k, .m-live-n, .m-live-h { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.m-live-h { font-size: 15px; }
+.m-live-spark { height: 24px; min-width: 0; }
+.m-live-spark .spark { width: 100%; height: 100%; }
+
+/* The page itself (spec 7b section 6.1): one column in the dashboard's frame. Header, tagline, the live strip,
+   a to f, one closing line. Sentences stay in the body font, under 78 characters a line; the drawings take the width. */
+.app.math { max-width: 960px; }
+.m-top h1 { font-family: var(--px); font-size: 11px; line-height: 1.5; font-weight: 400; }
+.m-body { gap: 14px; grid-template-columns: minmax(0, 1fr); }
+.m-tag, .m-sec > .quip, .m-cap, .m-foot p { max-width: 78ch; }
+/* The closing line is the page's footer, after main: it lines up with the column above (main's padding). */
+.m-foot { color: var(--dim); padding: 0 14px 14px; }
+@media (max-width: 600px) { .m-foot { padding: 0 8px 8px; } }
+/* Sliders and checkboxes in the palette, not the browser's blue. (The slider's value column above is 8ch: the
+   longest value is "20 ticks", and at 5ch it ran over the section's border.) */
+.m-range input[type='range'], .m-check input { accent-color: var(--teal); }
+/* The live strip is the page's one hero: the only box with a shadow. */
+.m-live { border: 3px solid var(--line); background: var(--card); box-shadow: 4px 4px 0 var(--line); padding: 10px 12px; }
+.m-sec[id] { scroll-margin-top: 12px; }
+/* No box inside a box: the reused ladder and every fold drop their frames inside a section, as in the explain panel. */
+.m-sec .ll-svg { border: 0; }
+.m-sec .fold { border: 0; border-top: 1px dashed var(--line2); margin-top: 0; }
+.m-sec .fold > summary { padding: 0; }
+.m-sec .fold-body { padding: 0 0 8px; }
+/* f's live part sits under the section's caption, behind a dashed rule. Its table and grid scroll inside it:
+   every track is minmax(0, 1fr) and every wrapper may shrink, so nothing in it widens the page at 360 px. */
+.m-liveladder { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; border-top: 1px dashed var(--line2); padding-top: 10px; margin-top: 4px; }
+.m-liveladder .ladder, .m-liveladder .fold-body { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.m-liveladder .fold, .m-liveladder .scroll { min-width: 0; }

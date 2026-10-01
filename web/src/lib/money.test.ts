@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { compareDecimal, formatDecimal, formatMoney, formatMoneyCents, formatPercent, isZero, signOf } from './money';
+import { compareDecimal, formatAvg, formatDecimal, formatMoney, formatMoneyCents, formatPercent, isZero, signOf } from './money';
 
 describe('formatMoney', () => {
   it('never formats money through a float', () => {
@@ -75,5 +75,19 @@ describe('compareDecimal', () => {
     expect(compareDecimal('-2', '1')).toBe(-1);
     expect(compareDecimal('-0.5', '-0.25')).toBe(-1);
     expect(compareDecimal('12345678901234567.89', '12345678901234567.88')).toBe(1);
+  });
+});
+
+describe('formatAvg', () => {
+  it('rounds a long average to 4 decimals, half up (away from zero), by string and BigInt math', () => {
+    expect(formatAvg('0.5866666666666666666666666667')).toBe('0.5867');
+    expect(formatAvg('0.58664999')).toBe('0.5866');
+    expect(formatAvg('0.58665')).toBe('0.5867');
+    expect(formatAvg('0.99996')).toBe('1');
+    expect(formatAvg('0.6')).toBe('0.6');
+    expect(formatAvg('0.60001')).toBe('0.6');
+    expect(formatAvg('1234.56789')).toBe('1,234.5679');
+    expect(formatAvg('-0.58665')).toBe('−0.5867');
+    expect(formatAvg(null)).toBe('—');
   });
 });

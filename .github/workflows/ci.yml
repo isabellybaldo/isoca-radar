@@ -47,19 +47,38 @@ jobs:
       - run: cargo test -p arb-wasm
   web:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
+    env:
+      # 09-27 §4.2: parity and the math page tests fail instead of skipping when the package is missing.
+      WASM_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add wasm32-unknown-unknown
+      - id: wbg
+        # the CLI must equal the wasm-bindgen crate Cargo.lock pins (7b-A)
+        run: echo "version=$(sh scripts/wasm-bindgen-version.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}
+      - run: command -v wasm-bindgen || cargo install wasm-bindgen-cli --locked --version "${{ steps.wbg.outputs.version }}"
+      # the engine as it ships (release); the native side of parity is 7b-A's wasm job
+      - run: sh scripts/build-wasm.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+        working-directory: web
+      - run: npx tsc --noEmit
+        working-directory: web
+      - run: npx tsc --noEmit -p tsconfig.math.json
+        working-directory: web
       - run: npm test
+        working-directory: web
       - run: npm run build
+        working-directory: web
   compose:
     runs-on: ubuntu-latest
     steps:

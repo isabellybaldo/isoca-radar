@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.math.json && vite build && vite build -c vite.math.config.ts && node scripts/check-math-bundle.mjs",
+    "build:dashboard": "tsc --noEmit && vite build",
     "test": "vitest run"
   },
   "dependencies": {

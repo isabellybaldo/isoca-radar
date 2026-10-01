@@ -1,11 +1,11 @@
 import { useId } from 'react';
-import type { LadderRung } from '../api/types';
-import { EmptyState } from '../components/EmptyState';
+import { Empty } from './Empty';
+import { geo } from './geo';
 import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
 import {
-  type LadderModel, MIN_EXEC, NOT_MONOTONE, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
+  type LadderModel, MIN_EXEC, NOT_MONOTONE, type Rung, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
   slotX, stackRung, usBand, usText, yDomain,
 } from '../lib/ladder';
 
@@ -18,7 +18,11 @@ export const MARKETS_WARMING = 'warming: part of the 30 days is still being fill
 export const MARKETS_RECOMPUTING = 'recomputing after the ladder';
 export const MARKETS_MISSING = 'no markets data';
 export const NO_RUNGS = 'No ladder account has a mark in this epoch yet.';
-export const TABLE_CAPTION = 'paper, since the epoch start, every sum cut at the same mark';
+/** Under a rung with no account the axis shows this mark: the words would run into the next rung at 360 px. The
+ *  dashed box above it is the drawing; the legend and the screen-reader text carry the words. */
+export const NO_ACCOUNT_MARK = '–';
+export const NO_ACCOUNT_LEGEND = 'dashed box: no account at this latency';
+export const TABLE_CAPTION = 'on paper, since the epoch start, every sum cut at the same mark';
 
 const W = 700;
 const H = 200;
@@ -33,16 +37,10 @@ const LEGEND: [string, string][] = [
 ];
 const HEADS = ['RUNG', 'N', 'LEG RISK', 'MISSED', 'BASKET GAINS', 'LEG-RISK COST', 'SETTLED', 'UNREALIZED', 'NET'];
 
-/** A money string as geometry only; a malformed value draws at zero instead of NaN. */
-const geo = (v: string) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-};
-
 function Markets({ model }: { model: LadderModel }) {
   const { status, rows } = model.markets;
-  if (status === 'under_review') return <EmptyState text={MARKETS_RECOMPUTING} />;
-  if (status === 'missing') return <EmptyState text={MARKETS_MISSING} />;
+  if (status === 'under_review') return <Empty text={MARKETS_RECOMPUTING} />;
+  if (status === 'missing') return <Empty text={MARKETS_MISSING} />;
   return (
     <>
       <p className="dim">{MARKETS_CAPTION}</p>
@@ -52,8 +50,8 @@ function Markets({ model }: { model: LadderModel }) {
   );
 }
 
-function LadderTable({ rungs }: { rungs: LadderRung[] }) {
-  if (rungs.length === 0) return <EmptyState text={NO_RUNGS} />;
+function LadderTable({ rungs }: { rungs: Rung[] }) {
+  if (rungs.length === 0) return <Empty text={NO_RUNGS} />;
   return (
     <div className="scroll">
       <table>
@@ -67,7 +65,7 @@ function LadderTable({ rungs }: { rungs: LadderRung[] }) {
         </thead>
         <tbody>
           {rungs.map((r) => (
-            <tr key={r.account_id}>
+            <tr key={r.scenario}>
               <td>{r.scenario}</td>
               <td className="num">{r.n_exec}</td>
               <td className="num">{r.n_leg_risk}</td>
@@ -102,6 +100,9 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
   const thin = model.breakEven.kind === 'thin';
   const band = model.measured ? usBand(model.measured) : null;
   const beX = model.breakEven.kind === 'at' ? latencyX(model.breakEven.latency_ms) * W : null;
+  // The dashed box needs its legend only beside a drawn rung. With no rung at all (no epoch yet) the big line
+  // already says why, and "no account at this latency" under every slot would say it of the whole ladder.
+  const someMissing = present.length > 0 && model.columns.some((c) => c.kind === 'missing');
   return (
     <figure className="ladder" aria-label="at what latency would this pay">
       <p className="ll-kicker">break-even</p>
@@ -143,7 +144,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           const cx = slotX(SLOTS - 1) * W + (j % 2 === 0 ? -14 : 14);
           // A zero-length line with a square cap and a non-scaling stroke: a square at any stretch (a rect would squash).
           const y = sy(geo(r.net));
-          return <line key={r.account_id} className="ll-extra" data-scenario={r.scenario} x1={cx} x2={cx} y1={y} y2={y} />;
+          return <line key={r.scenario} className="ll-extra" data-scenario={r.scenario} x1={cx} x2={cx} y1={y} y2={y} />;
         })}
         <line className="ll-zero" x1={0} x2={W} y1={zero} y2={zero} />
         {beX !== null && <line className="ll-be" x1={beX} x2={beX} y1={0} y2={H} />}
@@ -152,7 +153,14 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
         {model.columns.map((c) => (
           <li key={c.scenario} className={c.kind === 'missing' ? 'missing' : undefined} title={c.scenario}>
             <span className="num">{rungMsText(c)}</span>
-            <span>{rungCountText(c, thin)}</span>
+            {c.kind === 'missing' ? (
+              <>
+                <span aria-hidden="true">{NO_ACCOUNT_MARK}</span>
+                <span className="ll-sr">{rungCountText(c, thin)}</span>
+              </>
+            ) : (
+              <span>{rungCountText(c, thin)}</span>
+            )}
           </li>
         ))}
         <li>
@@ -172,11 +180,17 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           <span className="ll-sw us" aria-hidden="true" />
           {usText(model.measured)}
         </li>
+        {someMissing && (
+          <li>
+            <span className="ll-sw missing" aria-hidden="true" />
+            {NO_ACCOUNT_LEGEND}
+          </li>
+        )}
       </ul>
       {model.extras.length > 0 && (
         <ul className="plain ll-extras" aria-label="extras">
           {model.extras.map((r) => (
-            <li key={r.account_id}>
+            <li key={r.scenario}>
               {extraText(r)}: <Money value={r.net} signed tone cents /> on paper · n {r.n_exec}
             </li>
           ))}

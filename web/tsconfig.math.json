@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/math", "src/wasm", "src/test/setup.ts", "vite.math.config.ts"],
+  "exclude": []
+}

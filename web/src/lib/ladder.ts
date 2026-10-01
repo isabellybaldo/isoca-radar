@@ -1,4 +1,5 @@
-import type { BreakEven, Ladder, LadderRung, MarketsStatus, SweetRow } from '../api/types';
+import type { BreakEven, LadderRung, MarketsStatus } from '../api/types';
+import type { GridRow } from './sweet';
 import { fmtUtcDayHm, fmtUtcHm } from './time';
 
 /**
@@ -22,9 +23,25 @@ export const MIN_EXEC = 30;
 /** Six rungs plus one slot beside sp-idle for the extras (sp-idle-nodelay, sp-burst). */
 export const SLOTS = LADDER.length + 1;
 
+/** Spec 7b §7.2: a rung as the public snapshot carries it (no account id); the api's LadderRung is one too. */
+export type Rung = Omit<LadderRung, 'account_id'>;
+
+/** What ladderModel reads: the api's Ladder, or the public snapshot's ladder through publicToLadder. */
+export interface LadderIn {
+  epoch: number;
+  start_ms: number | null;
+  as_of_ms: number | null;
+  rungs: Rung[];
+  markets: GridRow[];
+  /** Only latency_ms is read; the api's Ladder also carries a host and still assigns here structurally. */
+  measured: { latency_ms: number } | null;
+  markets_status: MarketsStatus;
+  break_even: BreakEven;
+}
+
 export type LadderColumn =
   | { kind: 'missing'; scenario: string; latency_ms: number }
-  | { kind: 'rung'; scenario: string; latency_ms: number; latencyKnown: boolean; rung: LadderRung };
+  | { kind: 'rung'; scenario: string; latency_ms: number; latencyKnown: boolean; rung: Rung };
 
 /** Why a `thin` answer is thin, so the big line never says "too few trades" beside rungs that all have enough. */
 export type ThinReason = 'few' | 'missing' | 'unknown' | 'no_epoch';
@@ -35,14 +52,14 @@ export interface LadderModel {
   asOfMs: number | null;
   /** Always the six LADDER rungs, in order. */
   columns: LadderColumn[];
-  extras: LadderRung[];
+  extras: Rung[];
   breakEven: BreakEven;
   thinReason: ThinReason | null;
-  measured: { latency_ms: number; host: string } | null;
-  markets: { status: MarketsStatus; rows: SweetRow[] };
+  measured: { latency_ms: number } | null;
+  markets: { status: MarketsStatus; rows: GridRow[] };
 }
 
-export function ladderModel(l: Ladder): LadderModel {
+export function ladderModel(l: LadderIn): LadderModel {
   const columns = LADDER.map(({ scenario, latency_ms }): LadderColumn => {
     const rung = l.rungs.find((r) => !r.extra && r.scenario === scenario);
     return rung
@@ -112,7 +129,7 @@ const PARTS = ['gains', 'settle', 'unrealized', 'leg_risk'] as const;
 
 /** One rung's stacked bar (spec §7.2): each part by its own sign, positives up from 0 and negatives down
  *  from 0, in the order gains, settle, unrealized, leg-risk. Numbers are geometry only. */
-export function stackRung(r: Pick<LadderRung, 'gains' | 'settle' | 'unrealized' | 'leg_risk'>): Segment[] {
+export function stackRung(r: Pick<Rung, 'gains' | 'settle' | 'unrealized' | 'leg_risk'>): Segment[] {
   let up = 0;
   let down = 0;
   const out: Segment[] = [];
@@ -131,7 +148,7 @@ export function stackRung(r: Pick<LadderRung, 'gains' | 'settle' | 'unrealized' 
 }
 
 /** The y range holding every stack end and every net, zero always inside, 8 % padding; [−1, 1] when all is zero. */
-export function yDomain(rungs: LadderRung[]): { lo: number; hi: number } {
+export function yDomain(rungs: Rung[]): { lo: number; hi: number } {
   let hi = 0;
   let lo = 0;
   for (const r of rungs) {
@@ -205,7 +222,7 @@ export function usText(m: { latency_ms: number } | null): string {
 }
 
 /** The extras are annotated markers, never rungs (spec §2): name what each one is. */
-export function extraText(r: LadderRung): string {
+export function extraText(r: Rung): string {
   const ms = r.latency_ms === null ? '?' : String(r.latency_ms);
   if (r.scenario === 'sp-burst') return `sp-burst (${ms} ms idle, more in bursts)`;
   if (r.scenario === 'sp-idle-nodelay') return `sp-idle-nodelay (${ms} ms, secondsDelay ignored)`;

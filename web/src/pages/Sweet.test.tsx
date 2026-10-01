@@ -127,6 +127,6 @@ describe('Sweet page', () => {
     const cell = within(g).getByRole('button', { name: 'crypto at rung-25 (25 ms): thin, mean > 0' });
     expect(cell).toHaveTextContent('◐');
     fireEvent.focus(cell);
-    expect(screen.getByText('crypto · rung-25 · n 12 · C 9 · captured at 25 ms, per $100: +$0.30 · too few trades or events to say anything.')).toBeInTheDocument();
+    expect(screen.getByText('crypto · rung-25 · n 12 · C 9 · captured on paper at 25 ms, per $100: +$0.30 · too few trades or events to say anything.')).toBeInTheDocument();
   });
 });

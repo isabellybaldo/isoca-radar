@@ -1,6 +1,10 @@
 // Panel-side models (09-27 §2): structure only; every money figure shown comes from the api.
 import type { EpisodeSummary, Position } from '../api/types';
-import { DAY_MS, fmtDuration } from '../lib/time';
+import { DAY_MS } from '../lib/time';
+import type { DurationRow, PayoffModel } from '../schematics/models';
+
+export { durationText } from '../schematics/models';
+export type { DurationRow, PayoffModel } from '../schematics/models';
 
 /** The ✗ column of an incomplete YES set: EpisodeSummary does not say which outcome is uncovered. */
 export const OTHER = 'an outcome not in the set';
@@ -15,19 +19,6 @@ export function payoffKind(kind: string): PayoffKind | null {
   if (kind === 'no_basket') return 'no';
   if (kind === 'yes_basket_incomplete') return 'incomplete';
   return null;
-}
-
-export interface PayoffModel {
-  kind: 'yes' | 'no';
-  /** The basket's real number of outcomes (may exceed the rows drawn). */
-  s: number;
-  cols: string[];
-  rows: { name: string; cells: (0 | 1)[] }[];
-  /** What the whole basket pays in each column, over all s outcomes. */
-  basket: number[];
-  /** Parent spec §5.7 (b): 1 for a YES basket, s − 1 for a NO basket. */
-  guaranteed: number;
-  broken: boolean[];
 }
 
 /** Parent spec §5.7 (b): who pays in which outcome. Counts, not money. */
@@ -46,15 +37,6 @@ export function payoffStructure(kind: 'yes' | 'no', s: number, uncovered: boolea
 
 /** Parent spec §5.7 (e): five updates, the episode from u2 to u5, the peak at u3. The times are illustrative. */
 export const EXAMPLE_EPISODE = { s_legs: 3, updates_ms: [0, 400, 1400, 2600, 4200], open_ms: 400, peak_ms: 1400, close_ms: 4200 } as const;
-
-export interface DurationRow {
-  kind: 'example' | 'row';
-  label: string;
-  ms: number;
-  open: boolean;
-  /** Update times after the open (the example only). */
-  ticks: number[];
-}
 
 /** Spec 7a §9.2: a duration bar for the row, next to the example labelled example. */
 export function durationRows(row: EpisodeSummary | null, nowMs: number): DurationRow[] {
@@ -89,9 +71,4 @@ export function daysText(endDate: string | null, nowMs: number): string {
   const d = Math.ceil((end - nowMs) / DAY_MS);
   if (d <= 0) return 'past its end date, awaiting resolution';
   return d === 1 ? 'resolves in 1 day' : `resolves in ${d} days`;
-}
-
-export function durationText(r: DurationRow): string {
-  if (r.kind === 'example') return `example: ${fmtDuration(r.ms)}, from u2 to u5, peak at u3`;
-  return r.open ? `${r.label}: still open, ${fmtDuration(r.ms)} so far` : `${r.label}: ${fmtDuration(r.ms)}`;
 }

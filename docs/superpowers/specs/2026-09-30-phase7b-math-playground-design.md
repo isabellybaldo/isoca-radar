@@ -152,7 +152,17 @@ As 09-27 §4, with one more function. **All book inputs are YES-book levels**, a
   ``Host(`${RADAR_DOMAIN}`) && (Path(`/math`) || PathPrefix(`/math-assets/`) || Path(`/math-data/public.json`))``
 
   Its middlewares (per-IP rate and in-flight limits, `ct-sec`, the math CSP) and priority 1000 apply as in 09-27. `connect-src 'self'` allows the fetch.
-- **Compose:** a named volume `public-data`. `api` mounts it read-write at `/var/lib/ct-public` (7b-A). `web` mounts it read-only at `/srv/ct-public-root/math-data` (7b-B). There's no new container and no new memory.
+  - **In-flight limit 8, not 4 (amended 2026-10-01, overrides 09-27 §5.3's `inflightreq.amount=4`).** A cold load fetches the js and css together, then the wasm and `public.json` together, so 4 sits right at the cap (plus a retry or the next tab). 8 clears a normal load and still holds one IP to 8 concurrent requests. The rate limit (5/s, burst 20) is unchanged.
+  - **Headers before limits (amended 2026-10-01, overrides 09-27 §5.3's middleware order).** The order is `ct-sec`, `ct-math-csp`, `ct-math-rl`, `ct-math-if`, so the 429 that Traefik's own limiters write also carries the security headers and the CSP.
+- **Fonts are the one third party (stated 2026-10-01).**
+  - The public page loads its fonts from Google Fonts (`fonts.googleapis.com` for the stylesheet, `fonts.gstatic.com` for the files), so a visitor's IP address and user agent reach Google. No `Referer` goes with them: `ct-sec` sets `Referrer-Policy: same-origin`. There is no other third party.
+  - This is accepted for now. Self-hosting the three font families (IBM Plex Mono, Press Start 2P, VT323; the CSP then becomes `style-src 'self'; font-src 'self'`) is an open owner decision.
+- **A separate nginx server for the public router (amended 2026-10-01, overrides 09-27 §5.3's `service = ct-web`).**
+  - The public paths are served by their own nginx `server` on port 8081. It holds only the three locations (`= /math`, `/math-assets/`, `= /math-data/public.json`) and `location / { return 404; }`.
+  - The `ct-math` router points at its own Traefik service, `ct-math`, on that port. The login-gated server has no math locations.
+  - Why: Traefik keeps `%2F` encoded, so `/math-assets/..%2findex.html` matches the public router. On a shared server nginx then decodes it and serves the dashboard's files without login. With its own server, a traversal has nothing else to reach.
+  - The runbook probes this with `curl --path-as-is`.
+- **Compose:** a named volume `public-data`. `web` mounts it `:ro,nocopy`, and the image does not pre-create the mount point, so an empty volume can't inherit a root owner from the web image. `api` mounts it read-write at `/var/lib/ct-public` (7b-A). `web` mounts it read-only at `/srv/ct-public-root/math-data` (7b-B). There's no new container and no new memory.
 
 ## 6. The playground page (plan 7b-B)
 
@@ -168,9 +178,16 @@ a–e as 09-27 §6.2, plus section e's caption: "caught is not filled: see f".
 
 | | Starts from | Controls | Draws |
 |---|---|---|---|
-| f · one leg misses | a 3-leg NO basket with a positive edge at open; the books at `t_x` equal the open ones and all legs are deep enough (the default result: all fill, a small positive `net_cash`) | per leg: drain the depth at `t_x` (slider to 0); move the unwind book against us by 0–20 ticks (for NO, the YES asks rise, which is the NO bids falling); `q_request`; fees on or off; "the usual burst" preset (one leg empty at `t_x`, the unwind book 5 ticks against us) | per leg: a bar for planned vs filled; `q_eff` as a line across the legs; each leg's excess as a block, split into sold (at the unwind price) and `held_unsold`; the big number `net_cash`: "caught, and lost $x" or "filled, $x on paper". Then the **live ladder** from the snapshot (`LatencyLadder`, read-only, with its own "which markets" fold holding the category grid), headed "on the live scanner, as of …" |
+| f · one leg misses | a 3-leg NO basket with a positive edge at open; the books at `t_x` equal the open ones and all legs are deep enough (the default result: all fill, a small positive `net_cash`) | per leg: drain the depth at `t_x` (slider to 0); move the unwind book against us by 0–20 ticks (for NO, the YES asks rise, which is the NO bids falling); `q_request`; fees on or off; "the usual burst" preset (one leg empty at `t_x`, the unwind book 5 ticks against us) | per leg: a bar for planned vs filled; `q_eff` as a line across the legs; each leg's excess as a block, split into sold (at the unwind price) and `held_unsold`; the big line built from `net_cash` and what happened (amended 2026-10-01, see below). Then the **live ladder** from the snapshot (`LatencyLadder`, read-only, with its own "which markets" fold holding the category grid), headed "on the live scanner, as of …" |
 
 - Every control change calls `basket_json` synchronously, once per animation frame while dragging (as 09-27).
+- **f's big line (amended 2026-10-01).** The first draft chose between "caught, and lost $x" and "filled, $x on paper" by the sign of `net_cash`. That is false whenever cash is out but shares are still held, such as a fully filled YES basket or an unsold excess. The line now has two halves, and the page does no arithmetic:
+  - **Word:** "caught" if any leg has excess; otherwise "nothing filled" if `q_eff` is 0; otherwise "filled".
+  - **Money phrase:**
+    - "and lost $x on paper" when the net is negative and nothing is held;
+    - "$x out on paper, shares still held" when the net is negative and shares or a resolution value remain;
+    - "+$x on paper" otherwise.
+- **f's unwind wording** tells the two zero-fill cases apart: "under the minimum, no order went out" and "no buyer in the book".
 - **f's caption** names `sim::policy::settle` and `sim::venue::basket_buy` / `unwind_sell` and says: "the same rules the paper accounts on the live scanner use; here the unwind happens at one instant, the live sim waits the account's delay".
 
 ### 6.3 The snapshot on the page

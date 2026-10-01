@@ -1,14 +1,17 @@
 import { render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import type { Ladder } from '../api/types';
-import { LADDER, NOT_MONOTONE, SLOTS, ladderModel, slotX } from '../lib/ladder';
+import { describe, expect, it, vi } from 'vitest';
+import type { Ladder, LadderRung, SweetRow } from '../api/types';
+import { LADDER, type LadderIn, NOT_MONOTONE, type Rung, SLOTS, ladderModel, slotX } from '../lib/ladder';
+import type { GridRow } from '../lib/sweet';
 import { ladderFixture, ladderLiveFixture } from '../test/fixtures';
-import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING } from './LatencyLadder';
+import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING, NO_ACCOUNT_LEGEND, NO_ACCOUNT_MARK } from './LatencyLadder';
 
 const W = 700;
 const draw = (o: Partial<Ladder> = {}) => render(<LatencyLadder model={ladderModel(ladderFixture(o))} />);
 const num = (el: Element | null, a: string) => Number(el?.getAttribute(a));
 const rungItems = () => within(screen.getByRole('list', { name: 'rungs' })).getAllByRole('listitem');
+/** What a sighted reader gets under a rung: the text of every line that is not for screen readers only. */
+const shown = (li: HTMLElement) => [...li.children].filter((c) => !c.classList.contains('ll-sr')).map((c) => c.textContent ?? '');
 
 describe('LatencyLadder', () => {
   it('says the break-even big, marks it between its two rungs, and labels every rung in HTML', () => {
@@ -107,10 +110,51 @@ describe('LatencyLadder', () => {
     const { container } = draw({ rungs: ladderFixture().rungs.filter((r) => r.scenario !== 'rung-100'), break_even: { kind: 'thin' } });
     expect(container.querySelector('rect.ll-missing[data-scenario="rung-100"]')).not.toBeNull();
     expect(container.querySelector('g[data-scenario="rung-100"]')).toBeNull();
-    expect(screen.getByText('no account')).toBeInTheDocument();
     expect(screen.getByText('a rung has no account yet')).toHaveClass('ll-big');
     expect(screen.queryByText('too few trades yet')).toBeNull();
     expect(rungItems()).toHaveLength(7);
+  });
+
+  it('a rung with no account shows a short mark under its dashed box; the legend and the accessible text keep the words (Task 16 V3)', () => {
+    draw({ rungs: ladderFixture().rungs.filter((r) => r.scenario !== 'rung-100'), break_even: { kind: 'thin' } });
+    const li = rungItems()[3];
+    expect(NO_ACCOUNT_MARK).toBe('–');
+    expect(shown(li)).toEqual(['100', NO_ACCOUNT_MARK]);
+    expect(within(li).getByText(NO_ACCOUNT_MARK)).toHaveAttribute('aria-hidden', 'true');
+    expect(within(li).getByText('no account')).toHaveClass('ll-sr'); // read out, not drawn
+    const row = within(screen.getByRole('list', { name: 'legend' })).getByText(NO_ACCOUNT_LEGEND);
+    expect(NO_ACCOUNT_LEGEND).toBe('dashed box: no account at this latency');
+    expect(row.querySelector('.ll-sw')).toHaveClass('missing');
+  });
+
+  it('the legend explains the dashed box only when one is drawn', () => {
+    draw();
+    expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
+    expect(screen.queryByText('no account')).toBeNull();
+  });
+
+  it('no axis label can run into its neighbour at 360 px: every visible word fits a 6-character slot, for any mix of rungs (Task 16 V3)', () => {
+    // 7 slots share about 314 px (360 less the page and box frames): 44.9 px each; at 12 px a character is 7.2 px, so 6 fit.
+    const mixes: ((r: LadderRung, i: number) => boolean)[] = [
+      () => true,
+      () => false,
+      (_, i) => i % 2 === 0,
+      (_, i) => i % 2 === 1,
+      (r) => !['rung-100', 'rung-200', 'sp-idle'].includes(r.scenario), // the three neighbours that collided on the page
+    ];
+    for (const [k, keep] of mixes.entries()) {
+      // the settled ladder (plain counts) and the live one (thin: "n / 30" under every rung)
+      for (const l of [ladderFixture(), ladderLiveFixture()]) {
+        const rungs = l.rungs.filter(keep);
+        const cut: Ladder = rungs.length === l.rungs.length ? l : { ...l, rungs, break_even: { kind: 'thin' } };
+        const { unmount } = render(<LatencyLadder model={ladderModel(cut)} />);
+        expect(rungItems(), `mix ${k}`).toHaveLength(7);
+        for (const li of rungItems()) {
+          for (const word of shown(li).join(' ').split(/\s+/)) expect(word.length, `mix ${k}: "${word}"`).toBeLessThanOrEqual(6);
+        }
+        unmount();
+      }
+    }
   });
 
   it('a fresh epoch and epoch 0 draw no NaN (review focus 3)', () => {
@@ -125,9 +169,31 @@ describe('LatencyLadder', () => {
       }
       unmount();
     }
-    render(<LatencyLadder model={ladderModel(epoch0)} />);
+    const { container } = render(<LatencyLadder model={ladderModel(epoch0)} />);
     expect(screen.getByText('no epoch yet')).toHaveClass('ll-big');
     expect(screen.getAllByText('no account')).toHaveLength(6);
+    expect(container.querySelectorAll('rect.ll-missing')).toHaveLength(6);
+    // the big line already says there is no epoch: the legend does not add "no account at this latency" for every slot
+    expect(screen.queryByText(NO_ACCOUNT_LEGEND)).toBeNull();
+  });
+
+  it('the dashed-box legend needs a rung with an account and one without: none drawn, all drawn and no rung at all leave it out', () => {
+    const all = ladderFixture().rungs;
+    const ladderOnly = all.filter((r) => !r.extra);
+    const cases: [string, LadderRung[], number, boolean][] = [
+      ['every rung has an account', all, 0, false],
+      ['one rung has none', all.filter((r) => r.scenario !== 'rung-100'), 1, true],
+      ['one rung has an account', ladderOnly.slice(0, 1), 5, true],
+      ['only the extras have accounts', all.filter((r) => r.extra), 6, false],
+      ['no rung at all', [], 6, false],
+    ];
+    for (const [name, rungs, boxes, legend] of cases) {
+      const cut: Ladder = rungs.length === all.length ? ladderFixture() : ladderFixture({ rungs, break_even: { kind: 'thin' } });
+      const { container, unmount } = render(<LatencyLadder model={ladderModel(cut)} />);
+      expect(container.querySelectorAll('rect.ll-missing'), name).toHaveLength(boxes);
+      expect(screen.queryAllByText(NO_ACCOUNT_LEGEND), name).toHaveLength(legend ? 1 : 0);
+      unmount();
+    }
   });
 
   it('which markets: the compact grid for live and warming, words for under_review and missing; the time frame is named', () => {
@@ -150,13 +216,41 @@ describe('LatencyLadder', () => {
     expect(screen.getByText(MARKETS_MISSING)).toBeInTheDocument();
   });
 
-  it('names the unwind rule and keeps the numbers in a closed fold, labelled paper', () => {
+  it('names the unwind rule and keeps the numbers in a closed fold, labelled on paper', () => {
     draw();
     expect(screen.getByText(LADDER_CAPTION)).toBeInTheDocument();
     const nums = screen.getByText('the numbers').closest('details') as HTMLDetailsElement;
     expect(nums.open).toBe(false);
     expect(within(nums).getAllByRole('row')).toHaveLength(9); // header + 6 rungs + 2 extras
-    expect(within(nums).getByText(/^paper, since the epoch start/)).toBeInTheDocument();
+    expect(within(nums).getByText(/^on paper, since the epoch start/)).toBeInTheDocument();
     expect(screen.getAllByText('−$80.10')).toHaveLength(2); // extras line + the numbers fold
+  });
+});
+
+/** A rung as the public snapshot carries it (spec 7b §5.1): no account id. */
+const noAccount = (r: LadderRung): Rung => {
+  const { account_id, ...rest } = r;
+  void account_id;
+  return rest;
+};
+/** A Sweet row with only the fields the grid reads. */
+const gridOnly = (r: SweetRow): GridRow => ({
+  side: r.side, scenario: r.scenario, fee_bips: r.fee_bips, latency_ms: r.latency_ms, dimension: r.dimension, bucket: r.bucket,
+  label: r.label, n_exec: r.n_exec, clusters: r.clusters, mean: r.mean, lo: r.lo, hi: r.hi,
+});
+
+describe('LatencyLadder on the public snapshot (spec 7b §7.2)', () => {
+  it('draws a ladder whose rungs carry no account_id, keyed by scenario (review focus 4)', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const l = ladderFixture();
+    const input: LadderIn = { ...l, measured: { latency_ms: 155 }, rungs: l.rungs.map(noAccount), markets: l.markets.map(gridOnly) };
+    const { container } = render(<LatencyLadder model={ladderModel(input)} />);
+    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big');
+    expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
+    expect(container.querySelectorAll('line.ll-extra')).toHaveLength(2);
+    expect(within(screen.getByRole('list', { name: 'extras' })).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(screen.getByRole('table', { name: 'which markets' })).getAllByRole('button').length).toBeGreaterThan(0);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 });

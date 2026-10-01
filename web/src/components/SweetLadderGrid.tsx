@@ -1,7 +1,6 @@
 import { useState } from 'react';
-import type { SweetRow } from '../api/types';
 import {
-  GLYPHS, GLYPH_NAME, GLYPH_ORDER, GRID_HINT, type LadderGridRow, type SweetDim, type SweetSide, bucketText, cellDetail, glyphKey, ladderGrid,
+  GLYPHS, GLYPH_NAME, GLYPH_ORDER, GRID_HINT, type GridRow, type LadderGridRow, type SweetDim, type SweetSide, bucketText, cellDetail, glyphKey, ladderGrid,
 } from '../lib/sweet';
 
 const cellId = (row: LadderGridRow, scenario: string) => `${row.dim}|${row.bucket}|${scenario}`;
@@ -12,7 +11,7 @@ const cellId = (row: LadderGridRow, scenario: string) => `${row.dim}|${row.bucke
  * detail line under the grid (not a popover); the legend sits beside it, in words.
  */
 export function SweetLadderGrid({ rows, side, dim, label, only }: {
-  rows: SweetRow[];
+  rows: GridRow[];
   side: SweetSide;
   dim: SweetDim;
   label: string;

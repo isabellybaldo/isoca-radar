@@ -8,6 +8,17 @@ import { describe, expect, it } from 'vitest';
 declare const process: { cwd(): string };
 const css: string = readFileSync(`${process.cwd()}/src/theme.css`, 'utf8');
 const html: string = readFileSync(`${process.cwd()}/index.html`, 'utf8');
+const read = (path: string): string => {
+  try {
+    return readFileSync(`${process.cwd()}/${path}`, 'utf8');
+  } catch {
+    return ''; // a missing file fails the test that needs it, with a readable message
+  }
+};
+/** The public page's own layout and its entry (spec 7b §6.1): the same structural rules run over them. */
+const mathCss: string = read('src/math/math.css');
+const mathHtml: string = read('math.html');
+const FONTS = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Press+Start+2P&family=VT323&display=swap';
 
 function rule(selector: string): string {
   const i = css.indexOf(`\n${selector} {`); // at a line start: `html, body {` is not the body rule
@@ -29,15 +40,18 @@ describe('theme', () => {
   });
 
   it('loads the three fonts from Google Fonts only (the CSP stays as it is)', () => {
-    expect(html).toContain('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Press+Start+2P&family=VT323&display=swap');
+    expect(html).toContain(FONTS);
     expect(html).not.toMatch(/<script(?![^>]*type="module")/);
   });
 
-  it('never forces a page wider than 360 px', () => {
-    for (const m of css.matchAll(/(?<![-\w])(min-width|width):\s*(\d+)px/g)) {
-      expect(Number(m[2]), `${m[0]}`).toBeLessThanOrEqual(328);
+  it('never forces a page wider than 360 px: the dashboard sheet and the public math sheet', () => {
+    for (const [name, sheet] of [['theme.css', css], ['math/math.css', mathCss]] as const) {
+      expect(sheet.length, `${name} is missing`).toBeGreaterThan(0);
+      for (const m of sheet.matchAll(/(?<![-\w])(min-width|width):\s*(\d+)px/g)) {
+        expect(Number(m[2]), `${name}: ${m[0]}`).toBeLessThanOrEqual(328);
+      }
+      expect(sheet, name).not.toMatch(/minmax\(\s*\d+px/);
     }
-    expect(css).not.toMatch(/minmax\(\s*\d+px/);
     expect(rule('.scroll')).toMatch(/overflow-x:\s*auto/);
     expect(rule('body')).toMatch(/overflow-wrap:\s*anywhere/);
     expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/);
@@ -64,12 +78,82 @@ describe('theme', () => {
     expect(rule('.explain-tab')).toMatch(/border-right:\s*0/);
   });
 
+  it('keeps the mirror axis labels under the plot: same gutter as the rows, labels in the label font, alert token', () => {
+    expect(rule('.mb-row')).toMatch(/grid-template-columns:\s*4ch/);
+    expect(rule('.mb-axis')).toMatch(/margin-left:\s*calc\(4ch \+ 6px\)/);
+    expect(rule('.mb-axis')).not.toMatch(/font-size/); // a font-size here would make 4ch differ from the row's
+    expect(rule('ul.plain.mb-lab')).not.toMatch(/--px/);
+    expect(rule('.mb-alert')).toMatch(/var\(--bad\)/);
+  });
+
   it("wraps the panel's axis labels between words, never inside one: `extras` stays whole, `in time` cells keep a gap", () => {
     // The body's overflow-wrap: anywhere split `extras` into extra/s and let six `in time` labels touch (7a-B Chrome check).
-    for (const sel of ['.ll-axis li', '.cb-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
+    for (const sel of ['.ll-axis li', '.cb-axis li', '.mb-axis li', '.ds-axis li', '.ds-yaxis li', '.bl-axis li', '.ub-axis li']) expect(rule(sel)).toMatch(/overflow-wrap:\s*normal/);
     // 7 slots in a 360 px panel leave ~44 px each: `extras` (6 ch) fits at 12 px (43.2 px), not at 13 px.
     expect(Number(/font-size:\s*(\d+)px/.exec(rule('.ll-axis'))?.[1])).toBeLessThanOrEqual(12);
     // A gap narrower than `in time` forces the two words onto two lines instead of into the next cell.
     expect(Number(/column-gap:\s*(\d+)px/.exec(rule('.cb-axis'))?.[1])).toBeGreaterThanOrEqual(6);
+  });
+
+  it('keeps the basket leg labels breakable inside a cell and the planned outline visible (7b-B review I4)', () => {
+    expect(rule('.bl-axis li span')).toMatch(/overflow-wrap:\s*anywhere/); // a long figure splits rather than overflow 360 px
+    expect(rule('.ub-axis li span')).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
+    // The loss area differs from the profit area by more than colour: a dashed outline. It only shows when the
+    // stroke is not the fill's own colour and is not faded with it (fill-opacity, never opacity on the element).
+    const loss = rule('.ds-svg .ds-loss');
+    const paint = (prop: string, r: string) => new RegExp(`[;{ ]${prop}:\\s*([^;]+);`).exec(r)?.[1];
+    expect(loss).toMatch(/stroke-dasharray/);
+    expect(paint('fill', loss)).toBe('var(--rose)');
+    expect(paint('stroke', loss)).toBe('var(--fg)');
+    expect(paint('stroke', loss)).not.toBe(paint('fill', loss));
+    expect(paint('opacity', loss)).toBeUndefined();
+    expect(paint('fill-opacity', loss)).toBe('0.6');
+    expect(rule('.ds-svg .ds-pi')).not.toMatch(/stroke/); // the profit area has no outline
+    // the legend swatch is drawn the same way: a dashed border in a colour that is not its background
+    const sw = rule('.ds-sw.loss');
+    expect(paint('background', sw)).toBe('var(--rose)');
+    expect(paint('border', sw)).toBe('1px dashed var(--fg)');
+  });
+
+  it('keeps the zoomed drawings readable: join band, cost axis beside the stairs, dashed swatches, one peak line (7b-B Task 16)', () => {
+    // a: the join lines are drawn in a readable colour, across a plot tall enough for the band between the rows
+    expect(rule('.mb-svg .mb-link')).toMatch(/stroke:\s*var\(--dim\)/);
+    expect(Number(/height:\s*(\d+)px/.exec(rule('.mb-svg'))?.[1])).toBeGreaterThanOrEqual(112);
+    // d: the cost axis is a column beside the SVG that only takes the width of its labels; the shares axis sits under the plot
+    expect(rule('.ds-plot')).toMatch(/grid-template-columns:\s*auto minmax\(0, 1fr\)/);
+    expect(rule('.ds-yaxis')).toMatch(/justify-content:\s*space-between/);
+    expect(rule('.ds-axis')).toMatch(/grid-column:\s*2/);
+    // d's legend: cost is a solid line, pays a dashed one (they share a colour, so the dash is the difference)
+    expect(rule('.ds-sw.cost, .ds-sw.pay')).toMatch(/width:\s*18px/);
+    expect(rule('.ds-sw.cost')).toMatch(/background:\s*var\(--fg\)/);
+    expect(rule('.ds-sw.pay')).toMatch(/repeating-linear-gradient\(90deg, var\(--mint\) 0 4px, transparent 4px 7px\)/);
+    // the ladder: a rung with no account is a dashed box in the legend as in the drawing; its words stay for screen readers
+    expect(rule('.ll-sw.missing')).toMatch(/border:\s*1px dashed var\(--dim\)/); // --line2 was too faint to see
+    expect(rule('.ll-svg .ll-missing')).toMatch(/stroke:\s*var\(--dim\)/); // the box and its swatch change together
+    expect(rule('.ds-plot .ds-svg')).toMatch(/grid-column:\s*2/); // the plot keeps its column when the cost axis is hidden
+    expect(rule('.cl-ran, .ll-sr')).toMatch(/clip:\s*rect\(0, 0, 0, 0\)/);
+    // e: every update column reserves the line where one of them says "peak", so the five columns align
+    expect(rule('.ub-axis li .ub-mark')).toMatch(/min-height:\s*1\.3em/);
+  });
+
+  it('gives the public page its own entry: same fonts, no inline script or style, nothing of the dashboard (spec 7b §6.1, the math CSP)', () => {
+    expect(mathHtml, 'math.html is missing').not.toBe('');
+    expect(mathHtml).toMatch(/<html lang="en">/);
+    expect(mathHtml).toContain('<title>isoca-radar · math</title>');
+    expect(mathHtml).toMatch(/<meta name="description" content="[^"]{50,200}" \/>/);
+    expect(mathHtml).toContain('<meta name="viewport" content="width=device-width, initial-scale=1" />');
+    expect(mathHtml).not.toMatch(/noindex/); // public, meant to be found (index.html is not)
+    // style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com: the dashboard's three links, nothing else remote
+    expect(mathHtml).toContain(FONTS);
+    expect([...mathHtml.matchAll(/https?:\/\/[^"'\s]+/g)].map((m) => m[0]).filter((u) => !/^https:\/\/fonts\.(googleapis|gstatic)\.com/.test(u))).toEqual([]);
+    for (const tag of html.match(/<link [^>]*>/g) ?? []) expect(mathHtml, tag).toContain(tag);
+    // script-src 'self' 'wasm-unsafe-eval': one module script with a src, no inline script, style or handler
+    expect(mathHtml.match(/<script[^>]*>[^<]*<\/script>/g)).toEqual(['<script type="module" src="/src/math/main.tsx"></script>']);
+    expect(mathHtml).not.toMatch(/\sstyle=|<style|\son\w+=/);
+    expect(mathHtml).not.toContain('/api/');
+    expect(mathHtml).not.toContain('/src/main.tsx');
+    // without JavaScript, or when the module does not load, the page still says one thing (React replaces it on mount)
+    expect(mathHtml).toContain('<div id="root"><p>This page draws with WebAssembly and needs JavaScript.</p></div>');
   });
 });

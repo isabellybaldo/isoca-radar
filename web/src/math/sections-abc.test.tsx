@@ -1,0 +1,390 @@
+// Engine figures come from 7b-A's fixtures (the sections start from fixture inputs) or from the engine for
+// the page's own input; none is computed by hand here (R13). No fixed sleeps: every wait is a waitFor/findBy.
+// @ts-ignore: node:fs exists at runtime under vitest (no @types/node installed)
+import { existsSync, readFileSync } from 'node:fs';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { formatDecimal } from '../lib/money';
+import { CROSSED } from '../schematics/MirrorBooks';
+import { NOT_RISK_FREE, endText } from '../schematics/ClassifyTree';
+import { describeWasm, fixtureCase, loadTestEngine } from '../wasm/testEngine';
+import type { ClassifyIn, ClassifyModel, Engine, MirrorModel, PayoffIn, PayoffMatrix } from '../wasm/types';
+import { IMPLICATION_PRICE_USE } from './adapt';
+import { B_QUIPS, SECTIONS } from './copy';
+import { toTick } from './defaults';
+import { CLASSIFY_START, ClassifySection, classifyInput } from './sections/ClassifySection';
+import { MIRROR_START, MirrorSection } from './sections/MirrorSection';
+import { PAYOFF_START, PayoffSection, payoffInput } from './sections/PayoffSection';
+
+declare const process: { cwd(): string };
+
+/** The engine's one sentence in place of a drawing (Section's Out): a polite status with the error class, or null. */
+const engineError = () => document.querySelector('p.error');
+const lit = (c: HTMLElement) => [...c.querySelectorAll('li.cl-node.lit')].map((li) => li.getAttribute('data-node'));
+const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+
+describe('captions name functions that exist in the Rust code (R7)', () => {
+  const root = `${process.cwd()}/../crates`;
+  const DIR = { arb_core: 'arb-core', sim: 'sim' } as const;
+  const refs = Object.values(SECTIONS).flatMap((s) =>
+    [...s.caption.matchAll(/\b(arb_core|sim)::([a-z_]+)(?:::(\{[^}]*\}|[A-Za-z_0-9]+))?/g)].flatMap((m) => {
+      const names = m[3] === undefined ? [null] : m[3].replace(/[{}]/g, '').split(',').map((n) => n.trim());
+      return names.map((name) => ({ crate: m[1] as keyof typeof DIR, mod: m[2], name }));
+    }),
+  );
+
+  it('finds references in every caption', () => {
+    for (const [k, s] of Object.entries(SECTIONS)) expect(/\b(arb_core|sim)::/.test(s.caption), k).toBe(true);
+    expect(refs.length).toBeGreaterThan(10);
+  });
+
+  it.each(refs.map((r) => [`${r.crate}::${r.mod}${r.name === null ? '' : `::${r.name}`}`, r] as const))('%s exists', (_label, r) => {
+    const file = `${root}/${DIR[r.crate]}/src/${r.mod}.rs`;
+    expect(existsSync(file), file).toBe(true);
+    if (r.name !== null) expect(readFileSync(file, 'utf8')).toMatch(new RegExp(`pub\\s+(?:fn|struct|trait|enum)\\s+${r.name}\\b`));
+  });
+});
+
+describeWasm('sections a–c on the real engine (09-27 §8)', () => {
+  let engine: Engine;
+  beforeAll(async () => {
+    engine = await loadTestEngine();
+  });
+  /** The engine with every request to `fn` (mirror_json unless named) recorded, to inspect what the page really sent. */
+  const spied = (fn: 'mirror_json' | 'payoff_json' | 'classify_json' = 'mirror_json') => {
+    const sent: string[] = [];
+    return { sent, engine: { ...engine, [fn]: (i: string) => (sent.push(i), engine[fn](i)) } as Engine };
+  };
+  const lastBook = (sent: string[]) => JSON.parse(sent.at(-1) ?? '{}') as { bids: { p: string }[]; asks: { p: string }[] };
+  const ticks = (rows: { p: string }[]) => rows.map((l) => toTick(l.p));
+
+  it('a: the start is fixture fed-book, and the page draws its output (review focus 4)', () => {
+    const fx = fixtureCase('mirror_json', 'fed-book');
+    expect(MIRROR_START).toEqual(JSON.parse(fx.input));
+    expect(engine.mirror_json(JSON.stringify(MIRROR_START))).toBe(fx.output);
+    const m = JSON.parse(fx.output) as MirrorModel;
+    render(<MirrorSection engine={engine} />);
+    expect(screen.getByRole('heading', { name: 'a · one book, twice' })).toBeInTheDocument();
+    expect(screen.getByText(`D1 long ${m.d1_long}`)).toBeInTheDocument();
+    expect(screen.getByText(`short ${m.d1_short}`)).toBeInTheDocument();
+    expect(screen.getByText(`spread ${m.spread}`)).toBeInTheDocument();
+    expect(screen.getByText(SECTIONS.a.quip)).toBeInTheDocument();
+    expect(screen.getByText(SECTIONS.a.caption)).toBeInTheDocument();
+  });
+
+  it('a: crossing the book raises the alert, and reset clears it', async () => {
+    render(<MirrorSection engine={engine} />);
+    fireEvent.click(screen.getByRole('button', { name: 'cross the book' }));
+    expect(await screen.findByText(CROSSED)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'reset' }));
+    await waitFor(() => expect(screen.queryByText(CROSSED)).toBeNull());
+  });
+
+  it('a: the price axis is zoomed onto the book at the start and when crossed, and follows a level dragged far away (Task 16 V1)', async () => {
+    const { container } = render(<MirrorSection engine={engine} />);
+    const axis = () => [...container.querySelectorAll('.mb-axis li')].map((li) => li.textContent);
+    expect(axis()).toEqual(['0.40', '0.50', '0.60']); // levels 0.51–0.58 and their mirrors 0.42–0.49, two ticks of room
+    fireEvent.click(screen.getByRole('button', { name: 'cross the book' }));
+    expect(await screen.findByText(CROSSED)).toBeInTheDocument();
+    expect(axis()).toEqual(['0.40', '0.50', '0.60']);
+    change('YES bid 4 price', '5');
+    await waitFor(() => expect(axis()).toEqual(['0.03', '0.50', '0.97']));
+    expect(container.querySelectorAll('g.mb-yes rect')).toHaveLength(8);
+  });
+
+  it('a: "cross the book" shows the crossing bid beside the ask at its price, in both rows (Task 16 review 1)', async () => {
+    const { sent, engine: spy } = spied();
+    const { container } = render(<MirrorSection engine={spy} />);
+    fireEvent.click(screen.getByRole('button', { name: 'cross the book' }));
+    expect(await screen.findByText(CROSSED)).toBeInTheDocument();
+    const book = lastBook(sent);
+    const shared = ticks(book.bids).filter((t) => ticks(book.asks).includes(t));
+    expect(shared).toHaveLength(1); // the best bid sits one tick above the best ask: on the second ask
+    for (const row of ['g.mb-yes', 'g.mb-no']) {
+      const rects = [...container.querySelectorAll(`${row} rect`)]
+        .map((r) => ({ cls: r.getAttribute('class'), x0: Number(r.getAttribute('x')), x1: Number(r.getAttribute('x')) + Number(r.getAttribute('width')) }))
+        .sort((a, b) => a.x0 - b.x0);
+      expect(rects, row).toHaveLength(book.bids.length + book.asks.length);
+      for (const [i, r] of rects.entries()) {
+        expect(r.x1 - r.x0, row).toBeGreaterThan(0);
+        if (i > 0) expect(r.x0, `${row} ${i}`).toBeGreaterThanOrEqual(rects[i - 1].x1 - 1e-9); // no bar under another
+      }
+      // the shared slot: a bid on the left half and an ask on the right half, touching
+      const pair = rects.findIndex((r, i) => i > 0 && Math.abs(r.x0 - rects[i - 1].x1) < 1e-9);
+      expect(pair, row).toBeGreaterThan(0);
+      expect([rects[pair - 1].cls, rects[pair].cls], row).toEqual(['mb-bid', 'mb-ask']);
+    }
+    // every join line still lands on the middle of a slot: p and 1 − p stay mirror images
+    for (const l of container.querySelectorAll('line.mb-link')) expect(Number(l.getAttribute('x1')) + Number(l.getAttribute('x2'))).toBeCloseTo(300);
+  });
+
+  it('a and c: a slider under a legend does not repeat it; the full name stays the accessible one (Task 16 V5)', () => {
+    const shown = (name: string) => {
+      const el = screen.getByLabelText(name);
+      return { text: el.closest('label')?.querySelector('span')?.textContent, group: el.closest('fieldset')?.querySelector('legend')?.textContent };
+    };
+    const a = render(<MirrorSection engine={engine} />);
+    expect(shown('YES bid 1 price')).toEqual({ text: 'price', group: 'YES bid 1' });
+    expect(shown('YES ask 4 price')).toEqual({ text: 'price', group: 'YES ask 4' });
+    a.unmount();
+    render(<ClassifySection engine={engine} />);
+    expect(shown('leg A best bid')).toEqual({ text: 'best bid', group: 'leg A' });
+    expect(shown('leg C best ask')).toEqual({ text: 'best ask', group: 'leg C' });
+  });
+
+  it("a: a size of 0 is the engine's sentence (fixture size-zero), and the page keeps working (review focus 2)", async () => {
+    const sentence = (JSON.parse(fixtureCase('mirror_json', 'size-zero').output) as { error: string }).error;
+    const { container } = render(<MirrorSection engine={engine} />);
+    change('YES bid 1 size', '0');
+    expect(await screen.findByRole('status')).toHaveTextContent(sentence);
+    expect(engineError()).toHaveTextContent(sentence); // what the "no engine error" checks in this file look for
+    expect(screen.queryByRole('alert')).toBeNull(); // a status, so a slider does not make it read out again on every step
+    expect(container.querySelector('svg.mb-svg')).toBeNull();
+    change('YES bid 1 size', '100');
+    await waitFor(() => expect(container.querySelector('svg.mb-svg')).not.toBeNull());
+  });
+
+  it('a: every price slider has room to move (none is pinned by its neighbours)', () => {
+    render(<MirrorSection engine={engine} />);
+    for (const side of ['bid', 'ask']) {
+      for (let i = 1; i <= 4; i++) {
+        const el = screen.getByLabelText(`YES ${side} ${i} price`);
+        expect(Number(el.getAttribute('max')) - Number(el.getAttribute('min')), `${side} ${i}`).toBeGreaterThan(50);
+      }
+    }
+  });
+
+  it('a: dragging an inner level pushes its neighbours, and the engine always gets a strict order', async () => {
+    const { sent, engine: spy } = spied();
+    render(<MirrorSection engine={spy} />);
+    change('YES bid 3 price', '60'); // bids were 54 53 52 51
+    await waitFor(() => expect(ticks(lastBook(sent).bids)).toEqual([62, 61, 60, 51]));
+    expect(engineError()).toBeNull();
+    change('YES bid 2 price', '40'); // pushes the levels behind it down
+    await waitFor(() => expect(ticks(lastBook(sent).bids)).toEqual([62, 40, 39, 38]));
+    change('YES ask 2 price', '70'); // asks were 55 56 57 58
+    await waitFor(() => expect(ticks(lastBook(sent).asks)).toEqual([55, 70, 71, 72]));
+    expect(engineError()).toBeNull();
+    for (const raw of sent) {
+      const b = JSON.parse(raw) as { bids: { p: string }[]; asks: { p: string }[] };
+      const bt = ticks(b.bids);
+      const at = ticks(b.asks);
+      expect(bt.every((t, k) => k === 0 || t < bt[k - 1]), raw).toBe(true);
+      expect(at.every((t, k) => k === 0 || t > at[k - 1]), raw).toBe(true);
+    }
+  });
+
+  it('a: dragging to the extremes keeps every level inside 0.01–0.99 and in order', async () => {
+    const { sent, engine: spy } = spied();
+    render(<MirrorSection engine={spy} />);
+    change('YES bid 1 price', '99');
+    await waitFor(() => expect(ticks(lastBook(sent).bids)).toEqual([99, 53, 52, 51]));
+    change('YES bid 1 price', '1');
+    await waitFor(() => expect(ticks(lastBook(sent).bids)).toEqual([4, 3, 2, 1]));
+    change('YES ask 4 price', '1');
+    await waitFor(() => expect(ticks(lastBook(sent).asks)).toEqual([1, 2, 3, 4]));
+    change('YES ask 1 price', '99');
+    await waitFor(() => expect(ticks(lastBook(sent).asks)).toEqual([96, 97, 98, 99]));
+    expect(engineError()).toBeNull();
+  });
+
+  it('b: the YES basket with Other unlisted breaks on Other; the NO basket never does; the implication has an impossible column', async () => {
+    render(<PayoffSection engine={engine} />);
+    expect(PAYOFF_START).toMatchObject({ kind: 'yes', s: 3, listed: false, priced: false });
+    expect(payoffInput(PAYOFF_START)).toEqual(JSON.parse(fixtureCase('payoff_json', 'yes-3-other').input));
+    expect(screen.getByRole('columnheader', { name: 'Other ✗' })).toBeInTheDocument();
+    expect(screen.getByText(B_QUIPS.yes)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'NO basket' }));
+    await waitFor(() => expect(screen.queryByRole('columnheader', { name: /✗/ })).toBeNull());
+    expect(screen.getByText(B_QUIPS.no)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'implication A ⇒ B' }));
+    expect(await screen.findByRole('columnheader', { name: 'A∧¬B (impossible)' })).toBeInTheDocument();
+    expect(screen.getByText(B_QUIPS.implication)).toBeInTheDocument();
+  });
+
+  it('b: S goes 2 to 6 and the engine accepts each, with exactly S+1 columns while Other is unlisted', async () => {
+    render(<PayoffSection engine={engine} />);
+    for (const k of [2, 4, 5, 6, 3]) {
+      fireEvent.click(screen.getByRole('button', { name: `S ${k}` }));
+      await waitFor(() => expect(screen.getAllByRole('columnheader').filter((h) => /^[A-F]$|^Other/.test(h.textContent ?? ''))).toHaveLength(k + 1));
+      expect(engineError()).toBeNull();
+    }
+    expect(screen.queryByRole('button', { name: 'S 7' })).toBeNull();
+  });
+
+  it("b: with prices, the formula line carries the engine's top_edge_gross for the page's input", async () => {
+    render(<PayoffSection engine={engine} />);
+    fireEvent.click(screen.getByLabelText('“Other” is listed'));
+    fireEvent.click(screen.getByLabelText('with prices'));
+    const m = JSON.parse(engine.payoff_json(JSON.stringify(payoffInput({ ...PAYOFF_START, listed: true, priced: true })))) as PayoffMatrix;
+    expect(m.top_edge_gross).not.toBeNull();
+    expect(await screen.findByText('1 − Σ asks =')).toBeInTheDocument();
+    expect(screen.getByText(formatDecimal(m.top_edge_gross))).toHaveClass('m-big');
+    expect(screen.getByText(/before fees, on the table/)).toBeInTheDocument();
+    expect(screen.queryByText(/not risk-free/)).toBeNull();
+  });
+
+  it('b: the formula line says so when a column breaks, and when the edge is not positive', async () => {
+    render(<PayoffSection engine={engine} />);
+    fireEvent.click(screen.getByLabelText('with prices'));
+    expect(await screen.findByText(/not risk-free: see ✗/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('“Other” is listed'));
+    await waitFor(() => expect(screen.queryByText(/not risk-free/)).toBeNull());
+    change('leg A ask', '90');
+    const input = payoffInput({ ...PAYOFF_START, listed: true, priced: true, ticks: [90, ...PAYOFF_START.ticks.slice(1)] });
+    const m = JSON.parse(engine.payoff_json(JSON.stringify(input))) as PayoffMatrix;
+    expect(m.top_edge_gross?.startsWith('-')).toBe(true);
+    expect(await screen.findByText(/nothing on the table/)).toBeInTheDocument();
+    expect(screen.getByText(formatDecimal(m.top_edge_gross))).toHaveClass('m-big');
+  });
+
+  it('b: the implication offers only the two prices the engine reads (R10), both move the edge, and it is the engine’s', async () => {
+    render(<PayoffSection engine={engine} />);
+    fireEvent.click(screen.getByRole('button', { name: 'implication A ⇒ B' }));
+    fireEvent.click(screen.getByLabelText('with prices'));
+    const formula = await screen.findByText('A bid − B ask =');
+    const sliders = screen.getAllByRole('slider');
+    expect(sliders.map((s) => s.getAttribute('aria-label'))).toEqual(IMPLICATION_PRICE_USE.map((u) => u.label));
+    expect(IMPLICATION_PRICE_USE[0].label).toContain('1 − bid');
+    expect(screen.queryByLabelText('“Other” is listed')).toBeNull();
+    const edge = () => formula.parentElement?.querySelector('.m-big')?.textContent;
+    const seen = [edge()];
+    fireEvent.change(sliders[1], { target: { value: '40' } });
+    await waitFor(() => expect(edge()).not.toBe(seen[0]));
+    seen.push(edge());
+    fireEvent.change(sliders[0], { target: { value: '60' } });
+    await waitFor(() => expect(edge()).not.toBe(seen[1]));
+    const input = payoffInput({ ...PAYOFF_START, kind: 'implication', priced: true, impl: [60, 40] });
+    expect(input.s).toBe(2);
+    expect(input.prices).toHaveLength(2);
+    const m = JSON.parse(engine.payoff_json(JSON.stringify(input))) as PayoffMatrix;
+    await waitFor(() => expect(edge()).toBe(formatDecimal(m.top_edge_gross)));
+  });
+
+  it('b: reset restores YES, S 3, Other unlisted, no prices', async () => {
+    const { sent, engine: spy } = spied('payoff_json');
+    render(<PayoffSection engine={spy} />);
+    const last = () => JSON.parse(sent.at(-1) ?? '{}') as PayoffIn;
+    const legs = () => screen.getAllByRole('columnheader').filter((h) => /^[A-F]$/.test(h.textContent ?? ''));
+    expect(legs()).toHaveLength(3);
+    fireEvent.click(screen.getByRole('button', { name: 'NO basket' }));
+    fireEvent.click(screen.getByRole('button', { name: 'S 5' }));
+    // the changed state is drawn before reset: a reset in the same frame would leave nothing to restore
+    await waitFor(() => expect(last()).toEqual(payoffInput({ ...PAYOFF_START, kind: 'no', s: 5 })));
+    await waitFor(() => expect(legs()).toHaveLength(5));
+    expect(screen.getByRole('table', { name: 'payoff of the NO basket' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: /✗/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'reset' }));
+    await waitFor(() => expect(last()).toEqual(payoffInput(PAYOFF_START)));
+    await waitFor(() => expect(legs()).toHaveLength(3));
+    expect(screen.getByRole('table', { name: 'payoff of the YES basket' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Other ✗' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'YES basket' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'S 3' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('with prices')).not.toBeChecked();
+  });
+
+  it('b: range inputs carry the shown decimal as aria-valuetext', async () => {
+    render(<PayoffSection engine={engine} />);
+    fireEvent.click(screen.getByLabelText('with prices'));
+    expect((await screen.findByLabelText('leg A ask')).getAttribute('aria-valuetext')).toBe('0.30');
+  });
+
+  it('c: the start is fixture no-edge-3 and lights its path; a leg closed YES ends where the engine says (R17)', async () => {
+    const fx = fixtureCase('classify_json', 'no-edge-3');
+    expect(classifyInput(CLASSIFY_START)).toEqual(JSON.parse(fx.input));
+    const m = JSON.parse(fx.output) as ClassifyModel;
+    const { container } = render(<ClassifySection engine={engine} />);
+    expect(lit(container)).toEqual(m.path);
+    expect(container.querySelector('.cl-end')).toHaveTextContent(endText(m));
+    expect(container.querySelector('.cl-net')).toHaveTextContent(`Q* ${m.q_star}`);
+    change('leg A status', 'closed_yes');
+    const legs = [{ ...CLASSIFY_START.legs[0], status: 'closed_yes' as const }, ...CLASSIFY_START.legs.slice(1)];
+    const closed = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ ...CLASSIFY_START, legs })))) as ClassifyModel;
+    await waitFor(() => {
+      expect(lit(container)).toEqual(closed.path);
+      expect(container.querySelector('.cl-end')).toHaveTextContent(endText(closed)); // inside the wait: both come from the same output
+    });
+  });
+
+  it('c: the post_end note is on the page, static', () => {
+    render(<ClassifySection engine={engine} />);
+    expect(screen.getByText(/the scanner adds it from event dates and it never changes the kind/)).toBeInTheDocument();
+  });
+
+  it('c: a leg that is not live has its bid and ask disabled, with the reason shown', () => {
+    render(<ClassifySection engine={engine} />);
+    expect(screen.getByLabelText('leg A best bid')).toBeEnabled();
+    expect(screen.queryByText('not live: its book is ignored')).toBeNull();
+    change('leg A status', 'halted');
+    expect(screen.getByLabelText('leg A best bid')).toBeDisabled();
+    expect(screen.getByLabelText('leg A best ask')).toBeDisabled();
+    expect(screen.getByLabelText('leg B best bid')).toBeEnabled();
+    expect(screen.getByText('not live: its book is ignored')).toBeInTheDocument();
+  });
+
+  it('c: a halted leg leaves a YES basket that is not arbitrage, and the money line says not risk-free (b says the same)', async () => {
+    const { container } = render(<ClassifySection engine={engine} />);
+    expect(container.querySelector('.cl-net')).toHaveTextContent(/on the table · gross/); // the start is an arbitrage: no qualifier
+    expect(container.querySelector('.cl-net')).not.toHaveTextContent(NOT_RISK_FREE);
+    change('leg A status', 'halted');
+    const legs = [{ ...CLASSIFY_START.legs[0], status: 'halted' as const }, ...CLASSIFY_START.legs.slice(1)];
+    const m = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ ...CLASSIFY_START, legs })))) as ClassifyModel;
+    expect(m).toMatchObject({ kind: 'yes_basket_incomplete', realization: 'not_arbitrage' });
+    expect(m.net).not.toBeNull();
+    await waitFor(() => expect(container.querySelector('.cl-end')).toHaveTextContent(endText(m)));
+    expect(endText(m)).toMatch(/not arbitrage$/);
+    expect(container.querySelector('.cl-net')).toHaveTextContent(`on the table, ${NOT_RISK_FREE} · gross`);
+  });
+
+  it('c: on every state the controls reach, only an incomplete YES basket is not_arbitrage (so "not risk-free" is true of it)', () => {
+    let risky = 0;
+    for (const status of ['live', 'placeholder', 'other', 'halted', 'closed_no', 'closed_yes'] as const) {
+      for (let i = 0; i < CLASSIFY_START.legs.length; i++) {
+        const legs = CLASSIFY_START.legs.map((l, k) => (k === i ? { ...l, status } : l));
+        for (const augmented of [false, true]) {
+          const m = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ legs, augmented })))) as ClassifyModel;
+          expect(m.realization === 'not_arbitrage', `${status} ${i} ${augmented}`).toBe(m.kind === 'yes_basket_incomplete');
+          if (m.realization === 'not_arbitrage') risky += 1;
+        }
+      }
+    }
+    expect(risky).toBeGreaterThan(0);
+  });
+
+  it('c: every status offered is one the engine accepts, on every leg', () => {
+    for (const status of ['live', 'placeholder', 'other', 'halted', 'closed_no', 'closed_yes'] as const) {
+      for (let i = 0; i < CLASSIFY_START.legs.length; i++) {
+        const legs = CLASSIFY_START.legs.map((l, k) => (k === i ? { ...l, status } : l));
+        for (const augmented of [false, true]) {
+          expect(engine.classify_json(JSON.stringify(classifyInput({ legs, augmented })))).not.toContain('"error"');
+        }
+      }
+    }
+  });
+
+  it('c: augmented reaches the engine, and reset restores the start', async () => {
+    const { sent, engine: spy } = spied('classify_json');
+    const { container } = render(<ClassifySection engine={spy} />);
+    const last = () => JSON.parse(sent.at(-1) ?? '{}') as ClassifyIn;
+    const start = JSON.parse(fixtureCase('classify_json', 'no-edge-3').output) as ClassifyModel;
+    expect(last().augmented).toBe(false);
+    fireEvent.click(screen.getByLabelText(/augmented/));
+    // the path is the same with and without "augmented" here (the NO basket pays either way), so the drawing
+    // cannot show that the flag arrived: the request does
+    await waitFor(() => expect(last()).toEqual(classifyInput({ ...CLASSIFY_START, augmented: true })));
+    change('leg A best bid', '10');
+    const legs = [{ ...CLASSIFY_START.legs[0], bid: 10 }, ...CLASSIFY_START.legs.slice(1)];
+    const moved = JSON.parse(engine.classify_json(JSON.stringify(classifyInput({ legs, augmented: true })))) as ClassifyModel;
+    expect(moved.path).not.toEqual(start.path); // the changed state is one the drawing can tell from the start
+    await waitFor(() => expect(last()).toEqual(classifyInput({ legs, augmented: true })));
+    await waitFor(() => expect(lit(container)).toEqual(moved.path)); // drawn before reset, so reset has something to restore
+    expect(container.querySelector('.cl-end')).toHaveTextContent(endText(moved));
+    fireEvent.click(screen.getByRole('button', { name: 'reset' }));
+    await waitFor(() => expect(last()).toEqual(classifyInput(CLASSIFY_START)));
+    await waitFor(() => expect(lit(container)).toEqual(start.path));
+    expect(container.querySelector('.cl-end')).toHaveTextContent(endText(start));
+    expect(screen.getByLabelText(/augmented/)).not.toBeChecked();
+    expect(screen.getByLabelText('leg A best bid')).toHaveValue(String(CLASSIFY_START.legs[0].bid));
+  });
+});
