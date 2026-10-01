@@ -3,7 +3,13 @@
 import react from '@vitejs/plugin-react';
 import { type Plugin, defineConfig } from 'vite';
 
-/** What the public bundle must never hold (type-only imports are erased and never show up here). */
+/**
+ * What the public bundle must never hold (type-only imports are erased and never show up here).
+ * Limit: a numeric constant imported from a dashboard module can be inlined by the bundler and drop out of
+ * moduleIds; publicSafe.test.ts's import walk covers that case. Its own copy of this regex uses repo-relative
+ * paths (^src/...) over source files, not absolute ids over bundle modules, and importing this config from
+ * there would pull in vite, so the two stay separate.
+ */
 export const DASHBOARD = /\/src\/(pages|api|explain)\/|\/src\/help\.ts$/;
 
 export function noDashboardCode(): Plugin {

@@ -12,6 +12,22 @@ if [ "$HAVE" != "$WANT" ]; then
   echo "build-wasm: the wasm-bindgen CLI is '${HAVE:-missing}', Cargo.lock pins $WANT: cargo install wasm-bindgen-cli --locked --version $WANT" >&2
   exit 1
 fi
+# Panic messages embed source paths: remap the cargo home and the repo root so the .wasm (published on the
+# public page) never carries the build machine's paths. Native (Windows) and POSIX spellings of both are
+# remapped; RUSTFLAGS already in the environment are kept. The remap changes cargo's fingerprint, so the first
+# build after a change here recompiles. (Paths with spaces would need CARGO_ENCODED_RUSTFLAGS.)
+ROOT=$(pwd)
+CH="${CARGO_HOME:-$HOME/.cargo}"
+remap() { [ -n "$1" ] && RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$1=$2"; return 0; }
+remap "$CH" /cargo
+remap "$ROOT" /src
+if command -v cygpath >/dev/null 2>&1; then
+  remap "$(cygpath -m "$CH")" /cargo
+  remap "$(cygpath -w "$CH")" /cargo
+  remap "$(cygpath -m "$ROOT")" /src
+  remap "$(cygpath -w "$ROOT")" /src
+fi
+export RUSTFLAGS
 PROFILE="${PROFILE:-release}"
 if [ "$PROFILE" != release ] && [ "$PROFILE" != dev ]; then
   echo "build-wasm: PROFILE must be release or dev, got '$PROFILE'" >&2
