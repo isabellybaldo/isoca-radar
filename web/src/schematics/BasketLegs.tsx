@@ -1,23 +1,26 @@
 import { Money } from '../components/Money';
-import { formatDecimal, formatMoneyCents, signOf } from '../lib/money';
+import { compareDecimal, formatAvg, formatDecimal, formatMoneyCents, signOf } from '../lib/money';
 import type { BasketModel } from '../wasm/types';
-import { geoPos } from './geo';
-
-const W = 300;
-const H = 120;
+import { geoPos, PLOT_H as H, PLOT_W as W } from './geo';
 
 export interface Verdict {
   big: string;
   tone: 'pos' | 'neg' | null;
 }
 
-/** Spec 7b §6.2 f and 7b-A's contract: the big number is net_cash, "caught, and lost $x" when it is below
- *  zero (decided on the decimal string's sign), "filled, $x on paper" otherwise. Money through money.ts only. */
+/** Spec 7b §6.2 f with the review ruling I2: a word and a money half, decided on the engine's strings
+ *  (signOf / compareDecimal), no arithmetic. The word: "caught" if any leg has an excess, else "nothing filled"
+ *  when q_eff is 0, else "filled". The money half is |net_cash| in cents: "lost" when nothing is held, "out ...
+ *  shares still held" when shares or a resolution value remain, "+$x" when it is not negative. */
 export function basketVerdict(m: BasketModel): Verdict {
-  const net = m.cash.net_cash;
-  const s = signOf(net);
-  if (s < 0) return { big: `caught, and lost ${formatMoneyCents(net.trim().replace(/^-/, ''))}`, tone: 'neg' };
-  return { big: `filled, ${formatMoneyCents(net, { signed: true })} on paper`, tone: s > 0 ? 'pos' : null };
+  const word = m.legs.some((l) => signOf(l.excess) > 0) ? 'caught' : signOf(m.q_eff) === 0 ? 'nothing filled' : 'filled';
+  const holding = m.cash.held_unsold.some((h) => signOf(h.qty) > 0) || (m.value_at_resolution !== null && signOf(m.value_at_resolution) > 0);
+  const net = m.cash.net_cash.trim();
+  const cents = formatMoneyCents(net.replace(/^-/, ''));
+  if (cents === '$0.00') return { big: `${word}, $0.00 on paper`, tone: null };
+  if (signOf(net) >= 0) return { big: `${word}, +${cents} on paper`, tone: 'pos' };
+  if (holding) return { big: `${word}, ${cents} out on paper, shares still held`, tone: null };
+  return { big: `${word}, and lost ${cents} on paper`, tone: 'neg' };
 }
 
 /**
@@ -33,6 +36,7 @@ export function BasketLegs({ model, names }: { model: BasketModel; names: string
   const top = Math.max(1, plan, ...model.legs.map((l) => geoPos(l.buy.filled)));
   const sy = (q: number) => H - (q / top) * (H - 4);
   const qe = geoPos(model.q_eff);
+  const qy = Math.min(H - 1, Math.max(1, sy(qe))); // inset: a 2px line on the floor or ceiling is not clipped
   const v = basketVerdict(model);
   return (
     <figure className="blegs" aria-label="each leg: planned, filled, and the excess sold back or held">
@@ -52,7 +56,7 @@ export function BasketLegs({ model, names }: { model: BasketModel; names: string
             </g>
           );
         })}
-        <line className="bl-qeff" x1={0} x2={W} y1={sy(qe)} y2={sy(qe)} />
+        <line className="bl-qeff" x1={0} x2={W} y1={qy} y2={qy} />
       </svg>
       <ol className="bl-axis" aria-label="legs">
         {model.legs.map((l, i) => {
@@ -61,8 +65,16 @@ export function BasketLegs({ model, names }: { model: BasketModel; names: string
             <li key={i}>
               <b>{`leg ${names[i] ?? i + 1}`}</b>
               <span>{`${formatDecimal(l.buy.filled)} of ${formatDecimal(l.buy.requested)}`}</span>
-              {signOf(l.unwind.filled) > 0 && <span>{`sold ${formatDecimal(l.unwind.filled)}${l.unwind.vwap === null ? '' : ` at ${l.unwind.vwap}`}`}</span>}
-              {signOf(l.unwind.requested) > 0 && signOf(l.unwind.filled) === 0 && <span>{`${formatDecimal(l.unwind.requested)} to sell, no order went out`}</span>}
+              {signOf(l.unwind.filled) > 0 && (
+                <span>{`sold ${formatDecimal(l.unwind.filled)}${l.unwind.vwap === null ? '' : ` at ${l.unwind.levels_used > 1 ? 'avg ' : ''}${formatAvg(l.unwind.vwap)}`}`}</span>
+              )}
+              {signOf(l.unwind.requested) > 0 && signOf(l.unwind.filled) === 0 && (
+                <span>
+                  {compareDecimal(l.unwind.requested, model.min_order) < 0
+                    ? `${formatDecimal(l.unwind.requested)} to sell, under the ${formatDecimal(model.min_order)} minimum, no order went out`
+                    : `${formatDecimal(l.unwind.requested)} to sell, no buyer in the book`}
+                </span>
+              )}
               {h !== undefined && signOf(h.qty) > 0 && <span>{`held ${formatDecimal(h.qty)}, ${formatMoneyCents(h.basis)} cost, not cash`}</span>}
             </li>
           );
@@ -72,11 +84,11 @@ export function BasketLegs({ model, names }: { model: BasketModel; names: string
       <dl className="bl-cash">
         <div><dt>spent</dt><dd><Money value={model.cash.spent} cents /></dd></div>
         <div><dt>sold back</dt><dd><Money value={model.cash.unwind_back} cents /></dd></div>
-        <div><dt>converted</dt><dd><Money value={model.cash.convert_back} cents /></dd></div>
+        {model.kind === 'no' && <div><dt>converted</dt><dd><Money value={model.cash.convert_back} cents /></dd></div>}
         <div><dt>net cash, on paper</dt><dd><Money value={model.cash.net_cash} signed tone cents /></dd></div>
-        <div><dt>of which fees</dt><dd><Money value={model.cash.fees} cents /></dd></div>
+        <div><dt>fees, already inside the rows above</dt><dd><Money value={model.cash.fees} cents /></dd></div>
       </dl>
-      <p className="dim">every dollar here is on paper, from the replayed books</p>
+      <figcaption className="dim">every dollar here is on paper, from the books above</figcaption>
       {model.value_at_resolution !== null && (
         <p className="dim bl-resolve">
           if a listed leg wins: <Money value={model.value_at_resolution} cents /> at resolution, on paper, not yet cash

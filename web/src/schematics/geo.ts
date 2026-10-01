@@ -12,3 +12,7 @@ export const geoPos = (v: string): number => Math.max(0, geo(v));
 
 /** A 0.01-grid price as its whole tick (0.54 -> 54), so two prices compare without float noise. */
 export const tick = (p: string): number => Math.round(geoPos(p) * 100);
+
+/** The viewBox every schematic here draws in (labels are HTML, so only the ratio matters). */
+export const PLOT_W = 300;
+export const PLOT_H = 120;

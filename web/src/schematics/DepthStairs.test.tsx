@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { describeWasm, fixtureCase, fixtureCases, loadTestEngine } from '../wasm/testEngine';
 import type { WalkModel } from '../wasm/types';
 import { DepthStairs } from './DepthStairs';
+import { formatDecimal } from '../lib/money';
 import { geo } from './geo';
 
 /** A real depth_walk_json fixture: the engine's own output for its input (never retyped). */
@@ -28,9 +29,9 @@ describe('DepthStairs (parent §5.7 d)', () => {
     expect(container.querySelectorAll('line.ds-pay')).toHaveLength(m.steps.length);
     expect(Number(container.querySelector('line.ds-qstar')?.getAttribute('x1'))).toBeCloseTo((geo(m.q_star) / geo(last(m))) * 300);
     expect(container.querySelector('.ds-big')).toHaveTextContent(/^Π \+\$1\.00/); // pi "1" through <Money cents>
-    expect(screen.getByText(`Q* ${m.q_star}`)).toBeInTheDocument();
+    expect(screen.getByText(`Q* ${formatDecimal(m.q_star)}`)).toBeInTheDocument();
     expect(container.querySelector('.ds-gross')).toHaveTextContent('before fees +$1.00');
-    expect(screen.getByText(`${last(m)} shares`)).toBeInTheDocument();
+    expect(screen.getByText(`${formatDecimal(last(m))} shares`)).toBeInTheDocument();
   });
 
   it('frames its dollars "on the table" and shows the engine Π, not a sum of the steps', () => {
@@ -38,6 +39,23 @@ describe('DepthStairs (parent §5.7 d)', () => {
     expect(container.textContent).toContain('on the table');
     expect(container.querySelector('.ds-big')).toHaveTextContent(/^Π \+\$0\.69/); // pi 0.685 rounds to the cent
     expect(container.querySelector('.ds-gross')).toHaveTextContent('before fees +$1.00');
+  });
+
+  it('keeps its dollars in the figure whose caption says "on the table"', () => {
+    const { container } = render(<DepthStairs model={walk('yes-two-legs')} />);
+    expect(container.querySelector('figure figcaption')).toHaveTextContent(/^on the table/);
+  });
+
+  it('pins the legend text to its swatch: profit area, loss area, cost line, payoff line, Q* marker', () => {
+    const { container } = render(<DepthStairs model={walk('yes-two-legs')} />);
+    const rows = [...container.querySelectorAll('ul.ds-legend li')].map((li) => [li.querySelector('.ds-sw')?.className, li.textContent]);
+    expect(rows).toEqual([
+      ['ds-sw pi', 'the next basket pays more than it costs'],
+      ['ds-sw loss', 'past Q*: it costs more than it pays'],
+      ['ds-sw cost', 'what the next basket costs'],
+      ['ds-sw pay', 'what a basket pays'],
+      ['ds-sw qstar', 'Q*: the last basket worth buying'],
+    ]);
   });
 
   it('draws each step against its own payoff (the nested NO rule, fixture no-nested-three)', () => {
@@ -59,7 +77,7 @@ describe('DepthStairs (parent §5.7 d)', () => {
       const x = Number(container.querySelector('line.ds-qstar')?.getAttribute('x1'));
       expect(x, name).toBeGreaterThanOrEqual(0);
       expect(x, name).toBeLessThanOrEqual(300);
-      expect(screen.getByText(`Q* ${model.q_star}`), name).toBeInTheDocument();
+      expect(screen.getByText(`Q* ${formatDecimal(model.q_star)}`), name).toBeInTheDocument();
       unmount();
     }
   });
@@ -73,10 +91,12 @@ describe('DepthStairs (parent §5.7 d)', () => {
 });
 
 describeWasm('DepthStairs on the real engine', () => {
-  it('draws what depth_walk_json returns for each fixture input', async () => {
+  it('draws what depth_walk_json returns for each fixture input (its output equals the fixture output)', async () => {
     const engine = await loadTestEngine();
     for (const c of fixtureCases('depth_walk_json')) {
-      const out = JSON.parse(engine.depth_walk_json(c.input)) as WalkModel | { error: string };
+      const raw = engine.depth_walk_json(c.input);
+      expect(raw, c.name).toBe(c.output); // the engine's string equals the fixture's, not our own function
+      const out = JSON.parse(raw) as WalkModel | { error: string };
       if ('error' in out) continue;
       const { container, unmount } = render(<DepthStairs model={out} />);
       expect(container.innerHTML, c.name).not.toContain('NaN');

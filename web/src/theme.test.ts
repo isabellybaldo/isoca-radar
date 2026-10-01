@@ -80,4 +80,10 @@ describe('theme', () => {
     // A gap narrower than `in time` forces the two words onto two lines instead of into the next cell.
     expect(Number(/column-gap:\s*(\d+)px/.exec(rule('.cb-axis'))?.[1])).toBeGreaterThanOrEqual(6);
   });
+
+  it('keeps the basket leg labels breakable inside a cell and the planned outline visible (7b-B review I4)', () => {
+    expect(rule('.bl-axis li span')).toMatch(/overflow-wrap:\s*anywhere/); // a long figure splits rather than overflow 360 px
+    expect(rule('.bl-svg .bl-plan')).toMatch(/var\(--dim\)/);
+    expect(rule('.ds-svg .ds-loss')).toMatch(/stroke-dasharray/); // the loss area differs from the profit area by more than colour
+  });
 });

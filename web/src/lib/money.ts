@@ -108,3 +108,19 @@ export function compareDecimal(a: string, b: string): -1 | 0 | 1 {
   const y = scaled(mb, fb);
   return x < y ? -1 : x > y ? 1 : 0;
 }
+
+/** A long decimal (a vwap is notional / filled, up to ~28 digits) rounded for display to `places` decimals,
+ *  half up (away from zero), trailing zeros dropped; string/BigInt math only, never a float. Fewer decimals
+ *  than `places` are shown as sent. null -> "—". */
+export function formatAvg(value: string | null | undefined, places = 4): string {
+  if (value === null || value === undefined) return '—';
+  const m = DEC.exec(value.trim());
+  if (!m) return value;
+  const [, minus, int, frac = ''] = m;
+  if (frac.length <= places) return formatDecimal(value);
+  const scaled = BigInt(int + frac.slice(0, places)) + (frac[places] >= '5' ? 1n : 0n);
+  const digits = scaled.toString().padStart(places + 1, '0');
+  const whole = digits.slice(0, digits.length - places);
+  const part = digits.slice(digits.length - places).replace(/0+$/, '');
+  return formatDecimal(`${minus}${whole}${part ? `.${part}` : ''}`);
+}

@@ -1,9 +1,7 @@
 import { Money } from '../components/Money';
+import { formatDecimal } from '../lib/money';
 import type { WalkModel } from '../wasm/types';
-import { geoPos } from './geo';
-
-const W = 300;
-const H = 120;
+import { geoPos, PLOT_H as H, PLOT_W as W } from './geo';
 
 /**
  * Parent §5.7 (d): the cost of each next basket as a staircase against what that basket pays (1 for the
@@ -25,11 +23,11 @@ export function DepthStairs({ model }: { model: WalkModel }) {
         <span>
           Π <Money value={model.pi} signed cents />
         </span>
-        <span>{`Q* ${model.q_star}`}</span>
+        <span>{`Q* ${formatDecimal(model.q_star)}`}</span>
       </p>
-      <p className="dim">
+      <figcaption className="dim">
         on the table, if every level stayed put · <span className="ds-gross">before fees <Money value={model.pi_gross} signed cents /></span>
-      </p>
+      </figcaption>
       <svg className="ds-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="the cost staircase">
         {model.steps.map((s, i) => {
           const c = sy(geoPos(s.cost));
@@ -51,12 +49,14 @@ export function DepthStairs({ model }: { model: WalkModel }) {
       </svg>
       <ol className="ds-axis" aria-hidden="true">
         <li>0</li>
-        <li>{`${last} shares`}</li>
+        <li>{`${formatDecimal(last)} shares`}</li>
       </ol>
       <ul className="plain ds-legend" aria-label="legend">
         <li><span className="ds-sw pi" aria-hidden="true" />the next basket pays more than it costs</li>
         <li><span className="ds-sw loss" aria-hidden="true" />past Q*: it costs more than it pays</li>
+        <li><span className="ds-sw cost" aria-hidden="true" />what the next basket costs</li>
         <li><span className="ds-sw pay" aria-hidden="true" />what a basket pays</li>
+        <li><span className="ds-sw qstar" aria-hidden="true" />Q*: the last basket worth buying</li>
       </ul>
     </figure>
   );
