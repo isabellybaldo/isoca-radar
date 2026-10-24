@@ -21,11 +21,11 @@ sudoku and mahjong games (behind a login) follow.
 ```
  OLD VPS (expires Nov 2026)                 OWNER'S PC                      NEW VPS (KVM2)
  ┌──────────────────────────┐   rsync   ┌────────────────────────┐       ┌─────────────────────────────┐
- │ postgres · parquet · raw │ ────────► │ full backup (~30 GB)   │       │ Caddy (HTTPS, headers, RL)  │
+ │ postgres · parquet · raw │ ────────► │ full backup (~30 GB)   │       │ Traefik (HTTPS, headers, RL)│
  │ public.json · /api/cards │ ────────► │ frozen JSON → repo     │       │  isoca.space  → home        │
  └──────────────────────────┘           │ npm run build → dist/  │ rsync │  radar.isoca… → /srv/sites/ │
    dies with humor-do-dia,              │ isoca-infra deploy     │ ────► │                 radar       │
-   whoami, web/apiexample               └────────────────────────┘       │ (Docker installed, idle)    │
+   whoami, web/apiexample               └────────────────────────┘       │ nginx: static files, ro     │
                                                                          └─────────────────────────────┘
 ```
 
@@ -146,34 +146,42 @@ The owner runs every root step; Claude never holds root.
   `/srv/sites/*` and can deploy static files there; that's all this phase needs.
 - ufw: allow only the new SSH port, 80, 443. Check Hostinger's panel firewall agrees.
 - fail2ban on SSH; unattended security upgrades.
-- Docker Engine from Docker's official repo with json-file log limits, installed but idle this phase
-  (for oauth2-proxy and future projects).
+- Docker Engine from Docker's official repo with json-file log limits (it runs Traefik and nginx, §6.3).
 
 ### 6.3 Reverse proxy
 
-**Caddy**, installed natively (systemd) — *Claude's call* (lighter than Traefik; static file serving
-needs no container). It:
+**Traefik** (owner's choice), in Docker, as on the old box. Traefik doesn't serve files itself, so one
+small **nginx-unprivileged** container (old box: 32 MB limit) serves `/srv/sites/` bind-mounted
+**read-only**, one server block per site — *Claude's call* (one shared file server, not one per site).
 
-- serves `/srv/sites/<site>/` with `file_server`, automatic HTTPS for each domain;
-- sets the security headers the old Traefik set (HSTS, frame deny, nosniff, referrer, the CSPs above);
-- **rate-limits** per IP (project rule), via the `caddy-ratelimit` module (Caddy built/added with it);
-- redirects www → apex, http → https;
+- Routing from Traefik's **file provider** (dynamic config committed in isoca-infra, IP-free), not Docker
+  labels, so adding a site is a config file, not a container change — *Claude's call*.
+- Let's Encrypt certificates per domain (HTTP challenge); http → https, www → apex.
+- The security headers the old box set (`ct-sec`: HSTS, frame deny, nosniff, referrer; `ct-csp`; the
+  /math CSP with `'wasm-unsafe-eval'`), carried over from `compose.web.yml`.
+- **Rate limit and in-flight limit** per IP on every public router (project rule), with the old /math
+  numbers as the starting point (5 req/s, burst 20, in-flight 8).
 - `radar.isoca.space`: the cute-trading build; `isoca.space`: the home (§7).
+- No Docker socket mounted into Traefik (the file provider doesn't need it).
+- Traefik and nginx stay hardened as before: read-only, `cap_drop: ALL`, `no-new-privileges`, cpu and
+  memory limits.
 
-The Caddyfile lives in isoca-infra; changing it is an owner step (needs root to reload).
+The compose file and the Traefik config live in isoca-infra; changing them is an owner step (Docker
+access is root-equivalent, §6.2).
 
 ### 6.4 Deploys
 
 Build on the PC, ship files — *Claude's call* (matches "PC builds, VPS runs"; never build Rust/WASM on the
 KVM2). isoca-infra has a deploy script that takes a site name and a built folder (e.g. cute-trading's
 `web/dist`), rsyncs it as `claude` to a new release folder, and switches a `current` symlink atomically,
-keeping the previous release for rollback. cute-trading only has to produce `dist/`; the link between
+keeping the previous release for rollback. The symlink is **relative**, so it resolves inside the nginx
+container's read-only mount too. cute-trading only has to produce `dist/`; the link between
 repos is that script plus a per-site entry (domain, source repo, build command) in isoca-infra.
 
 ### 6.5 Room for a login (not built)
 
-The Caddyfile structure allows putting `forward_auth` in front of a single site later (oauth2-proxy in
-Docker, GitHub provider, as on the old box). The games will be its first user; who may log in is decided
+The Traefik config allows putting a `forwardAuth` middleware in front of a single site later
+(oauth2-proxy in Docker, GitHub provider, as on the old box). The games will be its first user; who may log in is decided
 then.
 
 ## 7. isoca.space home
@@ -190,9 +198,9 @@ margin for a slow transfer. Everything after them no longer needs the old box.
 
 1. **Backup first**: full ~30 GB capture from the old VPS to the PC, checksummed (§9).
 2. Export the frozen JSON (§5.1), commit it.
-3. isoca-infra: repo, hardening runbook, owner runs it; Caddy up.
+3. isoca-infra: repo, hardening runbook, owner runs it; Traefik and nginx up.
 4. cute-trading portfolio build (§5.2–5.3); deploy to the new box under a test subdomain
-   (`new.isoca.space`, added to the zone so Caddy gets a real certificate before cut-over) — *Claude's call*.
+   (`new.isoca.space`, added to the zone so Traefik gets a real certificate before cut-over) — *Claude's call*.
 5. DNS (managed in Hostinger's panel; the owner uses no email on isoca.space): first export the whole zone and keep every record (MX, TXT, anything unknown) untouched except
    the A/AAAA/CNAME records for isoca.space, www and radar, which move to the new IP, and the dropped
    tenants' subdomains, which are removed — *Claude's call*. Lower TTL ahead of time; verify HTTPS after.
@@ -216,6 +224,5 @@ margin for a slow transfer. Everything after them no longer needs the old box.
 - Exact export method around the broken login (§5.1).
 - How the Sweet data client switches to static JSON (build flag, separate entry, or a fixtures client).
 - The landing's layout and the cost drawing's form, within the owner's "drawings over text" preference.
-- Caddy rate-limit numbers (old /math: 5 req/s, burst 20; in-flight 8 has no Caddy equivalent; pick
-  something equivalent for static pages).
+- Final rate-limit numbers per router (start from the old /math ones).
 - Release retention count, deploy script language.
