@@ -32,7 +32,7 @@ Get-ChildItem $B | Select-Object -ExpandProperty Name; ssh isoca-old
 → expected: `archive`, `capture`, `verify.ps1`, then the password prompt (password 1), then a root prompt on the VPS.
 if not: `Permission denied` = wrong password, run `ssh isoca-old` again; `Could not resolve hostname isoca-old` = the alias wasn't written: `notepad $HOME\.ssh\config` and check the `Host isoca-old` block is there.
 
-2. (VPS) What is running, how big each volume is, how much disk is free.
+2. (VPS: the window showing `root@srv1125993:~#`) What is running, how big each volume is, how much disk is free.
 ```bash
 docker ps --format '{{.Names}} {{.Status}}' | grep cute-trading; du -sh /var/lib/docker/volumes/cute-trading_{pgdata,archive,data,public-data}/_data; df -h /
 ```
@@ -49,7 +49,7 @@ if not: pick another drive with room (C: has ~137 GB free) and use it as `$B` in
 
 ## On the VPS: stage the small files
 
-4. (VPS) The frozen JSON for the portfolio site, and the config files (not `.env`).
+4. (VPS: the window showing `root@srv1125993:~#`, not PowerShell; logged out = `ssh isoca-old` first) The frozen JSON for the portfolio site, and the config files (not `.env`).
 ```bash
 bash -euo pipefail <<'SH'
 D=/root/ct-backup; mkdir -p $D/frozen $D/config; cd /home/isoca/projects/cute-trading
@@ -64,7 +64,7 @@ SH
 if not: `wget: server returned error` or `bad address 'api'` = STOP, tell Claude with the line; a `:0` count = the API answered without a Sweet spots card: STOP, tell Claude.
 **STOP**
 
-5. (VPS) The database dump and the sha256 lists (a few minutes; the lists read every file once).
+5. (VPS: the window showing `root@srv1125993:~#`) The database dump and the sha256 lists (a few minutes; the lists read every file once).
 ```bash
 bash -euo pipefail <<'SH'
 D=/root/ct-backup
