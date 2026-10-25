@@ -6,7 +6,7 @@ Note: PC steps run in **Windows PowerShell** (`$B` is set again at the top of ea
 Note: the VPS asks for the root password 5 times: steps 1, 6, 8, 10, 14 (one connection each).
 Note: never write a file with PowerShell's `>` here: it writes UTF-16 and breaks binary and JSON files. Every file is made on the VPS and downloaded with `sftp`.
 Note: on the VPS: never print `.env` or a container's environment, never restart Docker, install nothing, never start scanner, analyze or compact.
-Note: steps 8 and 10 land in `archive_data` and `capture_data` (sftp nests the remote folder inside the existing one); the checks in steps 9, 11 and 13 read from there.
+Note: steps 8 and 10 land in `archive\_data` and `capture\_data` (sftp nests the remote folder inside the existing one); the checks in steps 9, 11 and 13 read from there.
 Note: the transfers resume. If a download is cut (sleep, Wi-Fi), run the same step again: `reget` continues partial files and the check after it finds anything missing or broken.
 
 ## Prepare
@@ -121,10 +121,10 @@ if not: cut off = run this step again; it continues where it stopped.
 
 9. (PC) Check the archive.
 ```powershell
-$B='E:\isoca-radar-backup'; powershell -NoProfile -ExecutionPolicy Bypass -File "$B\verify.ps1" "$B\ct-backup\archive.sha256" "$B\archive"
+$B='E:\isoca-radar-backup'; powershell -NoProfile -ExecutionPolicy Bypass -File "$B\verify.ps1" "$B\ct-backup\archive.sha256" "$B\archive\_data"
 ```
 → expected: `ok <n> files` with `<n>` = the `archive.sha256` count from step 5.
-if not: `FAIL <path> (missing)` = run step 8 again; `FAIL <path>` (no "missing") = delete that file under `$B\archive`, run step 8 again, then this step.
+if not: `FAIL <path> (missing)` = run step 8 again; `FAIL <path>` (no "missing") = delete that file under `$B\archive\_data`, run step 8 again, then this step.
 **STOP**
 
 10. (PC) Download the raw capture (password 4). Skippable only if time runs out: write down that it was skipped.
@@ -141,10 +141,10 @@ if not: cut off = run this step again.
 
 11. (PC) Check the raw capture.
 ```powershell
-$B='E:\isoca-radar-backup'; powershell -NoProfile -ExecutionPolicy Bypass -File "$B\verify.ps1" "$B\ct-backup\data.sha256" "$B\capture"
+$B='E:\isoca-radar-backup'; powershell -NoProfile -ExecutionPolicy Bypass -File "$B\verify.ps1" "$B\ct-backup\data.sha256" "$B\capture\_data"
 ```
 → expected: `ok <n> files` with `<n>` = the `data.sha256` count from step 5.
-if not: as step 9, with step 10 and `$B\capture`.
+if not: as step 9, with step 10 and `$B\capture\_data`.
 
 12. (PC, Docker Desktop running) Restore the dump into a throwaway Postgres and count rows.
 ```powershell
@@ -167,7 +167,7 @@ Set-Content -Encoding ascii "$env:TEMP\ddb\q.py" 'import duckdb', 'print(duckdb.
 & "$env:TEMP\ddb\Scripts\python.exe" "$env:TEMP\ddb\q.py"
 ```
 → expected: one line like `(123456789,)` with a number above 0.
-if not: `No files found` = the archive landed elsewhere: `Get-ChildItem $B\archive | Select -First 3` should list `YYYY-MM-DD` folders; tell Claude what it shows.
+if not: `No files found` = the archive landed elsewhere: `Get-ChildItem $B\archive\_data | Select -First 3` should list `YYYY-MM-DD` folders; tell Claude what it shows.
 
 14. (PC) Remove the staging folder on the VPS (password 5).
 ```powershell
