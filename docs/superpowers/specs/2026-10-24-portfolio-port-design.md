@@ -19,14 +19,19 @@ deploys. cute-trading is the first site it serves; the isoca.space portfolio hom
 sudoku and mahjong games (behind a login) follow.
 
 ```
- OLD VPS (expires Nov 2026)                 OWNER'S PC                      NEW VPS (KVM2)
- ┌──────────────────────────┐   rsync   ┌────────────────────────┐       ┌─────────────────────────────┐
- │ postgres · parquet · raw │ ────────► │ full backup (~30 GB)   │       │ Traefik (HTTPS, headers, RL)│
- │ public.json · /api/cards │ ────────► │ frozen JSON → repo     │       │  isoca.space  → home        │
- └──────────────────────────┘           │ npm run build → dist/  │ rsync │  radar.isoca… → /srv/sites/ │
-   dies with humor-do-dia,              │ isoca-infra deploy     │ ────► │                 radar       │
-   whoami, web/apiexample               └────────────────────────┘       │ nginx: static files, ro     │
-                                                                         └─────────────────────────────┘
+ OLD VPS (expires 2026-11-13)           OWNER'S PC
+ ┌──────────────────────────┐  rsync  ┌──────────────────────┐
+ │ postgres · parquet · raw │ ──────► │ full backup (~30 GB) │
+ │ public.json · /api/cards │ ──┐     └──────────────────────┘
+ └──────────────────────────┘   │ frozen JSON, committed
+   dies with humor-do-dia,      ▼
+   whoami, web/apiexample    GITHUB                                 NEW VPS (KVM2)
+                             ┌──────────────────────────────┐       ┌─────────────────────────────┐
+                             │ cute-trading: push to main   │       │ Traefik (HTTPS, headers, RL)│
+                             │  └ Actions: build web + wasm │ rsync │  radar.isoca… ─┐            │
+                             │     └ isoca-infra's deploy   │ ────► │  isoca.space  ─┤ nginx, ro  │
+                             │       workflow (ssh: deploy) │  ssh  │       /srv/sites/<site>     │
+                             └──────────────────────────────┘       └─────────────────────────────┘
 ```
 
 ## 2. Goals
@@ -42,6 +47,9 @@ sudoku and mahjong games (behind a login) follow.
 3. **isoca-infra**: a new repo that sets up and hardens the KVM2 and deploys static sites to it.
 4. **DNS cut-over**: isoca.space, www.isoca.space and radar.isoca.space point at the new box.
 5. **A first, simple isoca.space home** linking to cute-trading (content kept minimal, §7).
+6. **Deploys from GitHub Actions**, not from the owner's PC (§6.4).
+7. **The owner's GitHub profile README** (their existing landing) updated to point at cute-trading,
+   isoca-infra and isoca.space (§7).
 
 ## 3. Non-goals (this phase)
 
@@ -52,7 +60,6 @@ sudoku and mahjong games (behind a login) follow.
 - The games: separate projects, brainstormed later.
 - humor-do-dia (and its db), webappexample, apiexample, whoami: dropped, nothing copied.
 - The old Python `frontend/` and `backend/` and `legacy/`: untouched, not deployed.
-- The pending oauth `read:org` fix on the old box: moot, not pursued.
 
 ## 4. Anti-goals (fails even if it "works")
 
@@ -75,9 +82,9 @@ without the old box) — *Claude's call*:
 | `public.json` | the api's last snapshot (`/var/lib/ct-public/public.json`, ≤ 64 KB) | /math |
 | `cards-7d.json`, `cards-30d.json`, `cards-all.json` | `GET /api/cards?win=…` | Sweet spots |
 
-The old box's login is broken (oauth 403), so the export goes **around** it: from inside the box (e.g. a
-throwaway curl container on the api's internal network) or, as a fallback, by running `api` on the PC
-against the restored Postgres dump. Builder's choice. Also record the timestamp of the last capture
+The old box's login works again (the owner applied the oauth `read:org` fix there). The export can go
+through it, or from inside the box (e.g. a throwaway curl container on the api's internal network), or,
+as a fallback, by running `api` on the PC against the restored Postgres dump. Builder's choice. Also record the timestamp of the last capture
 (the "frozen on" date shown on the site) and the export's provenance in a short README next to the files.
 
 ### 5.2 The site
@@ -126,7 +133,8 @@ isoca-infra is a **public** GitHub repo and is treated as part of the portfolio:
 that explains the setup (with a drawing), readable runbooks. Nothing that helps an attacker or names the
 box is committed: no IP, SSH port, user names, key fingerprints, `.env` contents, or the real hostnames
 beyond the public domains. Those live in one gitignored local file (e.g. `local.env`, with a committed
-`local.env.example` of placeholders) that the runbooks and the deploy script read. A secret scan (e.g.
+`local.env.example` of placeholders) that the runbooks read, and in GitHub encrypted secrets for the
+workflows (§6.4). A secret scan (e.g.
 gitleaks) runs before every push, and every commit is reviewed for these leaks — *the scan tool is
 Claude's call*.
 
@@ -142,8 +150,13 @@ The owner runs every root step; Claude never holds root.
 - An admin user for the owner (sudo), SSH key only.
 - SSH moved off port 22; `PasswordAuthentication no`, `PermitRootLogin no`.
 - A `claude` user with its own SSH key (generated on the owner's PC, used only by Claude Code): **no
-  sudo, not in the `docker` group** (docker group is root-equivalent) — *Claude's call*. It owns
-  `/srv/sites/*` and can deploy static files there; that's all this phase needs.
+  sudo, not in the `docker` group** (docker group is root-equivalent) — *Claude's call*. It can read
+  `/srv/sites` and system state (disk, memory, logs readable without root) to check deploys; it does not
+  deploy (§6.4).
+- A `deploy` user for GitHub Actions only — *Claude's call*: no shell beyond what deploying needs, no
+  sudo, not in `docker`; owns `/srv/sites/*` and the Traefik dynamic-config folder. Its key is restricted
+  in `authorized_keys` (`restrict`, a forced command that only accepts an upload into a site's release
+  folder and switches its `current` link).
 - ufw: allow only the new SSH port, 80, 443. Check Hostinger's panel firewall agrees.
 - fail2ban on SSH; unattended security upgrades.
 - Docker Engine from Docker's official repo with json-file log limits (it runs Traefik and nginx, §6.3).
@@ -169,14 +182,26 @@ small **nginx-unprivileged** container (old box: 32 MB limit) serves `/srv/sites
 The compose file and the Traefik config live in isoca-infra; changing them is an owner step (Docker
 access is root-equivalent, §6.2).
 
-### 6.4 Deploys
+### 6.4 Deploys (GitHub Actions)
 
-Build on the PC, ship files — *Claude's call* (matches "PC builds, VPS runs"; never build Rust/WASM on the
-KVM2). isoca-infra has a deploy script that takes a site name and a built folder (e.g. cute-trading's
-`web/dist`), rsyncs it as `claude` to a new release folder, and switches a `current` symlink atomically,
-keeping the previous release for rollback. The symlink is **relative**, so it resolves inside the nginx
-container's read-only mount too. cute-trading only has to produce `dist/`; the link between
-repos is that script plus a per-site entry (domain, source repo, build command) in isoca-infra.
+Owner's choice: deploys run in GitHub Actions, not on the owner's PC. Never build Rust/WASM on the KVM2.
+
+- **One reusable deploy workflow lives in isoca-infra** (`workflow_call`): it takes a site name and a
+  built artifact, rsyncs it over SSH as `deploy` into a new release folder, switches the site's relative
+  `current` symlink atomically (relative, so it resolves inside nginx's read-only mount too), keeps the
+  previous releases for rollback, and checks the site answers over HTTPS afterwards.
+- **cute-trading** gets a workflow: on push to `main` (the owner merges PRs) and on manual dispatch, build
+  `web/` (WASM included, reusing what `ci.yml` already does), upload `dist/` as an artifact, then call
+  isoca-infra's deploy workflow, pinned to a commit SHA.
+- **isoca-infra** deploys its own static parts the same way: the isoca.space home (§7), and the Traefik
+  **dynamic config** (Traefik's file provider reloads on change, so no Docker access is needed). The compose
+  file and Traefik's static config stay owner steps (Docker access is root-equivalent).
+- A manual **rollback** dispatch switches a site's `current` back to the previous release.
+- Secrets (the `deploy` private key, host, SSH port, pinned `known_hosts`) live in GitHub encrypted
+  secrets, in a `production` environment on each repo that deploys; never in a repo. Third-party actions
+  are pinned by SHA.
+- The link between repos is the reusable workflow plus the per-site entry (domain, nginx server block,
+  router) in isoca-infra.
 
 ### 6.5 Room for a login (not built)
 
@@ -186,10 +211,15 @@ then.
 
 ## 7. isoca.space home
 
-A first, minimal page: name, one line, a link card to cute-trading (radar.isoca.space). Its source lives
+A first, minimal page: name, one line, a link card to cute-trading (radar.isoca.space) and links to the
+owner's GitHub. Its source lives
 in a folder inside isoca-infra for now (no third repo this phase) — *Claude's call*. Its real content
 and design are a separate brainstorm; this phase only replaces the whoami placeholder so the domain isn't
 dead after cut-over.
+
+The owner's **GitHub profile README** (already a small landing page) gets the matching update in the same
+step: cute-trading (frozen portfolio piece, with its link), isoca-infra, isoca.space. Its wording is
+shown to the owner before it's pushed.
 
 ## 8. Order (driven by the 2026-11-13 expiry)
 
@@ -225,4 +255,4 @@ margin for a slow transfer. Everything after them no longer needs the old box.
 - How the Sweet data client switches to static JSON (build flag, separate entry, or a fixtures client).
 - The landing's layout and the cost drawing's form, within the owner's "drawings over text" preference.
 - Final rate-limit numbers per router (start from the old /math ones).
-- Release retention count, deploy script language.
+- Release retention count; how the forced command and the reusable workflow split the work.
