@@ -65,4 +65,14 @@ describe('FrozenSweet', () => {
     await tenMinutes();
     expect(f).toHaveBeenCalledTimes(1);
   });
+
+  it('says only that the data could not load: nothing about a session, sign-in or the api', async () => {
+    const f = vi.fn(async () => { throw new TypeError('offline'); });
+    vi.stubGlobal('fetch', f);
+    render(<FrozenSweet />);
+    await settle(f);
+    const text = pageText();
+    expect(text).toContain('Could not load the frozen Sweet spots data.');
+    for (const w of ['session', 'sign in', 'api']) expect(text.toLowerCase(), w).not.toContain(w);
+  });
 });

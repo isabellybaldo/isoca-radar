@@ -173,7 +173,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
         </li>
       </ol>
       <p className="dim ll-xlabel">{`${AXIS_TITLE} · counts: trades per rung${thin ? `, of the ${MIN_EXEC} needed` : ''}`}</p>
-      <p className="dim">{asOfText(model.asOfMs)}</p>
+      {!isFrozen() && <p className="dim">{asOfText(model.asOfMs)}</p>}
       <ul className="plain ll-legend" aria-label="legend">
         {LEGEND.map(([k, text]) => (
           <li key={k}>

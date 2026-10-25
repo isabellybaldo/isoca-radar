@@ -9,11 +9,11 @@ import { describeWasm, loadTestEngine } from '../wasm/testEngine';
 import type { Engine } from '../wasm/types';
 import frozenText from '../../frozen/public.json?raw';
 import { FOOTER, FOOTER_FROZEN, SECTIONS, F_CAPTION_FROZEN } from './copy';
-import { BEHIND, LIVE_UNAVAILABLE, STRIP_TITLE_FROZEN } from './LiveStrip';
+import { BEHIND, LIVE_UNAVAILABLE } from './LiveStrip';
 import { MathPage } from './MathPage';
 import { MARKETS_WARMING_FROZEN } from '../schematics/LatencyLadder';
 import { snapshotUrl, SNAPSHOT_URL } from './snapshot';
-import { CHAPTERS, CH7_LEAD_FROZEN, HOOK, HOOK_FROZEN } from './story/copy';
+import { CHAPTERS, CH3_COUNT, CH7_LEAD_FROZEN, HOOK, HOOK_FROZEN } from './story/copy';
 
 const FROZEN_URL = '/frozen/public.json';
 const NOW = Date.UTC(2027, 0, 1);
@@ -61,7 +61,7 @@ describe('/math in frozen mode', () => {
     const f = mockApi({ [FROZEN_URL]: JSON.parse(frozenText) });
     render(<MathPage engine={never} />);
     await settle(f);
-    await until(() => screen.getByRole('region', { name: STRIP_TITLE_FROZEN }));
+    await until(() => screen.getByText(`on the scanner, ${frozenOn()}`));
     expect(f).toHaveBeenCalledTimes(1);
     expect(String(f.mock.calls[0][0])).toBe(FROZEN_URL);
     const text = pageText();
@@ -72,7 +72,13 @@ describe('/math in frozen mode', () => {
     expect(text).toContain(HOOK_FROZEN);
     expect(text).toContain(CH7_LEAD_FROZEN);
     expect(screen.getByText(FOOTER_FROZEN, { exact: false })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '← isoca-radar' })).toHaveAttribute('href', '/');
+    const homes = screen.getAllByRole('link', { name: '← isoca-radar' });
+    expect(homes).toHaveLength(2);
+    for (const a of homes) expect(a).toHaveAttribute('href', '/');
+    // a way home at the top, before chapter 1
+    expect(homes[0].compareDocumentPosition(document.querySelector('h2') as Element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // the file's `today` is the day after capture stopped: no strip, no count line, no "as of" beside the heading
+    for (const w of ['the last captured day (UTC)', CH3_COUNT, 'arbitrage episodes per UTC hour today', 'edge on the table today', 'as of ']) expect(text, w).not.toContain(w);
     expect(screen.getByRole('link', { name: 'What it took to run live →' })).toHaveAttribute('href', '/#cost');
     expect(document.querySelector('.stale')).toBeNull();
     expect(FOOTER_FROZEN).not.toBe(FOOTER);
@@ -99,6 +105,7 @@ describe('/math in frozen mode', () => {
     await settle(f);
     const text = pageText();
     expect(text).not.toContain(BEHIND);
+    expect(text).not.toContain(LIVE_UNAVAILABLE);
     expect(text).toContain(FROZEN_LINE);
   });
 });

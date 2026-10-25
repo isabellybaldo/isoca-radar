@@ -9,7 +9,6 @@ export const BEHIND = 'the live writer is behind';
 export const LIVE_UNAVAILABLE = 'live numbers unavailable';
 /** The strip's heading and its accessible name. "today" is the api's day, which starts at 00:00 UTC. */
 export const STRIP_TITLE = 'today (UTC) on the live scanner';
-export const STRIP_TITLE_FROZEN = 'the last captured day (UTC)';
 
 /** "as of HH:MM UTC"; stale: the day too, and that the writer is behind. Frozen: when it froze, never behind. */
 export function asOfLine(writtenMs: number, stale: boolean): string {
@@ -24,7 +23,7 @@ export function LiveUnavailable() {
 
 /** Today's arbitrage episodes (NO / YES), the edge on the table, the day by UTC hour, and when it was written. */
 export function LiveStrip({ today, writtenMs, stale }: { today: PublicToday; writtenMs: number; stale: boolean }) {
-  const title = isFrozen() ? STRIP_TITLE_FROZEN : STRIP_TITLE;
+  const title = STRIP_TITLE;
   return (
     <section className="m-live" aria-label={title}>
       <p className="m-live-k dim">{title}</p>

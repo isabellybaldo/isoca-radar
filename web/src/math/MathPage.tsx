@@ -93,12 +93,13 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
         </LiveBoundary>
       );
     }
-    return unavailable ? <LiveUnavailable /> : null;
+    return unavailable && !frozen ? <LiveUnavailable /> : null;
   };
   return (
     <div className="app math">
       <header className="top m-top">
         <h1>{TITLE}</h1>
+        {frozen && <a className="dim" href="/">{HOME_LINK}</a>}
         {frozen && <p className="dim">{FROZEN_LINE}</p>}
       </header>
       <main className="body m-body">
@@ -107,7 +108,8 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
         {eng.kind === 'failed' && <p className="error" role="alert">{ENGINE_FAILED}</p>}
         <Story
           engine={eng.kind === 'ok' ? eng.engine : null}
-          strip={live((s) => <LiveStrip today={s.today} writtenMs={s.written_ms} stale={stale} />)}
+          // Frozen: the file's `today` is the day after capture stopped (all zeros), not a captured day: no strip.
+          strip={frozen ? null : live((s) => <LiveStrip today={s.today} writtenMs={s.written_ms} stale={stale} />)}
           ladder={live((s) => <LiveLadder snap={s} stale={stale} />)}
           ladderDrawn={snap !== null}
         />

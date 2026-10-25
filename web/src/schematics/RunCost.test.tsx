@@ -33,6 +33,13 @@ describe('RunCost', () => {
     expect([...at].sort((a, b) => a - b)).toEqual(at);
   });
 
+  it('only the to-scale bands carry rc-flow; the thin links do not', () => {
+    const { container } = render(<RunCost />);
+    expect(container.querySelectorAll('.rc-flow')).toHaveLength(2);
+    expect(container.querySelectorAll('.rc-link')).toHaveLength(2);
+    for (const el of container.querySelectorAll('.rc-link')) expect(el.classList.contains('rc-flow')).toBe(false);
+  });
+
   it('draws no NaN', () => {
     const { container } = render(<RunCost />);
     for (const el of container.querySelectorAll('*')) for (const a of el.attributes) expect(a.value, a.name).not.toMatch(/NaN|Infinity/);

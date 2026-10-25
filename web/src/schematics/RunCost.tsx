@@ -23,9 +23,14 @@ function Stage({ y, kind, name, rest }: { y: number; kind: 'cpu' | 'disk' | 'fee
   );
 }
 
-/** A flow between two stages: a band as wide as the bytes, or a thin line where no rate is claimed. */
+/** A flow between two stages: a band as wide as the bytes. */
 function Flow({ y1, y2, w }: { y1: number; y2: number; w: number }) {
   return <rect className="rc-flow" x={RAIL - w / 2} y={y1} width={w} height={y2 - y1} />;
+}
+
+/** A thin link between two stages: no rate is claimed, so it is a line, not a band (only `rc-flow` is to scale). */
+function Link({ y1, y2 }: { y1: number; y2: number }) {
+  return <line className="rc-link" x1={RAIL} x2={RAIL} y1={y1} y2={y2} />;
 }
 
 /**
@@ -52,9 +57,9 @@ export function RunCost() {
         <text className="rc-text" x={TEXT_X} y={72}>33 GB/day after zstd</text>
         <rect className="rc-disk" x={4} y={DISK_TOP} width={W - 8} height={DISK_BOTTOM - DISK_TOP} />
         <Stage y={104} kind="disk" name="raw capture" />
-        <Flow y1={105} y2={130} w={1} />
+        <Link y1={105} y2={130} />
         <Stage y={139} kind="cpu" name="compact" rest=": 2 cores while compacting" />
-        <Flow y1={140} y2={165} w={1} />
+        <Link y1={140} y2={165} />
         <Stage y={174} kind="disk" name="Parquet archive" />
         <text className="rc-text rc-dim" x={TEXT_X} y={188}>kept: 24 h raw ≤ 30 GB · archive ≤ 40 GB</text>
         <line className="rc-off" x1={RAIL} x2={RAIL} y1={DISK_BOTTOM} y2={208} />

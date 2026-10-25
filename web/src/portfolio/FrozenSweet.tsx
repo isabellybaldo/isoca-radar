@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { getJson } from '../api/client';
+import { ApiError } from '../api/client';
 import type { CardsResponse } from '../api/types';
 import { useApi } from '../api/useApi';
 import { Box } from '../components/Box';
@@ -10,10 +10,25 @@ import { ONE_LINE_CAVEAT, SWEET_EMPTY, type SweetDim, type SweetSide } from '../
 import { fmtUtcDateTime } from '../lib/time';
 import { SweetBody } from '../pages/Sweet';
 
+export const FROZEN_SWEET_FAILED = 'Could not load the frozen Sweet spots data.';
+
+/** The committed file, fetched directly: the dashboard client's auth handling (session, sign-in) means nothing here.
+ *  `ErrorState` prints an `ApiError`'s detail, so every failure is one with this sentence. */
+async function loadCards(signal: AbortSignal): Promise<CardsResponse> {
+  try {
+    const res = await fetch('/frozen/cards-all.json', { signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as CardsResponse;
+  } catch (e) {
+    if (signal.aborted) throw e;
+    throw new ApiError(0, 'frozen_load', FROZEN_SWEET_FAILED);
+  }
+}
+
 /** Frozen-site plan, task 3: the ALL-window Sweet spots from the committed file. One fetch (no refresh deps),
  *  no window switch, no status tag and no "x min ago": it never moves. */
 export function FrozenSweet() {
-  const st = useApi((s) => getJson<CardsResponse>('/frozen/cards-all.json', s), []);
+  const st = useApi((s) => loadCards(s), []);
   const [side, setSide] = useState<SweetSide>('no');
   const [dimAsked, setDim] = useState<SweetDim>('all');
   return (

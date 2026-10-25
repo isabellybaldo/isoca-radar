@@ -496,6 +496,7 @@ ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .rc-svg .rc-name { font-weight: 600; }
 .rc-svg .rc-dim { fill: var(--dim); }
 .rc-svg .rc-flow { fill: var(--teal); }
+.rc-svg .rc-link { stroke: var(--line2); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 .rc-svg .rc-node.feed { fill: var(--mint); }
 .rc-svg .rc-node.cpu { fill: var(--salmon); }
 .rc-svg .rc-node.disk { fill: var(--teal); }
