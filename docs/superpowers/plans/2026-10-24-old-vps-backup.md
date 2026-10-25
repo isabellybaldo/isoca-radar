@@ -5,12 +5,14 @@
 **Goal:** Before the old VPS expires on 2026-11-13, copy all of isoca-radar's data to the owner's PC
 (verified), and commit the four frozen JSON files the portfolio site needs.
 
-**Architecture:** One owner-run runbook (old VPS as root, PC in Git Bash + WSL Ubuntu for rsync) that
-streams a `pg_dump` and rsyncs the archive and raw capture volumes to the PC, checks them with sha256
-manifests, a test restore and a DuckDB query, and exports `public.json` plus `/api/cards` for three
-windows. Claude then commits those JSON files under `web/frozen/` with a test that pins their shape.
+**Architecture:** One owner-run runbook: the PC side in **Windows PowerShell 5.1** with Windows'
+built-in OpenSSH 9.5 (no WSL, no Git Bash), the VPS side in a root shell. The VPS stages everything
+small (the `pg_dump`, the frozen JSON, configs, sha256 manifests) in `/root/ct-backup`; the PC pulls it
+and the two big volumes with resumable `sftp reget -r`, checks every file against the manifests with
+`Get-FileHash`, test-restores the dump and queries the archive with DuckDB. Claude then commits the JSON
+files under `web/frozen/` with a test that pins their shape.
 
-**Tech Stack:** bash, ssh, rsync (WSL Ubuntu, already installed on the PC), Docker Desktop
+**Tech Stack:** PowerShell 5.1, Windows OpenSSH 9.5 (`ssh`, `sftp`), bash on the VPS, Docker Desktop
 (postgres:17 for the test restore), DuckDB (Python package in a throwaway venv), Vitest.
 
 **Spec:** `docs/superpowers/specs/2026-10-24-portfolio-port-design.md` (§5.1, §8 steps 1–2, §9).
@@ -19,9 +21,12 @@ This is plan 1 of 3; plan 2 (the frozen site) reads `web/frozen/`, plan 3 is iso
 ## Global Constraints
 
 - Old VPS: root over SSH on port 50158 at 31.97.23.123, **password login**, project folder
-  `/home/isoca/projects/cute-trading`. From WSL every runbook step reaches it as the alias `isoca-old`
-  (step 1), which keeps one shared connection open (`ControlMaster`/`ControlPersist 8h`) so the password
-  is typed once, not at every ssh/scp/rsync call. The owner runs every VPS step; Claude never runs them.
+  `/home/isoca/projects/cute-trading`. The PC reaches it as the alias `isoca-old` in
+  `C:\Users\Isabelly\.ssh\config` (step 1). Windows OpenSSH can't share a connection, so the runbook
+  groups the work into **5 connections = 5 password prompts** (steps 1, 6, 8, 10, 14). The owner runs
+  every step; Claude never runs them.
+- **PowerShell 5.1's `>` writes UTF-16**: no binary or JSON file is ever produced by a PowerShell
+  redirect. Every file is written on the VPS by bash and downloaded with `sftp`.
 - Volumes: `cute-trading_pgdata` (dumped, not copied), `cute-trading_archive` (Parquet, one folder
   per UTC day, each with `manifest.json`), `cute-trading_data` (raw capture), `cute-trading_public-data`
   (`public.json`). Database `cute_trading`, owner role `ct_owner`.
@@ -29,7 +34,7 @@ This is plan 1 of 3; plan 2 (the frozen site) reads `web/frozen/`, plan 3 is iso
   the VPS; never start scanner, analyze or compact.
 - Order: Postgres dump → Parquet archive → raw capture (raw is the only part that may be dropped if
   time runs out) → JSON export.
-- Backup destination: owner's choice, default `/mnt/e/isoca-radar-backup` (E: has ~110 GB free); never
+- Backup destination: owner's choice, default `E:\isoca-radar-backup` (E: has ~110 GB free); never
   inside a git checkout.
 - Runbook format: numbered steps, one command block → `→ expected:` → `if not:` line, **STOP** after any
   step whose failure must halt; no prose walls; self-contained (no "as in another runbook").
@@ -39,13 +44,14 @@ This is plan 1 of 3; plan 2 (the frozen site) reads `web/frozen/`, plan 3 is iso
 
 ## Review Focus
 
-1. **A transfer cut off halfway** (laptop sleeps, Wi-Fi drops): re-running the same step resumes and
-   ends verified, never silently leaves a partial file counted as done → rsync `--partial
-   --append-verify` and the sha256 check run after every rsync step (runbook steps 7–10).
-2. **The PC disk fills up mid-copy**: the measured total is checked against the destination's free
-   space before the first byte moves (runbook step 3).
-3. **The VPS disk fills up**: nothing is staged on the VPS; the dump streams straight to the PC
-   (runbook step 5) and manifests are written to `/root/ct-backup` (a few MB, checked in step 2).
+1. **A transfer cut off halfway** (laptop sleeps, Wi-Fi drops): re-running the same sftp step resumes
+   (`reget -r` appends to partial files) and the following `Get-FileHash` check catches anything
+   corrupt or missing (runbook steps 6–11).
+2. **The PC disk fills up mid-copy**: the measured total is checked against E:'s free space before the
+   first byte moves (runbook step 3).
+3. **The VPS disk fills up while staging the dump**: step 2 checks `/` has more free space than the
+   pgdata volume (a `-Fc -Z 6` dump is far smaller); if not, step 5's fallback streams the dump through
+   `cmd /c` (binary-safe redirect) instead of staging it.
 4. **The frozen cards are in a non-final state** (`warming`, `thin`, `under_review`) for a shipped
    window: the frozen test fails and names the window (Task 2, `frozen.test.ts`).
 5. **A secret or the VPS identity leaks into the committed JSON**: the frozen test scans every file for
@@ -59,56 +65,86 @@ This is plan 1 of 3; plan 2 (the frozen site) reads `web/frozen/`, plan 3 is iso
 - Create: `docs/superpowers/runbooks/old-vps-backup.md`
 
 **Interfaces:**
-- Produces: on the PC, `$B` (the backup folder) holding `cute_trading.dump`, `archive/`, `capture/`,
-  `manifests/{archive,capture}.sha256`, `config/`, and `frozen/{public.json,cards-7d.json,
-  cards-30d.json,cards-all.json,health-now.json}`. Task 2 reads `$B/frozen/`.
+- Produces: on the PC, `E:\isoca-radar-backup` (`$B`) holding `ct-backup\` (`cute_trading.dump`,
+  `archive.sha256`, `data.sha256`, `ct-backup.sha256`, `config\`, `frozen\{public.json,cards-7d.json,
+  cards-30d.json,cards-all.json,health-now.json}`), `archive\`, `capture\` and `verify.ps1`. Task 2
+  reads `$B\ct-backup\frozen\`.
 
-Header notes (one line each): what it does; the deadline 2026-11-13; the VPS rules above; where each
-step runs (VPS as root over SSH, PC in Git Bash, PC in WSL Ubuntu); `$B` is set in step 1 and every PC
-step starts by setting it again.
+Header notes (one line each): what it does; the deadline 2026-11-13; the VPS rules; the UTF-16 rule;
+where each step runs (PC = PowerShell, VPS = the root shell from step 1); every PC step starts with
+`$B='E:\isoca-radar-backup'`; the 5 password prompts.
 
 - [ ] **Step 1: Write the runbook with these steps, each as command → expected → if not**
 
-| # | Where | What | Key command(s) | Expected |
-|---|---|---|---|---|
-| 1 | WSL | Set `$B`, create it, add the `isoca-old` alias (block below) to `~/.ssh/config` once, open the shared connection (asks the password once) | `B=/mnt/e/isoca-radar-backup; mkdir -p "$B"/{manifests,config,frozen} ~/.ssh/cm && chmod 700 ~/.ssh ~/.ssh/cm; grep -q '^Host isoca-old$' ~/.ssh/config 2>/dev/null \|\| cat >> ~/.ssh/config <<'CFG'` … `CFG`, then `ssh isoca-old 'hostname; which rsync' && ssh -O check isoca-old` | one password prompt, the old host's name, `/usr/bin/rsync`, `Master running`; rsync missing: STOP, tell Claude (fallback is `scp -r` per day folder). A later step asking for the password again means the 8 h connection closed: type it once more |
-| 2 | VPS | Pre-flight: services, sizes, free disk | `cd /home/isoca/projects/cute-trading && docker ps --format '{{.Names}} {{.Status}}' \| grep cute-trading; du -sh /var/lib/docker/volumes/cute-trading_{pgdata,archive,data,public-data}/_data; df -h /` | `postgres`, `api`, `web`, `oauth2-proxy` Up; no scanner/analyze/compact Up; four sizes; `/` has ≥ 1 GB free |
-| 3 | WSL | The destination fits | `df -BG "$B"` | free ≥ (pgdata + archive + data sizes from step 2) × 1.2; **STOP** if not, pick another `$B` |
-| 4 | VPS | Manifests (nice'd, relative paths) | `mkdir -p /root/ct-backup && for v in archive data; do (cd /var/lib/docker/volumes/cute-trading_$v/_data && nice -n 19 find . -type f -print0 \| sort -z \| xargs -0 nice -n 19 sha256sum) > /root/ct-backup/$v.sha256; wc -l /root/ct-backup/$v.sha256; done` | two line counts > 0 (raw capture may be small) |
-| 5 | WSL | Stream the dump to the PC | `ssh isoca-old 'docker exec cute-trading-postgres-1 pg_dump -U ct_owner -d cute_trading -Fc -Z 6' > "$B/cute_trading.dump" && ls -l "$B/cute_trading.dump"` | a non-zero size, no error text; **STOP** on any error |
-| 6 | WSL | The dump is readable | `docker run --rm -v "$(wslpath -w "$B")":/b postgres:17 pg_restore -l /b/cute_trading.dump \| grep -c 'TABLE DATA'` (run from Git Bash with `-v "$(cygpath -w "$B")":/b` if `docker` isn't in WSL) | `26` (one per table in `crates/store/migrations`) |
-| 7 | WSL | Archive | `rsync -a --partial --append-verify --info=progress2 isoca-old:/var/lib/docker/volumes/cute-trading_archive/_data/ "$B/archive/"` | ends with `100%`; re-run the same command after any interruption |
-| 8 | WSL | Archive verified | `scp isoca-old:/root/ct-backup/archive.sha256 "$B/manifests/" && (cd "$B/archive" && sha256sum -c --quiet ../manifests/archive.sha256) && echo archive-ok` | `archive-ok`; failing lines = re-run step 7 then this step |
-| 9 | WSL | Raw capture | step 7's command with `cute-trading_data/_data/` → `"$B/capture/"` | ends with `100%`; skippable only if time runs out (write that down) |
-| 10 | WSL | Raw capture verified | step 8 with `data.sha256` and `capture` | `capture-ok` |
-| 11 | WSL | Configs (no `.env`) | `scp -r isoca-old:'/home/isoca/projects/cute-trading/{compose.yml,compose.web.yml,config}' "$B/config/"` | the three paths exist in `$B/config` |
-| 12 | WSL | Frozen JSON: `public.json` and cards via the web container's busybox `wget` on the api's network | `ssh isoca-old 'docker exec cute-trading-web-1 cat /srv/ct-public-root/math-data/public.json' > "$B/frozen/public.json"; for w in 7d 30d all; do ssh isoca-old "docker exec cute-trading-web-1 wget -qO- 'http://api:8081/api/cards?win=$w'" > "$B/frozen/cards-$w.json"; done; ssh isoca-old "docker exec cute-trading-web-1 wget -qO- http://api:8081/api/health/now" > "$B/frozen/health-now.json"; wc -c "$B"/frozen/*.json; grep -c '"card":"SWEET"' "$B"/frozen/cards-*.json` | five non-zero sizes; `public.json` < 65536; each cards file counts `1` |
-| 13 | Git Bash | Test restore into a throwaway Postgres | `docker run -d --name ct-restore -e POSTGRES_PASSWORD=restore -v "$(cygpath -w "$B")":/b postgres:17` → wait for `pg_isready` → `createdb -U postgres cute_trading` → `pg_restore -U postgres -d cute_trading --no-owner --no-privileges /b/cute_trading.dump` → `psql -U postgres -d cute_trading -Atc "select (select count(*) from episodes),(select count(*) from card_results),(select max(minute_ms) from health)"` → `docker rm -f ct-restore` | three numbers, all > 0; the third is the frozen moment (ms), written down for Task 2 |
-| 14 | WSL | DuckDB reads the archive | `python3 -m venv /tmp/ddb && /tmp/ddb/bin/pip -q install duckdb && /tmp/ddb/bin/python -c "import duckdb,sys; print(duckdb.sql(\"select count(*) from read_parquet('$B/archive/*/*.parquet', union_by_name=true)\").fetchone())"` | one tuple with a count > 0 |
-| 15 | WSL | Clean up the manifests on the VPS, close the shared connection | `ssh isoca-old 'rm -r /root/ct-backup && echo cleaned'; ssh -O exit isoca-old` | `cleaned`, `Exit request sent.` |
-| 16 | — | Tell Claude: step 13's three numbers, whether step 9 was skipped, and that `$B/frozen` is ready | — | — |
+1. **PC** — set `$B`, create `$B\archive`, `$B\capture`; append to `$HOME\.ssh\config` (only if
+   `Select-String -Quiet '^Host isoca-old$'` finds nothing; `Add-Content -Encoding ascii`) the block
+   `Host isoca-old` / `HostName 31.97.23.123` / `Port 50158` / `User root` / `ServerAliveInterval 30`;
+   write `$B\verify.ps1` (below); then `ssh isoca-old` → password 1 → a root prompt. Steps 2, 4, 5 run there.
+2. **VPS** — pre-flight: `docker ps --format '{{.Names}} {{.Status}}' | grep cute-trading`;
+   `du -sh /var/lib/docker/volumes/cute-trading_{pgdata,archive,data,public-data}/_data`; `df -h /`.
+   → `postgres`, `api`, `web`, `oauth2-proxy` Up, no scanner/analyze/compact Up; four sizes; free on `/`
+   > the pgdata size (else step 5 uses its fallback). Write the four sizes down.
+3. **PC** (a second PowerShell window) — `[int]((Get-PSDrive E).Free/1GB)` → ≥ (pgdata + archive + data)
+   × 1.2. **STOP** if not: pick another `$B`.
+4. **VPS** — the frozen JSON and configs, inside `bash -euo pipefail <<'SH'` … `SH` so a failure stops
+   it without closing the shell:
+   ```bash
+   D=/root/ct-backup; mkdir -p $D/frozen $D/config; cd /home/isoca/projects/cute-trading
+   cp -r compose.yml compose.web.yml config $D/config/
+   docker exec cute-trading-web-1 cat /srv/ct-public-root/math-data/public.json > $D/frozen/public.json
+   for w in 7d 30d all; do docker exec cute-trading-web-1 wget -qO- "http://api:8081/api/cards?win=$w" > $D/frozen/cards-$w.json; done
+   docker exec cute-trading-web-1 wget -qO- http://api:8081/api/health/now > $D/frozen/health-now.json
+   wc -c $D/frozen/*.json; grep -c '"card":"SWEET"' $D/frozen/cards-*.json
+   ```
+   → five non-zero sizes, `public.json` < 65536; each cards file counts `1`. (`api` resolves from the web
+   container: both are on `ct_radar`.) **STOP** on any error.
+5. **VPS** — the dump and the manifests (same heredoc form; slow):
+   ```bash
+   D=/root/ct-backup
+   docker exec cute-trading-postgres-1 pg_dump -U ct_owner -d cute_trading -Fc -Z 6 > $D/cute_trading.dump
+   for v in archive data; do (cd /var/lib/docker/volumes/cute-trading_$v/_data && find . -type f -print0 | sort -z | xargs -0 -r nice -n 19 sha256sum) > $D/$v.sha256; done
+   (cd $D && find . -type f ! -name '*.sha256' -print0 | sort -z | xargs -0 sha256sum) > $D/ct-backup.sha256
+   ls -l $D/cute_trading.dump; wc -l $D/*.sha256; df -h /
+   ```
+   → a dump size, three line counts > 0 (`data.sha256` may be small), `/` not full; then `exit`.
+   Fallback when step 2 said `/` is too small: drop the `pg_dump` line here and, on the PC after step 6,
+   run `cmd /c "ssh isoca-old ""docker exec cute-trading-postgres-1 pg_dump -U ct_owner -d cute_trading -Fc -Z 6"" > E:\isoca-radar-backup\ct-backup\cute_trading.dump"`
+   (one more password; cmd's redirect is binary-safe). **STOP** on any error.
+6. **PC** — `sftp isoca-old` (password 2), then type `lcd E:/isoca-radar-backup`, `reget -r /root/ct-backup`,
+   `bye` → the transfer list ends without errors. Interrupted: run the same three commands again.
+7. **PC** — `& "$B\verify.ps1" "$B\ct-backup\ct-backup.sha256" "$B\ct-backup"` → `ok <n> files`.
+8. **PC** — `sftp isoca-old` (password 3): `lcd E:/isoca-radar-backup`,
+   `reget -r /var/lib/docker/volumes/cute-trading_archive/_data archive`, `bye`. Re-run after any cut.
+9. **PC** — `& "$B\verify.ps1" "$B\ct-backup\archive.sha256" "$B\archive"` → `ok <n> files` with
+   `<n>` = the line count of `archive.sha256` from step 5. `FAIL <path>` lines: redo step 8, then this.
+10. **PC** — step 8 with `cute-trading_data/_data capture` (password 4). Skippable only if time runs
+    out (write that down).
+11. **PC** — step 9 with `data.sha256` and `$B\capture` → `ok <n> files`.
+12. **PC** — test restore: `docker run -d --name ct-restore -e POSTGRES_PASSWORD=restore -v "${B}\ct-backup:/b" postgres:17`;
+    loop `docker exec ct-restore pg_isready -U postgres` until ready;
+    `docker exec ct-restore sh -c 'pg_restore -l /b/cute_trading.dump | grep -c "TABLE DATA"'` → `26`;
+    `docker exec ct-restore createdb -U postgres cute_trading`;
+    `docker exec ct-restore pg_restore -U postgres -d cute_trading --no-owner --no-privileges /b/cute_trading.dump`;
+    `docker exec ct-restore psql -U postgres -d cute_trading -Atc "select (select count(*) from episodes),(select count(*) from card_results),(select max(minute_ms) from health)"`
+    → three numbers > 0, the third is the frozen moment (write it down); then `docker rm -f ct-restore`.
+13. **PC** — DuckDB: `py -3.11 -m venv "$env:TEMP\ddb"; & "$env:TEMP\ddb\Scripts\pip.exe" -q install duckdb`,
+    then the venv's `python.exe -c` running
+    `duckdb.sql("select count(*) from read_parquet('E:/isoca-radar-backup/archive/*/*.parquet', union_by_name=true)").fetchone()`
+    → one tuple with a count > 0.
+14. **PC** — `ssh isoca-old "rm -r /root/ct-backup && echo cleaned"` (password 5) → `cleaned`.
+15. Tell Claude: step 12's three numbers, whether step 10 was skipped, and that `$B\ct-backup\frozen` is ready.
 
-Step 1's alias block, written between the heredoc markers:
-
-```
-Host isoca-old
-  HostName 31.97.23.123
-  Port 50158
-  User root
-  ControlMaster auto
-  ControlPath ~/.ssh/cm/%r@%h:%p
-  ControlPersist 8h
-  ServerAliveInterval 30
-```
-
-Every WSL step uses the `isoca-old` alias from step 1. The final step also closes the shared connection
-(`ssh -O exit isoca-old`). The `api` hostname resolves from the web container because
-both share the `ct_radar` network (`compose.web.yml`).
+`verify.ps1` (written by step 1; PowerShell 5.1, ~15 lines): `param([string]$Manifest, [string]$Root)`;
+for each manifest line `^([0-9a-f]{64}) [ *]\./(.+)$`, `Get-FileHash -Algorithm SHA256` of
+`Join-Path $Root $path` (`/` → `\`); a missing file or a different hash prints `FAIL <path>`; the end
+prints `ok <n> files` when nothing failed, otherwise `<k> FAILED of <n>` and exits 1.
 
 - [ ] **Step 2: Check the runbook against the format**
 
-Run: `grep -c '^→ expected:' docs/superpowers/runbooks/old-vps-backup.md; grep -c '^\*\*STOP\*\*' docs/superpowers/runbooks/old-vps-backup.md; grep -ciE 'as in|see .*runbook' docs/superpowers/runbooks/old-vps-backup.md`
-Expected: `16` (or 15 if step 16 has none), at least `3` (steps 3, 5, and 1's rsync-missing case), `0`.
+Run: `grep -c '^→ expected:' docs/superpowers/runbooks/old-vps-backup.md; grep -c '^\*\*STOP\*\*' docs/superpowers/runbooks/old-vps-backup.md; grep -ciE 'as in|see .*runbook|wsl|rsync' docs/superpowers/runbooks/old-vps-backup.md`
+Expected: `14` (step 15 has none), at least `3` (steps 3, 4, 5), `0`.
+Also: save `verify.ps1`'s body to the scratch folder and run it in PowerShell on a two-file sample
+manifest (one good, one tampered): expect `FAIL <the tampered one>` and `1 FAILED of 2`.
 
 - [ ] **Step 3: Commit**
 
@@ -117,19 +153,19 @@ git add docs/superpowers/runbooks/old-vps-backup.md
 git commit -m "runbook: back up the old VPS before 11-13: dump, archive, raw capture, verified, and the frozen JSON"
 ```
 
-Then hand the runbook to the owner. Task 2 waits for runbook step 16.
+Then hand the runbook to the owner. Task 2 waits for runbook step 15.
 
 ### Task 2: Commit the frozen data
 
 **Files:**
 - Create: `web/frozen/public.json`, `web/frozen/cards-7d.json`, `web/frozen/cards-30d.json`,
-  `web/frozen/cards-all.json` (copied from `$B/frozen/`; `health-now.json` is **not** committed: it
+  `web/frozen/cards-all.json` (copied from `E:\isoca-radar-backup\ct-backup\frozen\`; `health-now.json` is **not** committed: it
   names the host)
 - Create: `web/frozen/README.md`
 - Test: `web/src/frozen.test.ts`
 
 **Interfaces:**
-- Consumes: `$B/frozen/*.json` from Task 1; `CardsResponse`, `CardBody`, `CardStatus` from
+- Consumes: `E:\isoca-radar-backup\ct-backup\frozen\*.json` from Task 1; `CardsResponse`, `CardBody`, `CardStatus` from
   `web/src/api/types.ts`; the existing `realSnapshot.test.ts` (run with `PUBLIC_JSON`).
 - Produces for plan 2: `web/frozen/public.json` (a `PublicSnapshot`), `web/frozen/cards-{7d,30d,all}.json`
   (each a `CardsResponse`), and `FROZEN_MS` documented in the README (the last capture minute, ms, from
@@ -171,10 +207,10 @@ describe('frozen data', () => {
 Run: `cd web && npx vitest run src/frozen.test.ts`
 Expected: FAIL with `ENOENT` for `frozen/cards-7d.json`.
 
-- [ ] **Step 3: Copy the four files from `$B/frozen/` into `web/frozen/` byte for byte, and write `web/frozen/README.md`**
+- [ ] **Step 3: Copy the four files from `E:\isoca-radar-backup\ct-backup\frozen\` into `web/frozen/` byte for byte, and write `web/frozen/README.md`**
 
 README (short, no host names): what each file is and which page reads it; exported 2026-10-xx from the
-old VPS (runbook `old-vps-backup.md` step 12); `FROZEN_MS = <step 13's third number>` and its UTC time;
+old VPS (runbook `old-vps-backup.md` step 4); `FROZEN_MS = <step 12's third number>` and its UTC time;
 capture stopped 2026-10-19; "never edit by hand: re-export or leave".
 
 - [ ] **Step 4: Run the frozen test and the real-snapshot test**
