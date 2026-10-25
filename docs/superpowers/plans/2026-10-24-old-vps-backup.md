@@ -71,15 +71,7 @@ step starts by setting it again.
 
 | # | Where | What | Key command(s) | Expected |
 |---|---|---|---|---|
-| 1 | WSL | Set `$B`, create it, add the `isoca-old` alias to `~/.ssh/config` (once; `grep -q` guards a second run), open the shared connection (asks the password once) | `B=/mnt/e/isoca-radar-backup; mkdir -p "$B"/{manifests,config,frozen} ~/.ssh/cm && chmod 700 ~/.ssh ~/.ssh/cm; grep -q '^Host isoca-old$' ~/.ssh/config 2>/dev/null \|\| printf 'Host isoca-old
-  HostName 31.97.23.123
-  Port 50158
-  User root
-  ControlMaster auto
-  ControlPath ~/.ssh/cm/%%r@%%h:%%p
-  ControlPersist 8h
-  ServerAliveInterval 30
-' >> ~/.ssh/config; ssh isoca-old 'hostname; which rsync' && ssh -O check isoca-old` | one password prompt, the old host's name, `/usr/bin/rsync`, `Master running`; rsync missing: STOP, tell Claude (fallback is `scp -r` per day folder). Any later step that asks for the password again just means the 8 h connection closed: type it once more |
+| 1 | WSL | Set `$B`, create it, add the `isoca-old` alias (block below) to `~/.ssh/config` once, open the shared connection (asks the password once) | `B=/mnt/e/isoca-radar-backup; mkdir -p "$B"/{manifests,config,frozen} ~/.ssh/cm && chmod 700 ~/.ssh ~/.ssh/cm; grep -q '^Host isoca-old$' ~/.ssh/config 2>/dev/null \|\| cat >> ~/.ssh/config <<'CFG'` … `CFG`, then `ssh isoca-old 'hostname; which rsync' && ssh -O check isoca-old` | one password prompt, the old host's name, `/usr/bin/rsync`, `Master running`; rsync missing: STOP, tell Claude (fallback is `scp -r` per day folder). A later step asking for the password again means the 8 h connection closed: type it once more |
 | 2 | VPS | Pre-flight: services, sizes, free disk | `cd /home/isoca/projects/cute-trading && docker ps --format '{{.Names}} {{.Status}}' \| grep cute-trading; du -sh /var/lib/docker/volumes/cute-trading_{pgdata,archive,data,public-data}/_data; df -h /` | `postgres`, `api`, `web`, `oauth2-proxy` Up; no scanner/analyze/compact Up; four sizes; `/` has ≥ 1 GB free |
 | 3 | WSL | The destination fits | `df -BG "$B"` | free ≥ (pgdata + archive + data sizes from step 2) × 1.2; **STOP** if not, pick another `$B` |
 | 4 | VPS | Manifests (nice'd, relative paths) | `mkdir -p /root/ct-backup && for v in archive data; do (cd /var/lib/docker/volumes/cute-trading_$v/_data && nice -n 19 find . -type f -print0 \| sort -z \| xargs -0 nice -n 19 sha256sum) > /root/ct-backup/$v.sha256; wc -l /root/ct-backup/$v.sha256; done` | two line counts > 0 (raw capture may be small) |
@@ -95,6 +87,19 @@ step starts by setting it again.
 | 14 | WSL | DuckDB reads the archive | `python3 -m venv /tmp/ddb && /tmp/ddb/bin/pip -q install duckdb && /tmp/ddb/bin/python -c "import duckdb,sys; print(duckdb.sql(\"select count(*) from read_parquet('$B/archive/*/*.parquet', union_by_name=true)\").fetchone())"` | one tuple with a count > 0 |
 | 15 | WSL | Clean up the manifests on the VPS, close the shared connection | `ssh isoca-old 'rm -r /root/ct-backup && echo cleaned'; ssh -O exit isoca-old` | `cleaned`, `Exit request sent.` |
 | 16 | — | Tell Claude: step 13's three numbers, whether step 9 was skipped, and that `$B/frozen` is ready | — | — |
+
+Step 1's alias block, written between the heredoc markers:
+
+```
+Host isoca-old
+  HostName 31.97.23.123
+  Port 50158
+  User root
+  ControlMaster auto
+  ControlPath ~/.ssh/cm/%r@%h:%p
+  ControlPersist 8h
+  ServerAliveInterval 30
+```
 
 Every WSL step uses the `isoca-old` alias from step 1. The final step also closes the shared connection
 (`ssh -O exit isoca-old`). The `api` hostname resolves from the web container because
