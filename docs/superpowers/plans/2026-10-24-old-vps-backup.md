@@ -18,8 +18,10 @@ This is plan 1 of 3; plan 2 (the frozen site) reads `web/frozen/`, plan 3 is iso
 
 ## Global Constraints
 
-- Old VPS: `ssh -p 50158 -i "C:/Users/Isabelly/.ssh/id_ed25519" root@31.97.23.123`, project folder
-  `/home/isoca/projects/cute-trading`. The owner runs every VPS step; Claude never runs them.
+- Old VPS: root over SSH on port 50158 at 31.97.23.123, **password login**, project folder
+  `/home/isoca/projects/cute-trading`. From WSL every runbook step reaches it as the alias `isoca-old`
+  (step 1), which keeps one shared connection open (`ControlMaster`/`ControlPersist 8h`) so the password
+  is typed once, not at every ssh/scp/rsync call. The owner runs every VPS step; Claude never runs them.
 - Volumes: `cute-trading_pgdata` (dumped, not copied), `cute-trading_archive` (Parquet, one folder
   per UTC day, each with `manifest.json`), `cute-trading_data` (raw capture), `cute-trading_public-data`
   (`public.json`). Database `cute_trading`, owner role `ct_owner`.
@@ -69,25 +71,33 @@ step starts by setting it again.
 
 | # | Where | What | Key command(s) | Expected |
 |---|---|---|---|---|
-| 1 | WSL | Set `$B`, create it, copy the SSH key into WSL with mode 600 (keys on `/mnt/c` are 777 and ssh refuses them) | `B=/mnt/e/isoca-radar-backup; mkdir -p "$B"/{manifests,config,frozen}; install -m 600 /mnt/c/Users/Isabelly/.ssh/id_ed25519 ~/.ssh/isoca_old; ssh -p 50158 -i ~/.ssh/isoca_old root@31.97.23.123 'hostname; which rsync'` | the old host's name and `/usr/bin/rsync`; if rsync is missing: STOP, tell Claude (fallback is `scp -r` per day folder) |
+| 1 | WSL | Set `$B`, create it, add the `isoca-old` alias to `~/.ssh/config` (once; `grep -q` guards a second run), open the shared connection (asks the password once) | `B=/mnt/e/isoca-radar-backup; mkdir -p "$B"/{manifests,config,frozen} ~/.ssh/cm && chmod 700 ~/.ssh ~/.ssh/cm; grep -q '^Host isoca-old$' ~/.ssh/config 2>/dev/null \|\| printf 'Host isoca-old
+  HostName 31.97.23.123
+  Port 50158
+  User root
+  ControlMaster auto
+  ControlPath ~/.ssh/cm/%%r@%%h:%%p
+  ControlPersist 8h
+  ServerAliveInterval 30
+' >> ~/.ssh/config; ssh isoca-old 'hostname; which rsync' && ssh -O check isoca-old` | one password prompt, the old host's name, `/usr/bin/rsync`, `Master running`; rsync missing: STOP, tell Claude (fallback is `scp -r` per day folder). Any later step that asks for the password again just means the 8 h connection closed: type it once more |
 | 2 | VPS | Pre-flight: services, sizes, free disk | `cd /home/isoca/projects/cute-trading && docker ps --format '{{.Names}} {{.Status}}' \| grep cute-trading; du -sh /var/lib/docker/volumes/cute-trading_{pgdata,archive,data,public-data}/_data; df -h /` | `postgres`, `api`, `web`, `oauth2-proxy` Up; no scanner/analyze/compact Up; four sizes; `/` has ≥ 1 GB free |
 | 3 | WSL | The destination fits | `df -BG "$B"` | free ≥ (pgdata + archive + data sizes from step 2) × 1.2; **STOP** if not, pick another `$B` |
 | 4 | VPS | Manifests (nice'd, relative paths) | `mkdir -p /root/ct-backup && for v in archive data; do (cd /var/lib/docker/volumes/cute-trading_$v/_data && nice -n 19 find . -type f -print0 \| sort -z \| xargs -0 nice -n 19 sha256sum) > /root/ct-backup/$v.sha256; wc -l /root/ct-backup/$v.sha256; done` | two line counts > 0 (raw capture may be small) |
-| 5 | WSL | Stream the dump to the PC | `ssh … root@31.97.23.123 'docker exec cute-trading-postgres-1 pg_dump -U ct_owner -d cute_trading -Fc -Z 6' > "$B/cute_trading.dump" && ls -l "$B/cute_trading.dump"` | a non-zero size, no error text; **STOP** on any error |
+| 5 | WSL | Stream the dump to the PC | `ssh isoca-old 'docker exec cute-trading-postgres-1 pg_dump -U ct_owner -d cute_trading -Fc -Z 6' > "$B/cute_trading.dump" && ls -l "$B/cute_trading.dump"` | a non-zero size, no error text; **STOP** on any error |
 | 6 | WSL | The dump is readable | `docker run --rm -v "$(wslpath -w "$B")":/b postgres:17 pg_restore -l /b/cute_trading.dump \| grep -c 'TABLE DATA'` (run from Git Bash with `-v "$(cygpath -w "$B")":/b` if `docker` isn't in WSL) | `26` (one per table in `crates/store/migrations`) |
-| 7 | WSL | Archive | `rsync -a --partial --append-verify --info=progress2 -e "ssh -p 50158 -i ~/.ssh/isoca_old" root@31.97.23.123:/var/lib/docker/volumes/cute-trading_archive/_data/ "$B/archive/"` | ends with `100%`; re-run the same command after any interruption |
-| 8 | WSL | Archive verified | `scp -P 50158 -i ~/.ssh/isoca_old root@31.97.23.123:/root/ct-backup/archive.sha256 "$B/manifests/" && (cd "$B/archive" && sha256sum -c --quiet ../manifests/archive.sha256) && echo archive-ok` | `archive-ok`; failing lines = re-run step 7 then this step |
+| 7 | WSL | Archive | `rsync -a --partial --append-verify --info=progress2 isoca-old:/var/lib/docker/volumes/cute-trading_archive/_data/ "$B/archive/"` | ends with `100%`; re-run the same command after any interruption |
+| 8 | WSL | Archive verified | `scp isoca-old:/root/ct-backup/archive.sha256 "$B/manifests/" && (cd "$B/archive" && sha256sum -c --quiet ../manifests/archive.sha256) && echo archive-ok` | `archive-ok`; failing lines = re-run step 7 then this step |
 | 9 | WSL | Raw capture | step 7's command with `cute-trading_data/_data/` → `"$B/capture/"` | ends with `100%`; skippable only if time runs out (write that down) |
 | 10 | WSL | Raw capture verified | step 8 with `data.sha256` and `capture` | `capture-ok` |
-| 11 | WSL | Configs (no `.env`) | `scp -P 50158 -i ~/.ssh/isoca_old -r root@31.97.23.123:'/home/isoca/projects/cute-trading/{compose.yml,compose.web.yml,config}' "$B/config/"` | the three paths exist in `$B/config` |
-| 12 | WSL | Frozen JSON: `public.json` and cards via the web container's busybox `wget` on the api's network | `ssh … 'docker exec cute-trading-web-1 cat /srv/ct-public-root/math-data/public.json' > "$B/frozen/public.json"; for w in 7d 30d all; do ssh … "docker exec cute-trading-web-1 wget -qO- 'http://api:8081/api/cards?win=$w'" > "$B/frozen/cards-$w.json"; done; ssh … "docker exec cute-trading-web-1 wget -qO- http://api:8081/api/health/now" > "$B/frozen/health-now.json"; wc -c "$B"/frozen/*.json; grep -c '"card":"SWEET"' "$B"/frozen/cards-*.json` | five non-zero sizes; `public.json` < 65536; each cards file counts `1` |
+| 11 | WSL | Configs (no `.env`) | `scp -r isoca-old:'/home/isoca/projects/cute-trading/{compose.yml,compose.web.yml,config}' "$B/config/"` | the three paths exist in `$B/config` |
+| 12 | WSL | Frozen JSON: `public.json` and cards via the web container's busybox `wget` on the api's network | `ssh isoca-old 'docker exec cute-trading-web-1 cat /srv/ct-public-root/math-data/public.json' > "$B/frozen/public.json"; for w in 7d 30d all; do ssh isoca-old "docker exec cute-trading-web-1 wget -qO- 'http://api:8081/api/cards?win=$w'" > "$B/frozen/cards-$w.json"; done; ssh isoca-old "docker exec cute-trading-web-1 wget -qO- http://api:8081/api/health/now" > "$B/frozen/health-now.json"; wc -c "$B"/frozen/*.json; grep -c '"card":"SWEET"' "$B"/frozen/cards-*.json` | five non-zero sizes; `public.json` < 65536; each cards file counts `1` |
 | 13 | Git Bash | Test restore into a throwaway Postgres | `docker run -d --name ct-restore -e POSTGRES_PASSWORD=restore -v "$(cygpath -w "$B")":/b postgres:17` → wait for `pg_isready` → `createdb -U postgres cute_trading` → `pg_restore -U postgres -d cute_trading --no-owner --no-privileges /b/cute_trading.dump` → `psql -U postgres -d cute_trading -Atc "select (select count(*) from episodes),(select count(*) from card_results),(select max(minute_ms) from health)"` → `docker rm -f ct-restore` | three numbers, all > 0; the third is the frozen moment (ms), written down for Task 2 |
 | 14 | WSL | DuckDB reads the archive | `python3 -m venv /tmp/ddb && /tmp/ddb/bin/pip -q install duckdb && /tmp/ddb/bin/python -c "import duckdb,sys; print(duckdb.sql(\"select count(*) from read_parquet('$B/archive/*/*.parquet', union_by_name=true)\").fetchone())"` | one tuple with a count > 0 |
-| 15 | VPS | Clean up the manifests | `rm -r /root/ct-backup && echo cleaned` | `cleaned` |
+| 15 | WSL | Clean up the manifests on the VPS, close the shared connection | `ssh isoca-old 'rm -r /root/ct-backup && echo cleaned'; ssh -O exit isoca-old` | `cleaned`, `Exit request sent.` |
 | 16 | — | Tell Claude: step 13's three numbers, whether step 9 was skipped, and that `$B/frozen` is ready | — | — |
 
-The `ssh …` in the table is `ssh -p 50158 -i ~/.ssh/isoca_old root@31.97.23.123`; the runbook writes it
-out in full in every step (self-contained). The `api` hostname resolves from the web container because
+Every WSL step uses the `isoca-old` alias from step 1. The final step also closes the shared connection
+(`ssh -O exit isoca-old`). The `api` hostname resolves from the web container because
 both share the `ct_radar` network (`compose.web.yml`).
 
 - [ ] **Step 2: Check the runbook against the format**
