@@ -1,0 +1,40 @@
+name: portfolio
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: rustup show
+      - run: rustup target add wasm32-unknown-unknown
+      - id: wbg
+        # the CLI must equal the wasm-bindgen crate Cargo.lock pins (same as ci.yml's web job)
+        run: echo "version=$(sh scripts/wasm-bindgen-version.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}
+      - run: command -v wasm-bindgen || cargo install wasm-bindgen-cli --locked --version "${{ steps.wbg.outputs.version }}"
+      - run: sh scripts/build-wasm.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build:portfolio
+        working-directory: web
+      # the deploy job (a later plan) downloads this artifact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: radar-site
+          path: web/dist-portfolio
+          retention-days: 7
+          if-no-files-found: error
