@@ -157,6 +157,12 @@ Then hand the runbook to the owner. Task 2 waits for runbook step 15.
 
 ### Task 2: Commit the frozen data
 
+> Done 2026-10-25 with one change from below (owner): only `public.json` and `cards-all.json` are
+> committed. 7D and 30D were `warming` over the same three days, so only ALL ships. The test checks the
+> IP, `srv1125993`, `account_id` and `isoca-radar-scanner` (not `"host"`: the EDGE card's
+> `"host":"vps-kvm2"` is a plan label, not an identity), reads the files with `?raw` imports, and
+> `.gitattributes` marks `web/frozen/*.json -text`.
+
 **Files:**
 - Create: `web/frozen/public.json`, `web/frozen/cards-7d.json`, `web/frozen/cards-30d.json`,
   `web/frozen/cards-all.json` (copied from `E:\isoca-radar-backup\ct-backup\frozen\`; `health-now.json` is **not** committed: it

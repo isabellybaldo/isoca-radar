@@ -41,7 +41,8 @@ sudoku and mahjong games (behind a login) follow.
 2. **cute-trading, frozen, public, static**, at radar.isoca.space, with exactly two features:
    - **/math**: the 7-chapter story and playground (Rust via WASM), as today, reading a frozen
      `public.json`.
-   - **Sweet spots**: the page as today (side × dimension grid, 7D / 30D / ALL windows, folds), reading
+   - **Sweet spots**: the page as today (side × dimension grid, folds) but **ALL window only, no window
+     switch** (owner, 2026-10-25: 7D and 30D held the same three days and were still `warming`), reading
      frozen JSON instead of `/api/cards`.
    - plus a short **"what it took to run live"** section (§5.3).
 3. **isoca-infra**: a new repo that sets up and hardens the KVM2 and deploys static sites to it.
@@ -80,7 +81,7 @@ without the old box) — *Claude's call*:
 | File | Source | Used by |
 |---|---|---|
 | `public.json` | the api's last snapshot (`/var/lib/ct-public/public.json`, ≤ 64 KB) | /math |
-| `cards-7d.json`, `cards-30d.json`, `cards-all.json` | `GET /api/cards?win=…` | Sweet spots |
+| `cards-all.json` | `GET /api/cards?win=all` | Sweet spots |
 
 The old box's login works again (the owner applied the oauth `read:org` fix there). The export can go
 through it, or from inside the box (e.g. a throwaway curl container on the api's internal network), or,
@@ -93,8 +94,8 @@ as a fallback, by running `api` on the PC against the restored Postgres dump. Bu
 - **Landing `/`** — *Claude's call*: one or two sentences on what isoca-radar was (a read-only
   Polymarket arbitrage lab, paper only), two cards linking to /math and /sweet, and the cost section.
 - A minimal header with only those links. No live dot, no fake toggle, no other nav entries.
-- **Sweet spots** reuses `Sweet.tsx` and its components; the data client reads the static JSON for the
-  chosen window. No polling tickers.
+- **Sweet spots** reuses `Sweet.tsx` and its components, without the window switch; it reads
+  `cards-all.json`. No polling tickers.
 - **/math** keeps its current behavior and bundle; the "live" parts (strip, ladder) render from the
   frozen `public.json` and are labeled as frozen, never as stale or unavailable.
 - Every page shows one quiet line: "Frozen snapshot from <date>. Capture stopped on 2026-10-19."

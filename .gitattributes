@@ -3,3 +3,4 @@ crates/arb-core/premises.lock text eol=lf
 *.sql text eol=lf
 config/*.toml text eol=lf
 deploy/** text eol=lf
+web/frozen/*.json -text
