@@ -74,7 +74,7 @@ async function requestJson<T>(path: string, opts: RequestOpts = {}): Promise<T> 
   return (await res.json()) as T;
 }
 
-function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+export function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return requestJson<T>(path, { signal });
 }
 
