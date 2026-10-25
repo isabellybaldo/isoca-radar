@@ -6,9 +6,13 @@
 // whitelisted fields, so a key the api never promised is not passed on. Decimals stay strings (R12).
 // Type-only imports from src/api are erased (spec 7b §7.2).
 import type { BreakEven, MarketsStatus, SweetLabel } from '../api/types';
+import { isFrozen } from '../frozenMode';
 import type { LadderIn } from '../lib/ladder';
 
 export const SNAPSHOT_URL = '/math-data/public.json';
+/** Frozen site: the committed last file, served next to the page. */
+export const FROZEN_SNAPSHOT_URL = '/frozen/public.json';
+export const snapshotUrl = (): string => (isFrozen() ? FROZEN_SNAPSHOT_URL : SNAPSHOT_URL);
 /** §6.3: within 30 minutes of written_ms the snapshot is fresh. */
 export const FRESH_MS = 30 * 60_000;
 /** §6.3: a tab coming back re-fetches only when the last fetch is older than this. */

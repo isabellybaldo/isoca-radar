@@ -14,7 +14,9 @@ import { EpisodeView } from '../sections/EpisodeSection';
 import { PayoffView } from '../sections/PayoffSection';
 import { Out } from '../sections/Section';
 import { Chapter } from './Chapter';
-import { CH3_COUNT, CH7_EXTRAS, CHAPTERS, type ChapterCopy, TAKE } from './copy';
+import { isFrozen } from '../../frozenMode';
+import { COST_LINK } from '../copy';
+import { CH3_COUNT, CH7_EXTRAS, CH7_LEAD_FROZEN, CHAPTERS, type ChapterCopy, TAKE } from './copy';
 import { CH1, CH2, CH3, CH3_LABELS, CH4, CH5, CH6, type Pair } from './presets';
 
 /** One engine-backed chapter: its own two-state switch, the engine's answer for the state shown, the drawing,
@@ -91,10 +93,15 @@ export function Story({ engine, strip, ladder, ladderDrawn }: { engine: Engine |
         draw={(m) => <BasketLegs model={m} names={F_NAMES} />}
         take={(m) => TAKE.ch6(basketWord(m))}
       />
-      <Chapter copy={C7} take={TAKE.ch7}>
+      <Chapter copy={isFrozen() ? { ...C7, lead: CH7_LEAD_FROZEN } : C7} take={TAKE.ch7}>
         {ladder}
         {ladderDrawn && <p className="dim m-note">{CH7_EXTRAS}</p>}
       </Chapter>
+      {isFrozen() && (
+        <p className="m-note">
+          <a href="/#cost">{COST_LINK}</a>
+        </p>
+      )}
     </>
   );
 }

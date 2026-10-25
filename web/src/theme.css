@@ -487,3 +487,24 @@ ul.plain.ds-legend, ul.plain.bl-legend { gap: 2px; font-size: 13px; }
 .ub-axis li { display: grid; min-width: 0; overflow-wrap: normal; }
 .ub-axis li span { overflow-wrap: anywhere; } /* 8 updates at 360 px: a long figure splits rather than overflow */
 .ub-axis li .ub-mark { min-height: 1.3em; } /* the line where the peak says so: every column keeps it, so the rows align */
+
+/* Frozen-site plan, task 4: the portfolio's cost drawing (rc-*). Its words are SVG text in a viewBox that keeps
+   its shape, so they stay beside what they name; the cap keeps them near body size on a wide screen. */
+.runcost { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.rc-svg { display: block; width: 100%; max-width: 440px; height: auto; background: var(--bg); }
+.rc-svg .rc-text { font-family: var(--body); font-size: 10px; fill: var(--fg); }
+.rc-svg .rc-name { font-weight: 600; }
+.rc-svg .rc-dim { fill: var(--dim); }
+.rc-svg .rc-flow { fill: var(--teal); }
+.rc-svg .rc-link { stroke: var(--line2); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.rc-svg .rc-node.feed { fill: var(--mint); }
+.rc-svg .rc-node.cpu { fill: var(--salmon); }
+.rc-svg .rc-node.disk { fill: var(--teal); }
+.rc-svg .rc-node.gone { fill: var(--bg); stroke: var(--dim); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.rc-svg .rc-disk { fill: none; stroke: var(--line2); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.rc-svg .rc-off { stroke: var(--dim); stroke-width: 1px; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+ul.plain.rc-legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 13px; }
+.rc-sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+.rc-sw.cpu { background: var(--salmon); }
+.rc-sw.disk { background: var(--teal); }
+.rc-sw.flow { background: var(--teal); width: 4px; }

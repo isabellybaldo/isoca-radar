@@ -1,7 +1,8 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Fold } from '../components/Fold';
+import { FROZEN_LINE, isFrozen } from '../frozenMode';
 import type { Engine } from '../wasm/types';
-import { ENGINE_FAILED, FOOTER, LOADING, TITLE } from './copy';
+import { ENGINE_FAILED, FOOTER, FOOTER_FROZEN, HOME_LINK, LOADING, TITLE } from './copy';
 import { LiveBoundary } from './LiveBoundary';
 import { LiveLadder } from './LiveLadder';
 import { LiveStrip, LiveUnavailable } from './LiveStrip';
@@ -13,7 +14,7 @@ import { LegMissSection } from './sections/LegMissSection';
 import { MirrorSection } from './sections/MirrorSection';
 import { PayoffSection } from './sections/PayoffSection';
 import { type PublicSnapshot, freshness } from './snapshot';
-import { HOOK, PLAY } from './story/copy';
+import { HOOK, HOOK_FROZEN, PLAY } from './story/copy';
 import { Story } from './story/Story';
 import { Words } from './story/Words';
 import { useSnapshot } from './useSnapshot';
@@ -78,7 +79,9 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
   /** written_ms of the snapshot a live part threw on; a newer snapshot gets a fresh try (the boundaries are keyed by it). */
   const [brokeOn, setBrokeOn] = useState<number | null>(null);
   const snap = load.kind === 'ok' && load.snap.written_ms !== brokeOn ? load.snap : null;
-  const stale = snap !== null && freshness(snap, load.checkedAt) === 'stale';
+  const frozen = isFrozen();
+  // Frozen: the file is old by design, so it is never "behind".
+  const stale = !frozen && snap !== null && freshness(snap, load.checkedAt) === 'stale';
   const unavailable = load.kind === 'missing' || (load.kind === 'ok' && snap === null);
   /** A live part in its place: the part while the snapshot is good, the "unavailable" line when it is missing
    *  or a part threw on it, and exactly null while it loads (the story prints nothing around a null). */
@@ -90,20 +93,23 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
         </LiveBoundary>
       );
     }
-    return unavailable ? <LiveUnavailable /> : null;
+    return unavailable && !frozen ? <LiveUnavailable /> : null;
   };
   return (
     <div className="app math">
       <header className="top m-top">
         <h1>{TITLE}</h1>
+        {frozen && <a className="dim" href="/">{HOME_LINK}</a>}
+        {frozen && <p className="dim">{FROZEN_LINE}</p>}
       </header>
       <main className="body m-body">
-        <p className="m-tag">{HOOK}</p>
+        <p className="m-tag">{frozen ? HOOK_FROZEN : HOOK}</p>
         {eng.kind === 'loading' && <p className="dim" role="status">{LOADING}</p>}
         {eng.kind === 'failed' && <p className="error" role="alert">{ENGINE_FAILED}</p>}
         <Story
           engine={eng.kind === 'ok' ? eng.engine : null}
-          strip={live((s) => <LiveStrip today={s.today} writtenMs={s.written_ms} stale={stale} />)}
+          // Frozen: the file's `today` is the day after capture stopped (all zeros), not a captured day: no strip.
+          strip={frozen ? null : live((s) => <LiveStrip today={s.today} writtenMs={s.written_ms} stale={stale} />)}
           ladder={live((s) => <LiveLadder snap={s} stale={stale} />)}
           ladderDrawn={snap !== null}
         />
@@ -126,7 +132,13 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
         </section>
       </main>
       <footer className="m-foot">
-        <p>{FOOTER}</p>
+        {frozen ? (
+          <p>
+            {FOOTER_FROZEN} <a href="/">{HOME_LINK}</a>
+          </p>
+        ) : (
+          <p>{FOOTER}</p>
+        )}
       </footer>
     </div>
   );

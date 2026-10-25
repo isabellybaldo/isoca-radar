@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { isFrozen } from '../frozenMode';
 import { Empty } from './Empty';
 import { geo } from './geo';
 import { Fold } from '../components/Fold';
@@ -15,6 +16,7 @@ export const AXIS_TITLE = 'ms from the exchange showing the edge to our order ma
 /** Spec §17: the bars are since the epoch start; the fold is per trade attempt over 30 days, across epochs. */
 export const MARKETS_CAPTION = 'Sweet spots: per trade attempt over the last 30 days, across epochs. Not the same number as the bars above.';
 export const MARKETS_WARMING = 'warming: part of the 30 days is still being filled.';
+export const MARKETS_WARMING_FROZEN = 'the 30-day window never filled: capture stopped on 2026-10-19.';
 export const MARKETS_RECOMPUTING = 'recomputing after the ladder';
 export const MARKETS_MISSING = 'no markets data';
 /** The sentence lives with the model's other words (lib/ladder.ts: it is also the headline's line when no rung is marked). */
@@ -45,7 +47,7 @@ function Markets({ model }: { model: LadderModel }) {
   return (
     <>
       <p className="dim">{MARKETS_CAPTION}</p>
-      {status === 'warming' && <p className="dim">{MARKETS_WARMING}</p>}
+      {status === 'warming' && <p className="dim">{isFrozen() ? MARKETS_WARMING_FROZEN : MARKETS_WARMING}</p>}
       <SweetLadderGrid rows={rows} side="no" dim="category" label="which markets" />
     </>
   );
@@ -171,7 +173,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
         </li>
       </ol>
       <p className="dim ll-xlabel">{`${AXIS_TITLE} · counts: trades per rung${thin ? `, of the ${MIN_EXEC} needed` : ''}`}</p>
-      <p className="dim">{asOfText(model.asOfMs)}</p>
+      {!isFrozen() && <p className="dim">{asOfText(model.asOfMs)}</p>}
       <ul className="plain ll-legend" aria-label="legend">
         {LEGEND.map(([k, text]) => (
           <li key={k}>

@@ -4,6 +4,13 @@ Parent spec: [`docs/superpowers/specs/2026-09-22-arb-scanner-design.md`](docs/su
 (the math in §5, the architecture in §8, the phases in §19). Each phase has its own spec, plan and runbook
 under `docs/superpowers/`.
 
+## Frozen since 2026-10-19
+
+The host limited the VPS's CPU on 2026-10-19 and capture stopped. The project now ships as static files at
+radar.isoca.space: a landing page, `/math` and Sweet spots, from `web/frozen/`, built by
+`cd web && npm run build:portfolio` into `web/dist-portfolio/`. Everything below is the live system as it ran: the
+code is kept, not deployed.
+
 ## Where it runs
 
 ```

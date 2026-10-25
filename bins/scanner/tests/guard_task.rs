@@ -91,7 +91,9 @@ async fn the_first_read_of_an_alive_compactor_makes_old_hours_wait() {
         })
         .await
         .unwrap();
-    owner.mark_hours_lost(&[T0], T0).await.unwrap();
+    // An hour inside guard_task's LOOKBACK_MS of now: a fixed T0 fell out of it 14 days later.
+    let t0 = (scanner::now_ms() / H - 24) * H;
+    owner.mark_hours_lost(&[t0], t0).await.unwrap();
     let scanner = db.role("scanner_rw").await;
     let view = Arc::new(GuardView::default());
     assert_eq!(view.get(scanner::now_ms()), View::Unread);
@@ -103,7 +105,7 @@ async fn the_first_read_of_an_alive_compactor_makes_old_hours_wait() {
     let View::Compacted(hours) = v else {
         panic!("an alive compactor gives a compacted view, got {v:?}");
     };
-    assert!(hours.contains(&T0));
+    assert!(hours.contains(&t0));
     scanner.close().await;
     db.drop(owner).await;
 }

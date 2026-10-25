@@ -2,7 +2,8 @@
 // load; again only when the tab becomes visible and the last attempt is over five minutes old. No polling; the only
 // timer is the 10 s limit on the first request, cleared when it settles.
 import { useEffect, useRef, useState } from 'react';
-import { type PublicSnapshot, REFETCH_MS, SNAPSHOT_URL, parseSnapshot } from './snapshot';
+import { isFrozen } from '../frozenMode';
+import { type PublicSnapshot, REFETCH_MS, parseSnapshot, snapshotUrl } from './snapshot';
 
 export type SnapshotLoad = { kind: 'loading' } | { kind: 'missing' } | { kind: 'ok'; snap: PublicSnapshot };
 /** What the hook returns: the load, and `checkedAt`, the injected clock at the last visibility return or fetch attempt. */
@@ -43,7 +44,7 @@ async function boundedText(r: Response): Promise<string | null> {
  *  missing field is null (§6.3 "missing"). */
 export async function fetchSnapshot(signal?: AbortSignal): Promise<PublicSnapshot | null> {
   try {
-    const r = await fetch(SNAPSHOT_URL, { signal });
+    const r = await fetch(snapshotUrl(), { signal });
     if (r.status !== 200) {
       void r.body?.cancel().catch(() => undefined);
       return null;
@@ -131,10 +132,12 @@ export function useSnapshot(now: () => number = () => Date.now()): SnapshotState
         if (!mine.signal.aborted) apply(s);
       });
     };
-    document.addEventListener('visibilitychange', onVisible);
+    // Frozen: the file never changes, so one fetch per page load and nothing on a tab return.
+    const frozen = isFrozen();
+    if (!frozen) document.addEventListener('visibilitychange', onVisible);
     return () => {
       live = false;
-      document.removeEventListener('visibilitychange', onVisible);
+      if (!frozen) document.removeEventListener('visibilitychange', onVisible);
       refetch?.abort();
       leaveFirst(shared);
     };

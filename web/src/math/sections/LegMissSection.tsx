@@ -4,7 +4,8 @@ import { call } from '../../wasm/call';
 import type { BasketModel, Engine } from '../../wasm/types';
 import { isError } from '../../wasm/types';
 import { type FState, basketInput } from '../basket';
-import { F_QUIPS, SECTIONS } from '../copy';
+import { isFrozen } from '../../frozenMode';
+import { F_CAPTION_FROZEN, F_QUIPS, SECTIONS } from '../copy';
 import { F_BOOKS, F_BURST, F_START, LEGS } from '../defaults';
 import { useFrameThrottle } from '../useFrameThrottle';
 import { Check, Out, Range, Section } from './Section';
@@ -21,6 +22,7 @@ export function LegMissSection({ engine }: { engine: Engine }) {
     <Section
       id="f"
       {...SECTIONS.f}
+      caption={isFrozen() ? F_CAPTION_FROZEN : SECTIONS.f.caption}
       quip={isError(out) ? null : F_QUIPS[basketWord(out)]}
       onReset={() => setSt(F_START)}
       controls={

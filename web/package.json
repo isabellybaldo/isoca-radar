@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && tsc --noEmit -p tsconfig.math.json && vite build && vite build -c vite.math.config.ts && node scripts/check-math-bundle.mjs",
     "build:dashboard": "tsc --noEmit && vite build",
+    "build:portfolio": "tsc --noEmit && tsc --noEmit -p tsconfig.math.json && vite build -c vite.portfolio.config.ts --mode frozen && vite build -c vite.math.config.ts --mode frozen --outDir dist-portfolio && node scripts/finish-portfolio.mjs",
     "test": "vitest run"
   },
   "dependencies": {

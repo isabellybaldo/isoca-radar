@@ -84,15 +84,15 @@ function SweetGrid({ s, side, dim }: { s: SweetSeries; side: SweetSide; dim: Swe
   );
 }
 
-/** M1: side/dim live in Sweet() so a window switch (which replaces this card by identity in
+/** `computed` is written as given (frozen-site ruling R3: the frozen page passes one date, the live one two).
+ *  M1: side/dim live in Sweet() so a window switch (which replaces this card by identity in
  *  Loadable's render) never resets the chips the owner just picked. Spec 7a §8: the grid replaces
  *  the per-scenario chart and its chips; every scenario's numbers stay in "all numbers". */
-function SweetBody({ card, s, side, setSide, dimAsked, setDim }: {
-  card: CardBody; s: SweetSeries;
+export function SweetBody({ card, s, computed, side, setSide, dimAsked, setDim }: {
+  card: CardBody; s: SweetSeries; computed: string;
   side: SweetSide; setSide: (v: SweetSide) => void;
   dimAsked: SweetDim; setDim: (v: SweetDim) => void;
 }) {
-  const nowMs = useNow(30_000);
   const dims = DIMS.filter(([d]) => d !== 'category' || s.category_available);
   const dim = dimAsked === 'category' && !s.category_available ? 'all' : dimAsked;
   const extraNotes = card.notes.filter((n) => n !== SWEET_CAVEAT && n !== footnote(s.m));
@@ -129,7 +129,7 @@ function SweetBody({ card, s, side, setSide, dimAsked, setDim }: {
         <p className="meta">
           <span title={card.hash}>#{shortHash(card.hash)}</span> ·{' '}
           <span title={fmtLocal(card.computed_ms)}>
-            {computedText(card.computed_ms, nowMs)} ({fmtUtcDateTime(card.computed_ms)})
+            {computed}
           </span>
         </p>
       </Fold>
@@ -141,6 +141,7 @@ function SweetBody({ card, s, side, setSide, dimAsked, setDim }: {
 export function Sweet() {
   const [win, setWin] = useState<Win>('30d');
   const slow = useTicker(60_000);
+  const nowMs = useNow(30_000);
   const st = useApi((s) => api.cards(win, s), [win], [slow]);
   const card = st.data?.cards.find((c) => c.card === 'SWEET');
   const [side, setSide] = useState<SweetSide>('no');
@@ -168,6 +169,7 @@ export function Sweet() {
             <SweetBody
               card={c}
               s={c.series.sweet}
+              computed={`${computedText(c.computed_ms, nowMs)} (${fmtUtcDateTime(c.computed_ms)})`}
               side={side}
               setSide={setSide}
               dimAsked={dimAsked}
