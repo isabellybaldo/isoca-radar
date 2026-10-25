@@ -6,6 +6,7 @@ Note: PC steps run in **Windows PowerShell** (`$B` is set again at the top of ea
 Note: the VPS asks for the root password 5 times: steps 1, 6, 8, 10, 14 (one connection each).
 Note: never write a file with PowerShell's `>` here: it writes UTF-16 and breaks binary and JSON files. Every file is made on the VPS and downloaded with `sftp`.
 Note: on the VPS: never print `.env` or a container's environment, never restart Docker, install nothing, never start scanner, analyze or compact.
+Note: steps 8 and 10 land in `archive_data` and `capture_data` (sftp nests the remote folder inside the existing one); the checks in steps 9, 11 and 13 read from there.
 Note: the transfers resume. If a download is cut (sleep, Wi-Fi), run the same step again: `reget` continues partial files and the check after it finds anything missing or broken.
 
 ## Prepare
@@ -162,7 +163,7 @@ if not: a number other than `26`, or `pg_restore: error` lines = STOP, tell Clau
 13. (PC) DuckDB reads the archive.
 ```powershell
 $B='E:\isoca-radar-backup'; python -m venv "$env:TEMP\ddb"; & "$env:TEMP\ddb\Scripts\pip.exe" -q install duckdb
-Set-Content -Encoding ascii "$env:TEMP\ddb\q.py" 'import duckdb', 'print(duckdb.sql("select count(*) from read_parquet(''E:/isoca-radar-backup/archive/*/*.parquet'', union_by_name=true)").fetchone())'
+Set-Content -Encoding ascii "$env:TEMP\ddb\q.py" 'import duckdb', 'print(duckdb.sql("select count(*) from read_parquet(''E:/isoca-radar-backup/archive/_data/*/*.parquet'', union_by_name=true)").fetchone())'
 & "$env:TEMP\ddb\Scripts\python.exe" "$env:TEMP\ddb\q.py"
 ```
 → expected: one line like `(123456789,)` with a number above 0.
