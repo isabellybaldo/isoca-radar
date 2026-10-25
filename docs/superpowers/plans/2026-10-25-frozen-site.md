@@ -127,6 +127,7 @@ Frozen wording (exact; live wording unchanged):
 | chapter 7 `lead` | `The scanner kept six paper accounts that differed only in latency, from the fastest rung to the slowest, and settled every trade by the rules of chapter 6. Here they are as they stood on 2026-10-19.` |
 | chapter 6 caption tail | `…the same rules the scanner’s paper accounts used; here the unwind happens at one instant, the sim waited the account’s delay.` |
 | page top, under the title | `FROZEN_LINE` |
+| after chapter 7 | a link `What it took to run live →` to `/#cost` (the landing's cost section has `id="cost"`) |
 | `math.html` description (both modes) | `How a scanner finds a basket arbitrage on Polymarket, sizes it and times it, and what can go wrong between seeing it and holding it. Drawn with the scanner's own Rust code and its paper accounts.` |
 
 In frozen mode `MathPage` computes `stale = false`, and `useSnapshot` skips the `visibilitychange`
@@ -235,7 +236,7 @@ Prints `portfolio ok` last.
 - [ ] **Step 1: Write the failing tests**
   - `Landing.test.tsx`: renders `<Shell><Landing/></Shell>`; finds the h1, both card links (`/math`,
     `/sweet`), the lead's `Paper only: it never placed an order.`, the cost heading and `FROZEN_LINE`;
-    no text matches `/\blive\b(?! (?:paper|in)\b)/` outside the heading `What it took to run live`.
+    with the cost heading's text removed, the page text has no `/\blive\b/i`.
   - `RunCost.test.tsx`: renders an element with `role="img"` and every label string that survived
     verification.
   - `build.test.ts`: `vite.portfolio.config.ts` text has `assetsDir: 'site-assets'`,
@@ -244,7 +245,7 @@ Prints `portfolio ok` last.
 - [ ] **Step 3:** Verify the cost numbers (table above); ask the owner about the two Hostinger numbers
   before writing them; then implement the files.
 - [ ] **Step 4:** Tests and the build:
-  Run: `npx vitest run && sh ../scripts/build-wasm.sh` (from the repo root: `sh scripts/build-wasm.sh`) `&& npm run build:portfolio`
+  Run (repo root, Git Bash): `sh scripts/build-wasm.sh && cd web && npx vitest run && npm run build:portfolio`
   Expected: all test files pass; the build ends with the math check's lines and `portfolio ok`.
 - [ ] **Step 5: Local look** — `python -m http.server -d dist-portfolio 8099`, open
   `http://localhost:8099/index.html`, `/sweet.html`, `/math.html` in Chrome; DevTools at 360 px wide: no
