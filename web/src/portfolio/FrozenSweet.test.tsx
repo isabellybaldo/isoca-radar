@@ -52,6 +52,8 @@ describe('FrozenSweet', () => {
     await settle(f);
     expect(pageText()).toMatch(/computed 2026-10-19 \d\d:\d\d:\d\d UTC/);
     expect(pageText()).not.toContain('UTC UTC');
+    // Ruling R3: SweetBody writes `computed` as given, so the frozen fold says the date once, not twice.
+    expect(pageText().match(/2026-10-19 \d\d:\d\d:\d\d UTC/g)).toHaveLength(1);
   });
 
   it('shows the error panel once when the fetch fails, and does not retry', async () => {

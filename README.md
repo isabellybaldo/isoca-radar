@@ -18,6 +18,12 @@ the published papers. **Paper only: there is no code path to an exchange.**
  web (React dashboard: Radar · Sweet · Episodes · Paper · Papers · Health)
 ```
 
+## Frozen since 2026-10-19
+
+Capture stopped on 2026-10-19. What is left is a static site at radar.isoca.space: a landing page, `/math` and
+Sweet spots, read from the frozen files in `web/frozen/`. `cd web && npm run build:portfolio` builds it into
+`web/dist-portfolio/` (build the wasm first: `sh scripts/build-wasm.sh`). The live code below is kept but not deployed.
+
 ## Layout
 
 | Path | What |

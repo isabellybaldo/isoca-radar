@@ -84,7 +84,8 @@ function SweetGrid({ s, side, dim }: { s: SweetSeries; side: SweetSide; dim: Swe
   );
 }
 
-/** M1: side/dim live in Sweet() so a window switch (which replaces this card by identity in
+/** `computed` is written as given (frozen-site ruling R3: the frozen page passes one date, the live one two).
+ *  M1: side/dim live in Sweet() so a window switch (which replaces this card by identity in
  *  Loadable's render) never resets the chips the owner just picked. Spec 7a §8: the grid replaces
  *  the per-scenario chart and its chips; every scenario's numbers stay in "all numbers". */
 export function SweetBody({ card, s, computed, side, setSide, dimAsked, setDim }: {
@@ -128,7 +129,7 @@ export function SweetBody({ card, s, computed, side, setSide, dimAsked, setDim }
         <p className="meta">
           <span title={card.hash}>#{shortHash(card.hash)}</span> ·{' '}
           <span title={fmtLocal(card.computed_ms)}>
-            {computed} ({fmtUtcDateTime(card.computed_ms)})
+            {computed}
           </span>
         </p>
       </Fold>
@@ -168,7 +169,7 @@ export function Sweet() {
             <SweetBody
               card={c}
               s={c.series.sweet}
-              computed={computedText(c.computed_ms, nowMs)}
+              computed={`${computedText(c.computed_ms, nowMs)} (${fmtUtcDateTime(c.computed_ms)})`}
               side={side}
               setSide={setSide}
               dimAsked={dimAsked}

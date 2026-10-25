@@ -1,0 +1,12 @@
+/* Frozen-site plan, task 4: the portfolio shell and landing (pf-*), in the dashboard's frame and tokens. One
+   column, no inline styles (CSP), never wider than 360 px. */
+.app.pf { max-width: 960px; }
+.pf-home { text-decoration: none; }
+.pf-body { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.pf-intro { display: grid; gap: 8px; }
+.pf-title { font-family: var(--px); font-size: 16px; line-height: 1.5; font-weight: 400; }
+.pf-lead, .pf-card p, .pf-cost > .quip { max-width: 78ch; }
+.pf-card { display: grid; gap: 4px; align-content: start; }
+.pf-card h2 a { text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.pf-cost { display: grid; gap: 8px; }
+.pf-foot { color: var(--dim); font-size: 13px; padding: 0 14px 14px; }
