@@ -5,6 +5,8 @@ import type { BasketWord } from '../../schematics/BasketLegs';
 
 export const HOOK =
   'Sometimes the prices of every outcome of an event add up to less than the one dollar the winner pays. In theory, that gap is free money. This page shows how a scanner finds it, sizes it and times it, and what can go wrong between seeing it and holding it. Chapters 1 to 6 run the scanner’s own Rust code, compiled to WASM; chapter 7 shows its live paper accounts.';
+export const HOOK_FROZEN =
+  'Sometimes the prices of every outcome of an event add up to less than the one dollar the winner pays. In theory, that gap is free money. This page shows how a scanner finds it, sizes it and times it, and what can go wrong between seeing it and holding it. Chapters 1 to 6 run the scanner’s own Rust code, compiled to WASM; chapter 7 shows its paper accounts as they stood when capture stopped on 2026-10-19.';
 
 export interface ChapterCopy {
   n: number;
@@ -54,6 +56,9 @@ export const CHAPTERS: readonly ChapterCopy[] = [
     switchLabel: '', options: null,
   },
 ];
+
+export const CH7_LEAD_FROZEN =
+  'The scanner kept six paper accounts that differed only in latency, from the fastest rung to the slowest, and settled every trade by the rules of chapter 6. Here they are as they stood on 2026-10-19.';
 
 export const TAKE = {
   ch1: (crossed: boolean) =>

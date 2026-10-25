@@ -4,6 +4,9 @@ import type { BasketWord } from '../schematics/BasketLegs';
 // Rust code (ruling R7).
 export const TITLE = 'isoca-radar · math';
 export const FOOTER = 'The live dashboard is private. The math is not.';
+export const FOOTER_FROZEN = 'The scanner is switched off. The math still runs.';
+export const HOME_LINK = '← isoca-radar';
+export const COST_LINK = 'What it took to run live →';
 /** One sentence, and only what the page knows: it cannot tell an old browser from a blocked download. */
 export const ENGINE_FAILED = 'The math engine did not load: the drawings need WebAssembly.';
 export const LOADING = 'Loading the math engine. The pixels are warming up.';
@@ -69,6 +72,9 @@ export const SECTIONS = {
       'Computed by sim::policy::settle and sim::venue::{basket_buy, unwind_sell, basket_cash}: the same rules the paper accounts on the live scanner use; here the unwind happens at one instant, the live sim waits the account’s delay.',
   },
 } as const;
+/** Frozen: the same caption in the past tense (the scanner is off). */
+export const F_CAPTION_FROZEN =
+  'Computed by sim::policy::settle and sim::venue::{basket_buy, unwind_sell, basket_cash}: the same rules the scanner’s paper accounts used; here the unwind happens at one instant, the sim waited the account’s delay.';
 
 /** Section c's static note (09-27 §6.2): shown beside the drawing, never a control. */
 export const POST_END_NOTE = 'post_end is not here: the scanner adds it from event dates and it never changes the kind.';

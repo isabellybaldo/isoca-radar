@@ -1,6 +1,7 @@
 // Spec 7b §6.1 / §6.3: today's counts from the public snapshot, in the story's chapter 3 (spec 2026-10-01 §3).
 import { Money } from '../components/Money';
 import { Spark } from '../components/Spark';
+import { frozenOn, isFrozen } from '../frozenMode';
 import { fmtUtcDayHm, fmtUtcHm } from '../lib/time';
 import { type PublicToday, hourlyValues } from './snapshot';
 
@@ -8,9 +9,11 @@ export const BEHIND = 'the live writer is behind';
 export const LIVE_UNAVAILABLE = 'live numbers unavailable';
 /** The strip's heading and its accessible name. "today" is the api's day, which starts at 00:00 UTC. */
 export const STRIP_TITLE = 'today (UTC) on the live scanner';
+export const STRIP_TITLE_FROZEN = 'the last captured day (UTC)';
 
-/** "as of HH:MM UTC"; stale: the day too, and that the writer is behind. */
+/** "as of HH:MM UTC"; stale: the day too, and that the writer is behind. Frozen: when it froze, never behind. */
 export function asOfLine(writtenMs: number, stale: boolean): string {
+  if (isFrozen()) return frozenOn();
   return stale ? `as of ${fmtUtcDayHm(writtenMs)}: ${BEHIND}` : `as of ${fmtUtcHm(writtenMs)} UTC`;
 }
 
@@ -21,9 +24,10 @@ export function LiveUnavailable() {
 
 /** Today's arbitrage episodes (NO / YES), the edge on the table, the day by UTC hour, and when it was written. */
 export function LiveStrip({ today, writtenMs, stale }: { today: PublicToday; writtenMs: number; stale: boolean }) {
+  const title = isFrozen() ? STRIP_TITLE_FROZEN : STRIP_TITLE;
   return (
-    <section className="m-live" aria-label={STRIP_TITLE}>
-      <p className="m-live-k dim">{STRIP_TITLE}</p>
+    <section className="m-live" aria-label={title}>
+      <p className="m-live-k dim">{title}</p>
       <p className="m-live-n">
         <span className="m-big">{today.no}</span> NO · <span className="m-big">{today.yes}</span> YES <span className="dim">arbitrage episodes</span>
       </p>
