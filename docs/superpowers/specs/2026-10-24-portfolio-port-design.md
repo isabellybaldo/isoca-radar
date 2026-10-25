@@ -1,6 +1,6 @@
 # Portfolio port: cute-trading frozen, on a new VPS run by isoca-infra
 
-Status: design, awaiting owner approval (2026-10-24).
+Status: approved by the owner (2026-10-24).
 
 ## 1. Intent
 
@@ -128,6 +128,9 @@ All Rust crates and bins (scanner included) and the undeployed pages, unchanged.
 ## 6. isoca-infra (new repo)
 
 ### 6.0 The repo is public, and a portfolio piece
+
+Repo: https://github.com/isabellybaldo/isoca-infra (exists). **The owner does every push** to every
+repo (and merges PRs); Claude commits locally and stops there.
 
 isoca-infra is a **public** GitHub repo and is treated as part of the portfolio: clean history, a README
 that explains the setup (with a drawing), readable runbooks. Nothing that helps an attacker or names the
