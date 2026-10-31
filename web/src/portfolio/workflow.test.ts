@@ -74,9 +74,9 @@ describe('portfolio workflow (frozen site, Task 5)', () => {
       expect(deploy).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
     });
 
-    it('sets no environment and passes no secrets (the called job owns the environment)', () => {
+    it('sets no environment and inherits the secrets (the called job owns the environment)', () => {
       expect(deploy).not.toMatch(/^\s*environment:/m);
-      expect(deploy).not.toMatch(/^\s*secrets:/m);
+      expect(deploy).toMatch(/^\s*secrets: inherit\s*$/m);
     });
 
     it('calls isoca-infra deploy-static pinned to a 40-hex SHA with site, artifact and url', () => {

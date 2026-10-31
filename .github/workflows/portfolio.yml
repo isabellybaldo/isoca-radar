@@ -43,10 +43,11 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     permissions:
       contents: read
-    # the called job sets environment: production itself, so the secrets come from this repo's production environment
+    # the called job sets environment: production; inherit is what lets it read this repo's environment secrets
     uses: isabellybaldo/isoca-infra/.github/workflows/deploy-static.yml@de0a48e1a841b422f8cef22c26371e6e3dca1e29 # isoca-infra main
     with:
       site: radar
       artifact: radar-site
       # a repo variable points the smoke check at new.isoca.space until DNS moves; delete it afterwards
       url: ${{ vars.DEPLOY_URL || 'https://radar.isoca.space/' }}
+    secrets: inherit
