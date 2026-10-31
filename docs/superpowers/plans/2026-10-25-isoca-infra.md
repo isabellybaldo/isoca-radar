@@ -24,7 +24,9 @@ contract.
   `https://github.com/isabellybaldo/isoca-infra`); cute-trading (repo `isabellybaldo/isoca-radar`);
   `C:\Users\Isabelly\PycharmProjects\isabellybaldo.github.io`; the profile repo `isabellybaldo/isabellybaldo`
   (clone it next to them). Claude commits locally; **the owner does every push and merge**; no
-  `Co-Authored-By` trailer.
+  `Co-Authored-By` trailer. Commits in isoca-infra use the GitHub noreply address (repo-local git config,
+  already set), never the owner's personal email; shell scripts stay LF on this Windows PC
+  (`.gitattributes`: `* text=auto eol=lf`).
 - **isoca-infra is public and a portfolio piece.** Never commit: the box's IP, SSH port, user names other
   than the role names `deploy`/`claude`, key material or fingerprints, emails. Those live in the gitignored
   `local.env` (template `local.env.example`) and in GitHub encrypted secrets. gitleaks runs in CI.
@@ -75,7 +77,7 @@ contract.
 
 ### Task 1: Repo skeleton, README, CI
 
-**Files (isoca-infra):** `README.md`, `LICENSE` (MIT), `.gitignore` (`local.env`, `*.pem`, `id_*`),
+**Files (isoca-infra):** `README.md`, `LICENSE` (MIT), `.gitattributes`, `.gitignore` (`local.env`, `*.pem`, `id_*`),
 `local.env.example`, `.github/workflows/ci.yml`, `tests/no-secrets.sh`
 
 **Interfaces:** Produces the repo layout later tasks fill: `box/`, `edge/`, `runbooks/`, `tests/`,
@@ -87,6 +89,7 @@ contract.
   `/srv/sites/<site>/current` ← nginx ← Traefik ← visitors; isoca.space → 302 → github.io), the directory
   map, "what is not in this repo and why" (the IP, port, keys), links to both runbooks and to cute-trading.
   Written for a reader judging the owner's work: plain, short, no marketing.
+- `.gitattributes`: `* text=auto eol=lf`.
 - `tests/no-secrets.sh`: fails if any tracked file except `local.env.example` contains an IPv4 literal
   other than `127.0.0.1`, `0.0.0.0` or 203.0.113.0/24, or a line matching
   `BEGIN (OPENSSH|RSA|EC) PRIVATE KEY`, or a 64-hex fingerprint after `SHA256:`.
@@ -111,7 +114,10 @@ contract.
   - `deploy <site> <release>`: stdin is a tar.gz. `<site>` matches `^[a-z0-9-]{1,32}$` and
     `$SITES_ROOT/<site>` exists; `<release>` matches `^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,40}$`. Reads at most
     `MAX_BYTES` (more → refuse). Lists the archive first and refuses any entry that is not a regular file
-    or directory, any absolute path, any `..` component. Unpacks into `releases/<release>.tmp`, renames to
+    or directory, any absolute path, any `..` component (a leading `./` and the bare `./` root entry are
+    fine: Task 4 builds archives with `tar -C dir .`). `MAX_BYTES` caps the **uncompressed** size too (check
+    while decompressing, before unpacking: a small gzip of 2 GB of zeros is refused). Names are listed
+    with `--quoting-style=escape`, so a newline in a name can't spoof a listing line. Unpacks into `releases/<release>.tmp`, renames to
     `releases/<release>`, then points `current` at it atomically with a relative link
     (`ln -sfn releases/<release> current.new && mv -T current.new current`). Deletes all but the newest
     `KEEP` releases (never the one `current` names). Prints `deployed <site> <release>`.
@@ -122,11 +128,12 @@ contract.
     `edge config <n> files`.
   - Anything else: `refused: <reason>` on stderr, exit 2. Every refusal leaves the filesystem unchanged.
   - Unpacked files end up 0644 and directories 0755 (`--no-same-owner --no-same-permissions`, umask 022):
-    nginx (uid 101) and Traefik (uid 65532) read them as "other".
+    nginx (uid 101) and Traefik (uid 65532) read them as "other". Modes are normalised explicitly after
+    unpacking (`chmod`), because `--no-same-permissions` still honours a tar entry's 000.
 
 - [ ] **Step 1: Write `tests/site-deploy.test.sh`** (plain bash, temp dirs, no root): deploys twice and
   checks `current` → second, then rollback → first; refuses: unknown site, bad site name, bad release id,
-  an archive with a symlink, one with `../x`, one with an absolute path, one over `MAX_BYTES`, a
+  an archive with a symlink, one with `../x`, one with an absolute path, one over `MAX_BYTES`, a small gzip that decompresses past `MAX_BYTES`, a hard link, a
   truncated archive, `edge-config` with a subdirectory, an unknown command — each with `current` and
   the release list unchanged; keeps exactly `KEEP` releases after `KEEP+2` deploys; `current` is a
   relative link.
@@ -143,8 +150,9 @@ contract.
 
 **Interfaces:**
 - compose project `edge`: services `traefik` (ports `80:8000`, `443:8443`; mounts `traefik.yml` ro,
-  `/srv/edge/dynamic` ro, a named volume for `acme.json`) and `nginx` (mounts `sites.conf` ro,
-  `/srv/sites` ro, tmpfs `/tmp`); networks `edge` (traefik ↔ nginx, internal for nginx).
+  `/srv/edge/dynamic` ro, `/srv/edge/acme` rw for `acme.json`: a bind mount owned by 65532, mode 0700, since a
+  named volume would be root-owned) and `nginx` (mounts `sites.conf` ro,
+  `/srv/sites` ro, tmpfs `/tmp`); networks `public` (traefik only, has egress for ACME) and `edge` (`internal: true`, traefik ↔ nginx).
 - Routers: `radar` and `radar-test` (`Host(radar.isoca.space)`, `Host(new.isoca.space)`) → service
   `nginx` (`http://nginx:8080`) with middlewares `sec@file`, `csp-radar@file`, `rl@file`, `inflight@file`;
   `isoca` (`Host(isoca.space) || Host(www.isoca.space)`) → `noop@internal` with a `redirectRegex`
@@ -155,7 +163,8 @@ contract.
 
 - [ ] **Step 1: Write `tests/edge.test.sh`** (needs Docker; CI has it):
   - `docker compose -f edge/compose.yml config -q`;
-  - the config text contains none of `alias`, `ssi`, `aio`, `http3`, `quic`, `ssl_`, `/var/run/docker.sock`;
+  - the config text contains none of `alias`, `ssi`, `aio`, `http3`, `quic`, `ssl_`, `/var/run/docker.sock`, matched as
+    nginx directives or whole words (`permissions` contains "ssi");
   - nginx: run the pinned image with `sites.conf` and a fixture `/srv/sites/radar/current` built from a
     small copy of the `radar-site` layout (index.html, math.html, sweet.html, site-assets/a.js,
     frozen/public.json); `nginx -t`; then curl with `Host: radar.isoca.space`: `/` → 200 index, `/math`
@@ -177,20 +186,24 @@ contract.
 
 **Interfaces:**
 - `deploy-static.yml`: `on: workflow_call` with inputs `site` (string), `artifact` (string), `url`
-  (string); secrets `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_KNOWN_HOSTS` (all required).
+  (string). Its job sets `environment: production` and reads `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`,
+  `DEPLOY_KNOWN_HOSTS` from that environment. GitHub doesn't allow `environment` on the job that calls a
+  reusable workflow, and environment secrets don't pass through `secrets: inherit`, so the four are **not**
+  declared under `on.workflow_call.secrets`; the first step fails with a clear message if any is empty.
   Steps: download the artifact (same run), tar.gz it, write the key and `known_hosts` (no
   `StrictHostKeyChecking=no` ever), `ssh deploy@$HOST -p $PORT "deploy <site> <UTC stamp>-<sha7>" < site.tgz`,
   expect `deployed`; then `curl -fsS -o /dev/null -w '%{http_code}' <url>` → 200 (retry 3× over 30 s).
 - `rollback.yml`: `workflow_dispatch` with input `site`; environment `production`; runs `rollback <site>`.
 - `edge-config.yml`: on push to `main` touching `edge/dynamic/**`, and dispatch; environment
   `production`; tars `edge/dynamic/*.yml` and runs `edge-config`.
-- cute-trading calls `deploy-static.yml` with `secrets: inherit`, so its `production` environment holds
+- cute-trading calls `deploy-static.yml` (no `environment` on the calling job); the called job's
+  `environment: production` resolves in the caller's repo, so isoca-radar's `production` environment holds
   the four secrets; isoca-infra's `production` environment holds the same four for its own two workflows.
 
 - [ ] **Step 1: Write `tests/workflows.test.sh`** (text checks, like cute-trading's `workflow.test.ts`):
   every `uses:` pinned to 40-hex with a tag comment; no `StrictHostKeyChecking`; `permissions:` present
-  and without `write` except `contents: read`; `rollback` and `edge-config` use `environment: production`;
-  `deploy-static.yml` declares the four secrets as required.
+  and without `write` except `contents: read`; `rollback`, `edge-config` and `deploy-static`'s job use `environment: production`;
+  `deploy-static.yml` declares no `on.workflow_call.secrets` and checks the four secrets are set.
 - [ ] **Step 2:** Run → FAIL. **Step 3:** Write the workflows. **Step 4:** Run → pass; also parse each
   YAML (python `yaml.safe_load` or `actionlint` if installable).
 - [ ] **Step 5:** Commit: `isoca-infra: deploy, rollback and edge-config workflows over the site-deploy key`.
@@ -200,6 +213,11 @@ contract.
 **Files:** `runbooks/01-box-setup.md`
 
 Steps the owner runs (each command → expected → if not; STOP where marked):
+0. **Before anything public.** Hostinger panel: the new box's IP differs from the old box's (the old IP and
+   SSH port are in isoca-radar's git history). **STOP** if it is the same. Delete the old box (the backup is
+   verified). `docker run` the pinned gitleaks image over a full clone of isoca-radar → no findings, or review
+   each one. Then make `isoca-radar` public (needed for step 16: on GitHub Free, environment secrets and
+   branch limits exist only in public repos).
 1. PC (admin PowerShell): enable and start `ssh-agent`, `ssh-add` the owner key (one passphrase prompt).
 2. PC: create `local.env` from the example with the real IP, chosen port, admin name.
 3. PC: generate `isoca_deploy` and `isoca_claude` ed25519 keys (no passphrase on `isoca_deploy`: it lives
@@ -212,7 +230,8 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
 8. fail2ban (sshd jail on the new port), unattended-upgrades; verify both active.
 9. Docker Engine from Docker's apt repo; `/etc/docker/daemon.json` log limits; `docker run --rm hello-world`.
 10. Users `deploy` and `claude`; `claude` into `systemd-journal`; neither in `sudo` or `docker` (check `id`).
-11. `/srv/sites/radar/releases`, `/srv/edge/dynamic` owned by `deploy`; `/srv/sites` world-readable.
+11. `/srv/sites/radar/releases`, `/srv/edge/dynamic` owned by `deploy`; `/srv/sites` world-readable;
+    `/srv/edge/acme` owned by 65532, mode 0700.
 12. `git clone https://github.com/isabellybaldo/isoca-infra /srv/isoca-infra`; install `box/site-deploy` to
     `/usr/local/bin` (root, 0755); copy `edge/dynamic/*.yml` into `/srv/edge/dynamic`.
 13. `deploy`'s `authorized_keys`: `restrict,command="/usr/local/bin/site-deploy" <isoca_deploy.pub>`;
@@ -237,14 +256,15 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
 
 - Bump the four actions to the Node 24 majors (Global Constraints), pinned by SHA.
 - New job `deploy`: `needs: build`; `if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'`;
-  `environment: production`; `permissions: contents: read`;
+  `permissions: contents: read`; no `environment` here (GitHub refuses it on a calling job; the called job
+  sets it); no `secrets:` block is needed;
   `uses: isabellybaldo/isoca-infra/.github/workflows/deploy-static.yml@<isoca-infra commit sha>` with
   `site: radar`, `artifact: radar-site`, `url: https://radar.isoca.space/`; `secrets: inherit`.
-  (The SHA is the isoca-infra commit the owner pushed after Task 4; until then the step can't be
-  merged: the task ends with the PR left for the owner to merge after the box is up.)
+  (The SHA is isoca-infra's final local `main` commit, which the owner pushes unchanged. Run this task after
+  Tasks 1–5 and 7. The branch is left for the owner to push and merge after the box is up.)
 
 - [ ] **Step 1:** Extend `workflow.test.ts`: the deploy job exists, `needs: build`, the `if` above,
-  `environment: production`, `uses:` pinned to a 40-hex isoca-infra SHA, `site: radar`,
+  no `environment` on the job, `uses:` pinned to a 40-hex isoca-infra SHA, `site: radar`,
   `artifact: radar-site`; every action is on v7/v6 majors per the tag comments.
 - [ ] **Step 2:** Run → FAIL. **Step 3:** Edit the workflow. **Step 4:** `npx vitest run src/portfolio/workflow.test.ts` → pass.
 - [ ] **Step 5:** Commit on a branch: `ci: actions on Node 24, and deploy the portfolio to radar.isoca.space from main`.
@@ -276,9 +296,11 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
 
 ### Task 8: github.io and the GitHub profile
 
-**Files:** `isabellybaldo.github.io/src/data/projects.ts`, `public/thumbs/isoca-radar.svg`;
+**Files:** `isabellybaldo.github.io/src/data/projects.ts`, `src/pages/index.astro`, `public/thumbs/isoca-radar.svg`;
 profile repo `README.md`
 
+- `index.astro`: turn the `Projects` section back on (import and render; it was commented out "until a
+  project goes public"). Check the other entries read right when shown, and report any that link to private repos.
 - New `projects` entry: slug `isoca-radar`, title `isoca-radar`, tracks `Arbitrage on Polymarket, on paper.`,
   blurb `A read-only lab that watched every order book for baskets priced under a dollar, and paper-traded them at six latencies. It never placed an order; it did teach me what a CPU limit is.`,
   tech `['Rust', 'TypeScript', 'WebAssembly']`, accent `lavender`, thumb `/thumbs/isoca-radar.svg`,
@@ -287,7 +309,7 @@ profile repo `README.md`
 - Profile README: one line under the intro, in its voice:
   `🛰️ [isoca-radar](https://radar.isoca.space) — a Polymarket arbitrage lab, frozen after it outgrew its server. The math still runs in your browser.`
   and, under "About the repos", a line pointing to `isoca-infra` as the public repo that runs it.
-- Wording of both is shown to the owner before committing (the owner may rewrite it).
+- Wording of both approved by the owner on 2026-10-31 with the plan.
 
 - [ ] **Step 1:** `npm run build && npm run check` in github.io → passes with the new entry.
 - [ ] **Step 2:** Commit in each repo (local only): `content: isoca-radar is live` / `readme: isoca-radar and isoca-infra`.
