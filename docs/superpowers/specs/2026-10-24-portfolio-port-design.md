@@ -260,3 +260,26 @@ margin for a slow transfer. Everything after them no longer needs the old box.
 - The landing's layout and the cost drawing's form, within the owner's "drawings over text" preference.
 - Final rate-limit numbers per router (start from the old /math ones).
 - Release retention count; how the forced command and the reusable workflow split the work.
+
+## 11. Amendments (2026-10-25, owner decisions and findings while building plans 1–2)
+
+- **isoca.space → isabellybaldo.github.io.** isoca.space and www.isoca.space redirect (302, so it can change
+  later) to the owner's existing Astro portfolio, isabellybaldo.github.io, instead of a placeholder page in
+  isoca-infra (§7 superseded). That site gets a live isoca-radar project card linking to radar.isoca.space;
+  the GitHub profile README gets the matching line. Both repos are the owner's; the owner pushes.
+- **The old box is off** (owner, 2026-10-25): every container stopped with restart=no after the verified
+  backup. radar.isoca.space and isoca.space are dark until the DNS cut-over.
+- **nginx ≥ 1.30.6** (the 2026-10-14 security release: CVE-2026-15176, -93479, -97205, -95101, -97629), the
+  unprivileged image pinned by digest. The config never uses `alias`, SSI, `aio`, `map` regex captures,
+  HTTP/3 or TLS (Traefik is the edge); `server_tokens off`.
+- **Traefik runs unprivileged:** container entrypoints on 8000/8443, published as host 80/443, so it needs
+  no `NET_BIND_SERVICE`; no Docker socket (file provider); no dashboard; HTTP/3 not enabled.
+- **Deploy mechanics:** the reusable workflow streams a tar.gz over SSH to a forced command
+  (`site-deploy`) owned by root on the box, which validates the site name and archive (no links, no device
+  files, size cap), unpacks into a new release folder and switches `current`; `rollback` and
+  `edge-config` (the Traefik dynamic files) go through the same command. This replaces "rsync" in §6.4: a
+  forced command can't safely allow general rsync.
+- **CI hygiene:** GitHub actions on their Node 24 majors (checkout v7, cache v6, setup-node v7,
+  upload-artifact v7, download-artifact current), pinned by SHA. The owner's PC moves off Node 23 to 24 LTS
+  (not part of any plan).
+- **Owner's SSH key has a passphrase:** the setup runbook enables the Windows `ssh-agent` service first.
