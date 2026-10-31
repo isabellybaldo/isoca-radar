@@ -46,8 +46,9 @@ contract.
   Rate limit per IP: average 10/s, burst 40, in-flight 16 (`ipStrategy.depth: 0`).
 - nginx caching: `/site-assets/` and `/math-assets/` 1 year immutable; `*.html` and extensionless pages
   `no-cache`; `/frozen/` 1 day. gzip on for html, css, js, json, svg, wasm.
-- Box layout: `/srv/sites/<site>/{releases/,current}` owned by `deploy`; `/srv/edge/dynamic/` (Traefik
-  dynamic files) owned by `deploy`; `/srv/isoca-infra` (a clone of this repo, owner-managed) holds compose
+- Box layout: `/srv/sites/<site>/` and its `releases/`, `current` owned by `deploy`; `/srv/edge/dynamic/`
+  (Traefik dynamic files) and `/srv/edge/.incoming/` (edge-config's staging, same filesystem) owned by `deploy`;
+  `/srv/edge` itself stays root-owned, so `deploy` can't touch `/srv/edge/acme`; `/srv/isoca-infra` (a clone of this repo, owner-managed) holds compose
   and static config; `/usr/local/bin/site-deploy` root-owned 0755.
 - Users: owner's admin (sudo, key only); `deploy` (no sudo, not in `docker`, key restricted to
   `site-deploy`); `claude` (no sudo, not in `docker`, in `systemd-journal`, own key). SSH: non-22 port,
@@ -108,7 +109,7 @@ contract.
 
 **Interfaces:**
 - Called by sshd with `SSH_ORIGINAL_COMMAND` set; env overrides for tests only: `SITES_ROOT` (default
-  `/srv/sites`), `EDGE_DYNAMIC` (default `/srv/edge/dynamic`), `MAX_BYTES` (default 209715200), `KEEP`
+  `/srv/sites`), `EDGE_DYNAMIC` (default `/srv/edge/dynamic`), `EDGE_INCOMING` (default `/srv/edge/.incoming`), `MAX_BYTES` (default 209715200), `KEEP`
   (default 5).
 - Commands:
   - `deploy <site> <release>`: stdin is a tar.gz. `<site>` matches `^[a-z0-9-]{1,32}$` and
@@ -124,7 +125,7 @@ contract.
   - `rollback <site>`: points `current` at the newest release older than the current one; prints
     `rolled back <site> to <release>`; refuses if there is none.
   - `edge-config`: stdin is a tar.gz of `*.yml` files only (no directories); same entry checks; replaces
-    the contents of `EDGE_DYNAMIC` atomically (unpack to a sibling temp dir, then swap files); prints
+    the contents of `EDGE_DYNAMIC` atomically (unpack under `EDGE_INCOMING`, then swap files); prints
     `edge config <n> files`.
   - Anything else: `refused: <reason>` on stderr, exit 2. Every refusal leaves the filesystem unchanged.
   - Unpacked files end up 0644 and directories 0755 (`--no-same-owner --no-same-permissions`, umask 022):
@@ -230,8 +231,8 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
 8. fail2ban (sshd jail on the new port), unattended-upgrades; verify both active.
 9. Docker Engine from Docker's apt repo; `/etc/docker/daemon.json` log limits; `docker run --rm hello-world`.
 10. Users `deploy` and `claude`; `claude` into `systemd-journal`; neither in `sudo` or `docker` (check `id`).
-11. `/srv/sites/radar/releases`, `/srv/edge/dynamic` owned by `deploy`; `/srv/sites` world-readable;
-    `/srv/edge/acme` owned by 65532, mode 0700.
+11. `/srv/sites/radar` and `/srv/sites/radar/releases`, `/srv/edge/dynamic`, `/srv/edge/.incoming` owned by
+    `deploy`; `/srv/sites` and `/srv/edge` root-owned and world-readable; `/srv/edge/acme` owned by 65532, mode 0700.
 12. `git clone https://github.com/isabellybaldo/isoca-infra /srv/isoca-infra`; install `box/site-deploy` to
     `/usr/local/bin` (root, 0755); copy `edge/dynamic/*.yml` into `/srv/edge/dynamic`.
 13. `deploy`'s `authorized_keys`: `restrict,command="/usr/local/bin/site-deploy" <isoca_deploy.pub>`;
