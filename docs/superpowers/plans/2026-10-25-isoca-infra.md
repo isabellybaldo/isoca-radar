@@ -260,7 +260,8 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
   `permissions: contents: read`; no `environment` here (GitHub refuses it on a calling job; the called job
   sets it); no `secrets:` block is needed;
   `uses: isabellybaldo/isoca-infra/.github/workflows/deploy-static.yml@<isoca-infra commit sha>` with
-  `site: radar`, `artifact: radar-site`, `url: https://radar.isoca.space/`; `secrets: inherit`.
+  `site: radar`, `artifact: radar-site`, `url: ${{ vars.DEPLOY_URL || 'https://radar.isoca.space/' }}` (runbook 2
+  points the smoke check at new.isoca.space with a repo variable until DNS moves, then deletes the variable).
   (The SHA is isoca-infra's final local `main` commit, which the owner pushes unchanged. Run this task after
   Tasks 1–5 and 7. The branch is left for the owner to push and merge after the box is up.)
 
@@ -277,7 +278,7 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
 1. Hostinger DNS: export/screenshot the zone; lower TTL to 300 on `@`, `www`, `radar`; add
    `A new.isoca.space → $VPS_IP`. Wait one old TTL.
 2. `dig +short new.isoca.space` → `$VPS_IP`. **STOP**
-3. Owner merges the Task 6 PR → the `portfolio` run on `main` deploys; its `deploy` job ends with
+3. `gh variable set DEPLOY_URL -R isabellybaldo/isoca-radar -b https://new.isoca.space/`. Owner merges the Task 6 PR → the `portfolio` run on `main` deploys; its `deploy` job ends with
    `deployed radar …`.
 4. `curl -sI https://new.isoca.space/` → 200, valid certificate (`curl -v` shows Let's Encrypt), headers
    (HSTS, CSP, nosniff); `/math` and `/sweet` 200; `/frozen/public.json` 200 JSON; `/nope` 404. **STOP**
@@ -291,7 +292,7 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
    `ClientHost` is the PC's public address, not a Docker gateway; **STOP** if not; `curl -sI https://radar.isoca.space/` → 200 with a valid cert;
    `curl -sI https://isoca.space/foo` → 302 `location: https://isabellybaldo.github.io/foo`; same for
    `www`.
-8. Rollback drill: run `rollback.yml` with `site: radar` → `rolled back`; site still 200; re-run the last
+8. `gh variable delete DEPLOY_URL -R isabellybaldo/isoca-radar`. Rollback drill: run `rollback.yml` with `site: radar` → `rolled back`; site still 200; re-run the last
    `portfolio` deploy → `deployed`.
 9. Remove `radar-test` (new.isoca.space) from `edge/dynamic/radar.yml` in a commit (owner pushes → the
    `edge-config` workflow applies it) and the DNS record; raise TTLs back to 3600.
