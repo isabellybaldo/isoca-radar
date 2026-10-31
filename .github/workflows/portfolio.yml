@@ -10,19 +10,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
       - run: rustup target add wasm32-unknown-unknown
       - id: wbg
         # the CLI must equal the wasm-bindgen crate Cargo.lock pins (same as ci.yml's web job)
         run: echo "version=$(sh scripts/wasm-bindgen-version.sh)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/wasm-bindgen
           key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}
       - run: command -v wasm-bindgen || cargo install wasm-bindgen-cli --locked --version "${{ steps.wbg.outputs.version }}"
       - run: sh scripts/build-wasm.sh
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -31,10 +31,22 @@ jobs:
         working-directory: web
       - run: npm run build:portfolio
         working-directory: web
-      # the deploy job (a later plan) downloads this artifact
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      # the deploy job below hands this artifact to isoca-infra, whose job downloads it
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: radar-site
           path: web/dist-portfolio
           retention-days: 7
           if-no-files-found: error
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+    # the called job sets environment: production itself, so the secrets come from this repo's production environment
+    uses: isabellybaldo/isoca-infra/.github/workflows/deploy-static.yml@de0a48e1a841b422f8cef22c26371e6e3dca1e29 # isoca-infra main
+    with:
+      site: radar
+      artifact: radar-site
+      # a repo variable points the smoke check at new.isoca.space until DNS moves; delete it afterwards
+      url: ${{ vars.DEPLOY_URL || 'https://radar.isoca.space/' }}

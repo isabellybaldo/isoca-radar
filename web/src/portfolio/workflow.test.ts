@@ -48,4 +48,44 @@ describe('portfolio workflow (frozen site, Task 5)', () => {
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
   });
+
+  it('is on the Node 24 majors: checkout v7, cache v6, setup-node v7, upload-artifact v7', () => {
+    const want: Record<string, string> = {
+      'actions/checkout': 'v7',
+      'actions/cache': 'v6',
+      'actions/setup-node': 'v7',
+      'actions/upload-artifact': 'v7',
+    };
+    for (const [name, major] of Object.entries(want)) {
+      const l = yml.split('\n').find((x) => x.includes(`${name}@`));
+      expect(l, name).toBeDefined();
+      expect(l, name).toMatch(new RegExp(`@[0-9a-f]{40} # ${major}[.][0-9]+[.][0-9]+$`));
+    }
+  });
+
+  describe('deploy job', () => {
+    const at = yml.indexOf('\n  deploy:\n');
+    const deploy = yml.slice(at);
+
+    it('comes after build, needs it, and runs only on main and not for pull requests', () => {
+      expect(at).toBeGreaterThan(yml.indexOf('\n  build:\n'));
+      expect(deploy).toMatch(/^ {4}needs: build$/m);
+      expect(deploy).toMatch(/^ {4}if: github\.ref == 'refs\/heads\/main' && github\.event_name != 'pull_request'$/m);
+      expect(deploy).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
+    });
+
+    it('sets no environment and passes no secrets (the called job owns the environment)', () => {
+      expect(deploy).not.toMatch(/^\s*environment:/m);
+      expect(deploy).not.toMatch(/^\s*secrets:/m);
+    });
+
+    it('calls isoca-infra deploy-static pinned to a 40-hex SHA with site, artifact and url', () => {
+      expect(deploy).toMatch(
+        /^ {4}uses: isabellybaldo\/isoca-infra\/\.github\/workflows\/deploy-static\.yml@[0-9a-f]{40} # .+$/m,
+      );
+      expect(deploy).toMatch(/^ {6}site: radar$/m);
+      expect(deploy).toMatch(/^ {6}artifact: radar-site$/m);
+      expect(deploy).toContain("url: ${{ vars.DEPLOY_URL || 'https://radar.isoca.space/' }}");
+    });
+  });
 });
