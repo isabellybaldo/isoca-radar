@@ -239,7 +239,7 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
     `claude`'s: its key, no restriction.
 14. From the PC: `ssh -i isoca_deploy deploy@… "bogus"` → `refused`; `ssh -i isoca_deploy deploy@… ls` →
     `refused` (no shell); `ssh -i isoca_claude claude@… id` → no sudo/docker groups.
-15. `docker compose -f /srv/isoca-infra/edge/compose.yml up -d`; `docker compose ps` healthy;
+15. `docker compose -f /srv/isoca-infra/edge/compose.yml up -d`; `docker compose ps`: nginx `healthy`, traefik `Up`;
     `curl -sI http://localhost` → 308/301 to https.
 16. GitHub (owner, browser): environment `production` in `isoca-radar` and `isoca-infra`, each with
     `DEPLOY_SSH_KEY` (isoca_deploy private), `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_KNOWN_HOSTS`
@@ -285,7 +285,10 @@ Steps the owner runs (each command → expected → if not; STOP where marked):
    clean (CSP).
 6. DNS: `@`, `www`, `radar` A records → `$VPS_IP`; delete records for the dropped tenants (humor-do-dia,
    webappexample, apiexample, whoami) after listing them.
-7. `dig` all three → `$VPS_IP`; `curl -sI https://radar.isoca.space/` → 200 with a valid cert;
+7. `dig` all three → `$VPS_IP`; `dig AAAA` for all three → empty (delete any AAAA record: Docker's userland
+   proxy would hide IPv6 clients' addresses and merge them into one rate-limit bucket);
+   from the PC `curl -s https://radar.isoca.space/ -o /dev/null`, then on the box the Traefik access log's
+   `ClientHost` is the PC's public address, not a Docker gateway; **STOP** if not; `curl -sI https://radar.isoca.space/` → 200 with a valid cert;
    `curl -sI https://isoca.space/foo` → 302 `location: https://isabellybaldo.github.io/foo`; same for
    `www`.
 8. Rollback drill: run `rollback.yml` with `site: radar` → `rolled back`; site still 200; re-run the last
