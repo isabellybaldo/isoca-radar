@@ -63,3 +63,7 @@ Only `/math` (with its assets and its snapshot file) is public, with no login; e
 Deploys follow the runbooks in `docs/superpowers/runbooks/`.
 
 Copy `.env.example` to `.env` first. See [PROJECT.md](PROJECT.md) for status and roadmap.
+
+## AI disclosure
+
+**AI disclosure.** This project was built with Claude Code, Anthropic's AI coding agent, which wrote most of the code, tests, and docs. I chose what to build, made the design calls and approved the results, and I'm responsible for what's here.
