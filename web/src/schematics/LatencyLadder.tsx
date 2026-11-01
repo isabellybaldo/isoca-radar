@@ -6,7 +6,7 @@ import { Fold } from '../components/Fold';
 import { Money } from '../components/Money';
 import { SweetLadderGrid } from '../components/SweetLadderGrid';
 import {
-  type LadderModel, MIN_EXEC, NOT_MONOTONE, NO_MARK_YET, NO_RUNGS, type Rung, SLOTS, asOfText, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
+  type LadderModel, MIN_BAND, MIN_EXEC, NOT_MONOTONE, NO_MARK_YET, NO_RUNGS, type Rung, SLOTS, asOfText, breakEvenSpan, breakEvenText, epochText, extraText, latencyX, rungCountText, rungMsText,
   slotX, stackRung, usBand, usText, yDomain,
 } from '../lib/ladder';
 
@@ -16,7 +16,7 @@ export const AXIS_TITLE = 'ms from the exchange showing the edge to our order ma
 /** Spec §17: the bars are since the epoch start; the fold is per trade attempt over 30 days, across epochs. */
 export const MARKETS_CAPTION = 'Sweet spots: per trade attempt over the last 30 days, across epochs. Not the same number as the bars above.';
 export const MARKETS_WARMING = 'warming: part of the 30 days is still being filled.';
-export const MARKETS_WARMING_FROZEN = 'the 30-day window never filled: capture stopped on 2026-10-19.';
+export const MARKETS_WARMING_FROZEN = 'Capture ended on 2026-10-19, before the 30 days filled: the host began limiting the server’s CPU, so the scanner was switched off.';
 export const MARKETS_RECOMPUTING = 'recomputing after the ladder';
 export const MARKETS_MISSING = 'no markets data';
 /** The sentence lives with the model's other words (lib/ladder.ts: it is also the headline's line when no rung is marked). */
@@ -26,6 +26,8 @@ export { NO_RUNGS };
 export const NO_ACCOUNT_MARK = '–';
 export const NO_ACCOUNT_LEGEND = 'dashed box: no account at this latency';
 export const TABLE_CAPTION = 'on paper, since the epoch start, every sum cut at the same mark';
+/** Ties the table's account names to the drawing's latencies. */
+export const RUNG_NAMES = 'rung-25 is the account at 25 ms. colo-idle is a server beside the exchange, sp-idle one in São Paulo.';
 
 const W = 700;
 const H = 200;
@@ -57,6 +59,7 @@ function LadderTable({ rungs }: { rungs: Rung[] }) {
   if (rungs.length === 0) return <Empty text={NO_RUNGS} />;
   return (
     <div className="scroll">
+      <p className="dim">{RUNG_NAMES}</p>
       <table>
         <caption className="dim">{TABLE_CAPTION}</caption>
         <thead>
@@ -69,7 +72,7 @@ function LadderTable({ rungs }: { rungs: Rung[] }) {
         <tbody>
           {rungs.map((r) => (
             <tr key={r.scenario}>
-              <td>{r.scenario}</td>
+              <td>{r.latency_ms === null ? r.scenario : `${r.scenario} · ${r.latency_ms} ms`}</td>
               <td className="num">{r.n_exec}</td>
               <td className="num">{r.n_leg_risk}</td>
               <td className="num">{r.n_missed}</td>
@@ -89,8 +92,8 @@ function LadderTable({ rungs }: { rungs: Rung[] }) {
 /**
  * Spec 7a §7.2, "at what latency would this pay?": one stacked bar per rung on an ordinal axis (basket
  * gains up, leg-risk cost down, settle and unrealized by their sign, unrealized hatched), a net dot,
- * the zero line, the "us" band (stopped before the extras' slot), the extras as squares beside the 300 ms rung, and the break-even line. The one big
- * number is the break-even; every other label is HTML beside the SVG (preserveAspectRatio="none").
+ * the zero line, the "us" band (stopped before the extras' slot), the extras as squares beside the 300 ms rung, and the break-even band between its two rungs. The one big
+ * answer is the break-even; every other label is HTML beside the SVG (preserveAspectRatio="none").
  * Pure: it draws `model` and never fetches.
  */
 export function LatencyLadder({ model }: { model: LadderModel }) {
@@ -102,7 +105,7 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
   const be = breakEvenText(model);
   const thin = model.breakEven.kind === 'thin';
   const band = model.measured ? usBand(model.measured) : null;
-  const beX = model.breakEven.kind === 'at' ? latencyX(model.breakEven.latency_ms) * W : null;
+  const beSpan = model.breakEven.kind === 'at' ? breakEvenSpan(model.breakEven.latency_ms) : null;
   // The dashed box needs its legend only beside a drawn rung. With no rung at all (no epoch yet) the big line
   // already says why, and "no account at this latency" under every slot would say it of the whole ladder.
   const someMissing = present.length > 0 && model.columns.some((c) => c.kind === 'missing');
@@ -122,6 +125,15 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           </pattern>
         </defs>
         {band && <rect className="ll-us" x={band.x0 * W} y={0} width={(band.x1 - band.x0) * W} height={H} />}
+        {beSpan && (
+          <rect
+            className="ll-be"
+            x={latencyX(beSpan.lo) * W}
+            y={1}
+            width={Math.max((latencyX(beSpan.hi) - latencyX(beSpan.lo)) * W, MIN_BAND * W)}
+            height={H - 2}
+          />
+        )}
         {model.columns.map((c, i) => {
           const cx = slotX(i) * W;
           if (c.kind === 'missing') {
@@ -152,7 +164,6 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
           return <line key={r.scenario} className="ll-extra" data-scenario={r.scenario} x1={cx} x2={cx} y1={y} y2={y} />;
         })}
         <line className="ll-zero" x1={0} x2={W} y1={zero} y2={zero} />
-        {beX !== null && <line className="ll-be" x1={beX} x2={beX} y1={0} y2={H} />}
       </svg>
       <ol className="ll-axis" aria-label="rungs">
         {model.columns.map((c) => (
@@ -181,10 +192,12 @@ export function LatencyLadder({ model }: { model: LadderModel }) {
             {text}
           </li>
         ))}
-        <li>
-          <span className="ll-sw us" aria-hidden="true" />
-          {usText(model.measured)}
-        </li>
+        {model.measured && (
+          <li>
+            <span className="ll-sw us" aria-hidden="true" />
+            {usText(model.measured)}
+          </li>
+        )}
         {someMissing && (
           <li>
             <span className="ll-sw missing" aria-hidden="true" />

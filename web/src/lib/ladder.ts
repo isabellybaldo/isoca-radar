@@ -190,14 +190,25 @@ const THIN: Record<ThinReason, BreakEvenText> = {
 
 export const NOT_MONOTONE = 'The sign changes more than once along the ladder; this is the first change.';
 
-/** The one big number (spec §7.2) and its line: "pays on paper" / "loses on paper", never "profitable". */
+/** The two rungs a break-even lies between: only they were measured, the point between them is interpolated.
+ *  A break-even the api rounded onto a rung is that one latency, lo === hi. */
+export function breakEvenSpan(ms: number): { lo: number; hi: number } {
+  for (let i = 0; i < LADDER.length - 1; i++) {
+    const lo = LADDER[i].latency_ms;
+    const hi = LADDER[i + 1].latency_ms;
+    if (ms > lo && ms < hi) return { lo, hi };
+  }
+  return { lo: ms, hi: ms };
+}
+
+/** The one big answer (spec §7.2) and its line: "pays on paper" / "loses on paper", never "profitable". */
 export function breakEvenText(m: LadderModel): BreakEvenText {
   const be = m.breakEven;
   if (be.kind === 'at') {
-    return {
-      big: `≈ ${be.latency_ms} ms`,
-      line: be.direction === 'loses_beyond' ? 'Pays on paper below it, loses on paper beyond it.' : 'Loses on paper below it, pays on paper beyond it.',
-    };
+    const { lo, hi } = breakEvenSpan(be.latency_ms);
+    const [below, beyond] = be.direction === 'loses_beyond' ? ['Pays', 'loses'] : ['Loses', 'pays'];
+    if (lo === hi) return { big: `≈ ${be.latency_ms} ms`, line: `${below} on paper below it, ${beyond} on paper beyond it.` };
+    return { big: `${lo} to ${hi} ms`, line: `${below} on paper at ${lo} ms, ${beyond} on paper at ${hi} ms. No account ran in between.` };
   }
   if (be.kind === 'all') return { big: 'pays at every rung', line: 'Pays on paper at every latency on the ladder.' };
   if (be.kind === 'none') return { big: 'none', line: 'Loses on paper at every latency on the ladder.' };
@@ -234,6 +245,6 @@ export function usText(m: { latency_ms: number } | null): string {
 export function extraText(r: Rung): string {
   const ms = r.latency_ms === null ? '?' : String(r.latency_ms);
   if (r.scenario === 'sp-burst') return `sp-burst (${ms} ms idle, more in bursts)`;
-  if (r.scenario === 'sp-idle-nodelay') return `sp-idle-nodelay (${ms} ms, secondsDelay ignored)`;
+  if (r.scenario === 'sp-idle-nodelay') return `sp-idle-nodelay (${ms} ms, market order delay ignored)`;
   return `${r.scenario} (${ms} ms)`;
 }

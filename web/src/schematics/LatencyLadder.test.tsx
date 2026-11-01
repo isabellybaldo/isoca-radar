@@ -4,7 +4,7 @@ import type { Ladder, LadderRung, SweetRow } from '../api/types';
 import { LADDER, type LadderIn, NOT_MONOTONE, type Rung, SLOTS, ladderModel, slotX } from '../lib/ladder';
 import type { GridRow } from '../lib/sweet';
 import { ladderFixture, ladderLiveFixture } from '../test/fixtures';
-import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING, NO_ACCOUNT_LEGEND, NO_ACCOUNT_MARK } from './LatencyLadder';
+import { LADDER_CAPTION, LatencyLadder, MARKETS_CAPTION, MARKETS_MISSING, MARKETS_RECOMPUTING, MARKETS_WARMING, NO_ACCOUNT_LEGEND, NO_ACCOUNT_MARK, RUNG_NAMES } from './LatencyLadder';
 
 const W = 700;
 const draw = (o: Partial<Ladder> = {}) => render(<LatencyLadder model={ladderModel(ladderFixture(o))} />);
@@ -16,11 +16,11 @@ const shown = (li: HTMLElement) => [...li.children].filter((c) => !c.classList.c
 describe('LatencyLadder', () => {
   it('says the break-even big, marks it between its two rungs, and labels every rung in HTML', () => {
     const { container } = draw();
-    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big');
-    expect(screen.getByText('Pays on paper below it, loses on paper beyond it.')).toBeInTheDocument();
-    const be = container.querySelector('line.ll-be');
-    expect(num(be, 'x1')).toBeGreaterThan(slotX(2) * W);
-    expect(num(be, 'x1')).toBeLessThan(slotX(3) * W);
+    expect(screen.getByText('52 to 100 ms')).toHaveClass('ll-big');
+    expect(screen.getByText('Pays on paper at 52 ms, loses on paper at 100 ms. No account ran in between.')).toBeInTheDocument();
+    const be = container.querySelector('rect.ll-be'); // a band across the two measured rungs, never a point between them
+    expect(num(be, 'x')).toBeCloseTo(slotX(2) * W);
+    expect(num(be, 'x') + num(be, 'width')).toBeCloseTo(slotX(3) * W);
     expect(rungItems().map((li) => li.firstChild?.textContent)).toEqual(['0', '25', '52', '100', '200', '300', 'extras']);
     expect(rungItems().slice(0, 6).map((li) => li.lastChild?.textContent)).toEqual(['40', '40', '40', '40', '40', '40']);
     expect(screen.getByText('as of 21:14 UTC')).toBeInTheDocument();
@@ -57,7 +57,7 @@ describe('LatencyLadder', () => {
     expect(screen.getByText(/^sp-burst \(450 ms idle, more in bursts\):/)).toHaveTextContent('sp-burst (450 ms idle, more in bursts): −$80.10 on paper · n 40');
   });
 
-  it('puts the us-band between the right rungs and names it; without a measurement there is no band', () => {
+  it('puts the us-band between the right rungs and names it; without a measurement there is no band and no legend row', () => {
     const { container, unmount } = draw();
     const us = container.querySelector('rect.ll-us');
     expect(num(us, 'x')).toBeGreaterThan(slotX(4) * W);
@@ -67,7 +67,7 @@ describe('LatencyLadder', () => {
     unmount();
     const r = draw({ measured: null });
     expect(r.container.querySelector('rect.ll-us')).toBeNull();
-    expect(screen.getByText('us: not measured yet')).toBeInTheDocument();
+    expect(screen.queryByText(/^us\b/)).toBeNull(); // nothing drawn, so no legend row
   });
 
   it('keeps the us-band out of the extras slot and never lets it collapse (carry-forward from Task 2)', () => {
@@ -85,7 +85,7 @@ describe('LatencyLadder', () => {
     for (const [be, big] of [
       [{ kind: 'all' }, 'pays at every rung'],
       [{ kind: 'none' }, 'none'],
-      [{ kind: 'at', latency_ms: 40, direction: 'pays_beyond', not_monotone: true }, '≈ 40 ms'],
+      [{ kind: 'at', latency_ms: 40, direction: 'pays_beyond', not_monotone: true }, '25 to 52 ms'],
     ] as const) {
       const r = draw({ break_even: be });
       expect(screen.getByText(big)).toHaveClass('ll-big');
@@ -93,8 +93,8 @@ describe('LatencyLadder', () => {
     }
     const { container } = draw({ break_even: { kind: 'at', latency_ms: 40, direction: 'pays_beyond', not_monotone: true } });
     expect(screen.getByText(NOT_MONOTONE)).toBeInTheDocument();
-    expect(screen.getByText('Loses on paper below it, pays on paper beyond it.')).toBeInTheDocument();
-    expect(container.querySelector('line.ll-be')).not.toBeNull();
+    expect(screen.getByText('Loses on paper at 25 ms, pays on paper at 52 ms. No account ran in between.')).toBeInTheDocument();
+    expect(container.querySelector('rect.ll-be')).not.toBeNull();
   });
 
   it('thin: "too few trades yet", each rung n/30, extras still drawn', () => {
@@ -102,7 +102,7 @@ describe('LatencyLadder', () => {
     expect(screen.getByText('too few trades yet')).toHaveClass('ll-big');
     expect(rungItems().slice(0, 6).map((li) => li.lastChild?.textContent)).toEqual(['2 / 30', '2 / 30', '1 / 30', '1 / 30', '0 / 30', '0 / 30']);
     expect(screen.getByText('as of 20:09 UTC')).toBeInTheDocument();
-    expect(container.querySelector('line.ll-be')).toBeNull();
+    expect(container.querySelector('rect.ll-be')).toBeNull();
     expect(container.querySelectorAll('line.ll-extra')).toHaveLength(2);
   });
 
@@ -244,6 +244,8 @@ describe('LatencyLadder', () => {
     expect(nums.open).toBe(false);
     expect(within(nums).getAllByRole('row')).toHaveLength(9); // header + 6 rungs + 2 extras
     expect(within(nums).getByText(/^on paper, since the epoch start/)).toBeInTheDocument();
+    expect(within(nums).getByText('colo-idle · 52 ms')).toBeInTheDocument(); // the table's names, tied to the drawing's latencies
+    expect(within(nums).getByText(RUNG_NAMES)).toBeInTheDocument();
     expect(screen.getAllByText('−$80.10')).toHaveLength(2); // extras line + the numbers fold
   });
 });
@@ -266,7 +268,7 @@ describe('LatencyLadder on the public snapshot (spec 7b §7.2)', () => {
     const l = ladderFixture();
     const input: LadderIn = { ...l, measured: { latency_ms: 155 }, rungs: l.rungs.map(noAccount), markets: l.markets.map(gridOnly) };
     const { container } = render(<LatencyLadder model={ladderModel(input)} />);
-    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big');
+    expect(screen.getByText('52 to 100 ms')).toHaveClass('ll-big');
     expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
     expect(container.querySelectorAll('line.ll-extra')).toHaveLength(2);
     expect(within(screen.getByRole('list', { name: 'extras' })).getAllByRole('listitem')).toHaveLength(2);

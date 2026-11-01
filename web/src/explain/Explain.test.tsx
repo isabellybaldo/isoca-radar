@@ -52,7 +52,7 @@ describe('the explain panel shell (spec 7a §9.1)', () => {
     expect(tab()).toHaveAttribute('aria-expanded', 'true');
     expect(panel()).toHaveFocus();
     expect(localStorage.getItem('explain:open')).toBe('1');
-    expect(await within(panel()).findByText('≈ 70 ms')).toBeInTheDocument();
+    expect(await within(panel()).findByText('52 to 100 ms')).toBeInTheDocument();
   });
 
   it('Escape closes it and returns focus to the tab; so does the close button', () => {

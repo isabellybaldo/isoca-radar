@@ -103,7 +103,7 @@ export function EpisodeSection({ engine }: { engine: Engine }) {
             <Range key={k} label={label} min={0} max={1000} value={st.sc[k]} show={`${st.sc[k]} ms`} onChange={(v) => setSt((s) => ({ ...s, sc: { ...s.sc, [k]: v } }))} />
           ))}
           <Range label="updates so far" min={2} max={EPISODE_T.length} value={st.upto} show={`u1–u${st.upto}`} onChange={(upto) => setSt((s) => ({ ...s, upto }))} />
-          <Check label="the market has a 1 s secondsDelay" checked={st.delay} onChange={(delay) => setSt((s) => ({ ...s, delay }))} />
+          <Check label="the market holds orders for 1 s (secondsDelay)" checked={st.delay} onChange={(delay) => setSt((s) => ({ ...s, delay }))} />
         </>
       }
     >

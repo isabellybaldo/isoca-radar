@@ -352,14 +352,14 @@ describe('LiveLadder (spec 7b §6.2 f)', () => {
     const s = snapshotFixture({}, Date.UTC(2026, 8, 30, 14, 5));
     render(<LiveLadder snap={s} stale={false} />);
     expect(screen.getByRole('heading', { name: 'on the live scanner, as of 14:05 UTC' })).toBeInTheDocument();
-    expect(screen.getByText('≈ 70 ms')).toBeInTheDocument();
+    expect(screen.getByText('52 to 100 ms')).toBeInTheDocument();
   });
 
   it('says it is behind when stale, and draws the same ladder', () => {
     const s = snapshotFixture({}, Date.UTC(2026, 8, 30, 11, 0));
     render(<LiveLadder snap={s} stale />);
     expect(screen.getByRole('heading', { name: `on the live scanner, as of 2026-09-30 11:00 UTC: ${BEHIND}` })).toBeInTheDocument();
-    expect(screen.getByText('≈ 70 ms')).toBeInTheDocument();
+    expect(screen.getByText('52 to 100 ms')).toBeInTheDocument();
   });
 
   it('draws the sample the api writes with one heading of its own', () => {

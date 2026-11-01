@@ -74,7 +74,7 @@ export function accountFixture(o: Partial<PaperAccount> = {}): PaperAccount {
 export function positionFixture(o: Partial<Position> = {}): Position {
   return {
     account_id: 'P3-naive/sp-idle', market_id: 'm1', outcome: 'yes', qty: '40', basis: '18', returned: false,
-    event_title: 'Fed decision in October?', end_date: '2026-10-31',
+    event_title: 'Fed decision in October?', end_date: '2036-10-31',
     ...o,
   };
 }

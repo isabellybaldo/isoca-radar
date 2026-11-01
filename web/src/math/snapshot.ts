@@ -164,7 +164,7 @@ function readHour(x: unknown): { hour: number; arb: number } | null {
 /** `measured` is null or `{ latency_ms: <number> }`; any other shape is refused (undefined). The api's
  *  latency is a signed integer (bins/api/src/public.rs, i64) built from the feed lag, our clock against the
  *  exchange's stamp, so clock skew can make it negative. A negative or fractional number is no measurement the ladder can place: it reads
- *  as null ("us: not measured yet", no band) instead of costing the visitor the whole snapshot. */
+ *  as null (no band, no legend row) instead of costing the visitor the whole snapshot. */
 function readMeasured(m: unknown): { latency_ms: number } | null | undefined {
   if (m === null) return null;
   if (!isObj(m) || typeof m.latency_ms !== 'number') return undefined;
