@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Fold } from '../components/Fold';
-import { FROZEN_LINE, isFrozen } from '../frozenMode';
+import { FINDING, FROZEN_LINE, isFrozen } from '../frozenMode';
 import type { Engine } from '../wasm/types';
 import { ENGINE_FAILED, FOOTER, FOOTER_FROZEN, HOME_LINK, LOADING, TITLE } from './copy';
 import { LiveBoundary } from './LiveBoundary';
@@ -103,6 +103,7 @@ export function MathPage({ engine, now }: { engine: Promise<Engine>; now?: () =>
         {frozen && <p className="dim">{FROZEN_LINE}</p>}
       </header>
       <main className="body m-body">
+        {frozen && <p className="m-tag"><strong>{FINDING}</strong></p>}
         <p className="m-tag">{frozen ? HOOK_FROZEN : HOOK}</p>
         {eng.kind === 'loading' && <p className="dim" role="status">{LOADING}</p>}
         {eng.kind === 'failed' && <p className="error" role="alert">{ENGINE_FAILED}</p>}

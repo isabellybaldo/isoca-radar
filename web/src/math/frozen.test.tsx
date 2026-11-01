@@ -2,7 +2,7 @@
 // behind, live or private. Timers are faked and settle() flushes them, as in MathPage.test.tsx.
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FROZEN_LINE, frozenOn } from '../frozenMode';
+import { FINDING, FROZEN_LINE, frozenOn } from '../frozenMode';
 import { jsonResponse, mockApi } from '../test/mockApi';
 import { settle } from '../test/settle';
 import { describeWasm, loadTestEngine } from '../wasm/testEngine';
@@ -67,6 +67,13 @@ describe('/math in frozen mode', () => {
     const text = pageText();
     expect(text).toContain(FROZEN_LINE);
     expect(text).toContain(frozenOn());
+    // the takeaway comes before the hook, and the break-even is the two rungs measured, not a point between them
+    expect(text.indexOf(FINDING)).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf(FINDING)).toBeLessThan(text.indexOf(HOOK_FROZEN));
+    expect(screen.getByText('0 to 25 ms')).toHaveClass('ll-big');
+    expect(text).not.toContain('≈ 5 ms');
+    expect(text).not.toContain('not measured yet');
+    expect(text).not.toContain('never filled');
     for (const w of [BEHIND, LIVE_UNAVAILABLE, ...OLD_WORDS]) expect(text, w).not.toContain(w);
     expect(text).toContain(MARKETS_WARMING_FROZEN);
     expect(text).toContain(HOOK_FROZEN);

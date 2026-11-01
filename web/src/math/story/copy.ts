@@ -52,13 +52,13 @@ export const CHAPTERS: readonly ChapterCopy[] = [
   },
   {
     n: 7, id: 's7', question: 'So does it pay?',
-    lead: 'The live scanner keeps six paper accounts that differ only in latency, from the fastest rung to the slowest, and settles every trade by the rules of chapter 6.',
+    lead: 'The live scanner keeps six paper accounts that differ only in latency: the six rungs of a ladder, fastest to slowest. They start together from one clean slate, an epoch, and settle every trade by the rules of chapter 6.',
     switchLabel: '', options: null,
   },
 ];
 
 export const CH7_LEAD_FROZEN =
-  'The scanner kept six paper accounts that differed only in latency, from the fastest rung to the slowest, and settled every trade by the rules of chapter 6. Here they are as they stood on 2026-10-19.';
+  'The scanner kept six paper accounts that differed only in latency: the six rungs of a ladder, fastest to slowest. They started together from one clean slate, an epoch, and settled every trade by the rules of chapter 6. Here they are as they stood on 2026-10-19, when the host began limiting the server’s CPU and capture ended early.';
 
 export const TAKE = {
   ch1: (crossed: boolean) =>
@@ -105,4 +105,7 @@ export const WORDS: readonly (readonly [string, string])[] = [
   ['convert', 'turning a NO basket back into cash at the exchange.'],
   ['on the table', 'an edge the books show right now, before any order.'],
   ['on paper', 'what a simulated account would have gained or lost; no order was sent.'],
+  ['rung', 'one paper account on the latency ladder; rung-25 is the one at 25 ms.'],
+  ['epoch', 'one run of the paper accounts from a clean slate.'],
+  ['secondsDelay', 'a market’s own hold on an incoming order, in seconds.'],
 ];

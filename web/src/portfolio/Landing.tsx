@@ -1,3 +1,4 @@
+import { FINDING } from '../frozenMode';
 import { RunCost } from '../schematics/RunCost';
 
 /** Frozen-site plan, task 4: the landing. Copy is the plan's, verbatim; the cost section is `#cost` because
@@ -12,6 +13,7 @@ export function Landing() {
           baskets whose prices added up to less than a dollar, and paper-traded them at six latencies. Paper only: it
           never placed an order.
         </p>
+        <p className="pf-lead"><strong>{FINDING}</strong></p>
       </div>
       <div className="grid2">
         <section className="box pf-card">

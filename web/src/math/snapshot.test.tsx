@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { ladderModel, usText } from '../lib/ladder';
+import { ladderModel } from '../lib/ladder';
 import { LatencyLadder } from '../schematics/LatencyLadder';
 import sampleText from './__fixtures__/public.sample.json?raw';
 import { snapshotFixture } from './fixtures';
@@ -194,22 +194,21 @@ describe('publicToLadder (spec 7b §7.2)', () => {
     expect(l.measured).toEqual({ latency_ms: 155 });
     expect(JSON.stringify(l)).not.toContain('host');
     const { container } = render(<LatencyLadder model={ladderModel(l)} />);
-    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big');
+    expect(screen.getByText('52 to 100 ms')).toHaveClass('ll-big');
     expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
     expect(screen.getByText('us (measured ≈155 + matching)')).toBeInTheDocument();
     expect(error).not.toHaveBeenCalled();
   });
 
-  it('a snapshot whose measured latency is negative draws the ladder with no us-band and says it is not measured', () => {
+  it('a snapshot whose measured latency is negative draws the ladder with no us-band and no legend row', () => {
     const b = snapshotFixture();
     const s = parseSnapshot(json({ ...b, ladder: { ...b.ladder, measured: { latency_ms: -153 } } }));
     if (s === null) throw new Error('a negative measured latency must not refuse the snapshot');
     const { container } = render(<LatencyLadder model={ladderModel(publicToLadder(s.ladder))} />);
     expect(container.querySelector('rect.ll-us')).toBeNull();
-    expect(screen.getByText(usText(null))).toBeInTheDocument();
-    expect(usText(null)).toBe('us: not measured yet');
+    expect(screen.queryByText(/^us\b/)).toBeNull();
     expect(container.textContent).not.toMatch(/153|measured ≈/);
-    expect(screen.getByText('≈ 70 ms')).toHaveClass('ll-big'); // the rest of the ladder stands
+    expect(screen.getByText('52 to 100 ms')).toHaveClass('ll-big'); // the rest of the ladder stands
     expect(container.querySelectorAll('circle.ll-net')).toHaveLength(6);
   });
 });

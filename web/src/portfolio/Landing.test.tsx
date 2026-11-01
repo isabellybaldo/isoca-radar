@@ -1,7 +1,7 @@
 // Frozen-site plan, task 4: the landing, in the portfolio shell. Exact copy; "live" only in the cost heading.
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { FROZEN_LINE } from '../frozenMode';
+import { FINDING, FROZEN_LINE } from '../frozenMode';
 import { Landing } from './Landing';
 import { Shell } from './Shell';
 
@@ -19,6 +19,7 @@ describe('Landing', () => {
     expect(cost.closest('section')).toHaveAttribute('id', 'cost');
     expect(screen.getByRole('img')).toBeInTheDocument();
     expect(screen.getByText(FROZEN_LINE)).toBeInTheDocument();
+    expect(screen.getByText(FINDING)).toBeInTheDocument();
   });
 
   it('the shell links home, to /math and to /sweet with plain links', () => {

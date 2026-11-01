@@ -152,10 +152,13 @@ describe('words', () => {
   it('says the break-even in every kind, with "pays on paper" / "loses on paper"', () => {
     const m = (be: BreakEven) => ladderModel(ladderFixture({ break_even: be }));
     expect(breakEvenText(m({ kind: 'at', latency_ms: 70, direction: 'loses_beyond' }))).toEqual({
-      big: '≈ 70 ms', line: 'Pays on paper below it, loses on paper beyond it.',
+      big: '52 to 100 ms', line: 'Pays on paper at 52 ms, loses on paper at 100 ms. No account ran in between.',
     });
     expect(breakEvenText(m({ kind: 'at', latency_ms: 40, direction: 'pays_beyond', not_monotone: true }))).toEqual({
-      big: '≈ 40 ms', line: 'Loses on paper below it, pays on paper beyond it.',
+      big: '25 to 52 ms', line: 'Loses on paper at 25 ms, pays on paper at 52 ms. No account ran in between.',
+    });
+    expect(breakEvenText(m({ kind: 'at', latency_ms: 25, direction: 'loses_beyond' }))).toEqual({
+      big: '≈ 25 ms', line: 'Pays on paper below it, loses on paper beyond it.',
     });
     expect(breakEvenText(m({ kind: 'all' }))).toEqual({ big: 'pays at every rung', line: 'Pays on paper at every latency on the ladder.' });
     expect(breakEvenText(m({ kind: 'none' }))).toEqual({ big: 'none', line: 'Loses on paper at every latency on the ladder.' });
@@ -175,6 +178,6 @@ describe('words', () => {
     expect(usText({ latency_ms: 155 })).toBe('us (measured ≈155 + matching)');
     expect(usText(null)).toBe('us: not measured yet');
     expect(extraText(ladderRung({ scenario: 'sp-burst', latency_ms: 450, extra: true }))).toBe('sp-burst (450 ms idle, more in bursts)');
-    expect(extraText(ladderRung({ scenario: 'sp-idle-nodelay', latency_ms: 300, extra: true }))).toBe('sp-idle-nodelay (300 ms, secondsDelay ignored)');
+    expect(extraText(ladderRung({ scenario: 'sp-idle-nodelay', latency_ms: 300, extra: true }))).toBe('sp-idle-nodelay (300 ms, market order delay ignored)');
   });
 });

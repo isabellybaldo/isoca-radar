@@ -285,7 +285,7 @@ ul.plain.lg-legend { gap: 2px; font-size: 13px; color: var(--dim); }
 .ll-svg .ll-missing { fill: none; stroke: var(--dim); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .ll-svg .ll-us { fill: var(--rose); opacity: 0.35; }
 .ll-svg .ll-zero { stroke: var(--fg); stroke-width: 1px; vector-effect: non-scaling-stroke; }
-.ll-svg .ll-be { stroke: var(--accent); stroke-width: 2px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ll-svg .ll-be { fill: var(--accent); fill-opacity: 0.18; stroke: var(--accent); stroke-width: 1px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .ll-axis { list-style: none; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; font-size: 12px; line-height: 1.3; }
 .ll-axis li { display: grid; min-width: 0; overflow-wrap: normal; }
 .ll-axis li.missing { color: var(--dim); }
